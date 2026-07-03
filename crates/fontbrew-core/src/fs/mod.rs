@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use fs2::FileExt;
 use tempfile::NamedTempFile;
@@ -22,6 +22,55 @@ pub fn write_atomically(path: &Path, content: &[u8]) -> Result<()> {
     sync_directory(parent)?;
 
     Ok(())
+}
+
+pub fn ensure_existing_path_does_not_cross_symlink(root: &Path, target: &Path) -> Result<()> {
+    let relative_path = target
+        .strip_prefix(root)
+        .map_err(|_| FontbrewError::PathResolution {
+            message: format!(
+                "path must stay under {}: {}",
+                root.display(),
+                target.display()
+            ),
+        })?;
+
+    reject_existing_symlink(root)?;
+
+    let mut current_path = root.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::Normal(name) => {
+                current_path.push(name);
+                reject_existing_symlink(&current_path)?;
+            }
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(FontbrewError::PathResolution {
+                    message: format!(
+                        "path contains an unsafe component under {}: {}",
+                        root.display(),
+                        target.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn reject_existing_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(FontbrewError::PathResolution {
+            message: format!("path must not cross a symlink: {}", path.display()),
+        }),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Debug)]

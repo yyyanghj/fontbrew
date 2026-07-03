@@ -9,6 +9,7 @@ use zip::{CompressionMethod, ZipArchive};
 use crate::{
     error::{FontbrewError, Result},
     fonts::FontFileFormat,
+    fs::ensure_existing_path_does_not_cross_symlink,
 };
 
 const DEFAULT_MAX_TOTAL_EXTRACTED_SIZE: u64 = 512 * 1024 * 1024;
@@ -62,6 +63,8 @@ impl ZipArchiveExtractor {
         let staging_dir = staging_dir.as_ref();
         let planned_fonts = self.plan_extraction(archive_path, staging_dir)?;
 
+        let staging_root = staging_dir.parent().unwrap_or(staging_dir);
+        ensure_existing_path_does_not_cross_symlink(staging_root, staging_dir)?;
         fs::create_dir_all(staging_dir)?;
 
         let file = File::open(archive_path)?;

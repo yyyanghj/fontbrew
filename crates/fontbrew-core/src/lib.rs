@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod fonts;
 pub mod fs;
+mod install;
 pub mod manifest;
 pub mod model;
 pub mod platform;
@@ -22,9 +23,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::{
-        FamilyName, FontFormat, FontbrewApp, FontbrewError, InfoReport, InfoRequest, InstallPlan,
-        InstallRequest, InstallSource, PackageId, PackageInfo, PackageVersion, PlannedChange,
-        ProviderKind,
+        platform::FontbrewPaths, FamilyName, FontFormat, FontbrewApp, FontbrewError, InfoReport,
+        InfoRequest, InstallPlan, InstallRequest, InstallSource, PackageId, PackageInfo,
+        PackageVersion, PlannedChange, ProviderKind,
     };
 
     fn package_id(id: &str) -> PackageId {
@@ -41,6 +42,8 @@ mod tests {
                 description: "install managed package".to_string(),
             }],
             risks: Vec::new(),
+            already_installed: false,
+            prepared: None,
         };
 
         let json = serde_json::to_value(&plan).expect("install plan should serialize");
@@ -111,20 +114,20 @@ mod tests {
 
     #[test]
     fn package_info_returns_an_info_report_shell() {
-        let app = FontbrewApp::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = FontbrewApp::with_paths(FontbrewPaths::for_tests(
+            temp.path().join("data"),
+            temp.path().join("config"),
+            temp.path().join("home"),
+        ));
         let request = InfoRequest {
             package_id: package_id("jetbrains-mono"),
         };
 
         let result: crate::Result<InfoReport> = app.package_info(request);
-        let error = result.expect_err("stub should fail");
+        let error = result.expect_err("missing package should fail");
 
-        assert!(matches!(
-            error,
-            FontbrewError::NotImplemented {
-                operation: "package_info"
-            }
-        ));
+        assert!(matches!(error, FontbrewError::Manifest { .. }));
     }
 
     #[test]

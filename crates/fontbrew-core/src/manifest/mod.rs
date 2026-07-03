@@ -7,6 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    activation::ActivationStrategy,
     error::{FontbrewError, Result},
     fs::write_atomically,
     FamilyName, PackageId, PackageVersion, ProviderKind,
@@ -53,7 +54,7 @@ pub struct ManifestPackageRecord {
     pub update_source: Option<ManifestSource>,
     pub families: Vec<FamilyName>,
     pub font_files: Vec<ManifestFontFileRecord>,
-    pub activation_artifacts: Vec<PathBuf>,
+    pub activation_artifacts: Vec<ManifestActivationArtifactRecord>,
     pub installed_at: String,
     pub active_version: Option<PackageVersion>,
 }
@@ -74,6 +75,14 @@ pub struct ManifestFontFileRecord {
     pub style: String,
     pub weight: u16,
     pub format: ManifestFontFileFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestActivationArtifactRecord {
+    pub path: PathBuf,
+    pub source_path: PathBuf,
+    pub strategy: ActivationStrategy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

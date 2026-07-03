@@ -1,8 +1,10 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use fontbrew_core::{
+    config::ActivationStrategy,
     manifest::{
-        ManifestFontFileFormat, ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
+        ManifestActivationArtifactRecord, ManifestFontFileFormat, ManifestPackageRecord,
+        ManifestSource, ManifestStore, ManifestV1,
     },
     FamilyName, FontbrewError, PackageId, PackageVersion, ProviderKind,
 };
@@ -28,7 +30,11 @@ fn package_record(id: &str, version: &str) -> ManifestPackageRecord {
             weight: 400,
             format: ManifestFontFileFormat::Ttf,
         }],
-        activation_artifacts: vec![PathBuf::from("activated/Inter-Regular.ttf")],
+        activation_artifacts: vec![ManifestActivationArtifactRecord {
+            path: PathBuf::from("activated/Inter-Regular.ttf"),
+            source_path: PathBuf::from("packages/inter/fonts/Inter-Regular.ttf"),
+            strategy: ActivationStrategy::Symlink,
+        }],
         installed_at: "2026-07-04T10:20:30Z".to_string(),
         active_version: Some(PackageVersion::new(version)),
     }
@@ -91,6 +97,10 @@ fn manifest_store_reads_and_writes_manifest_v1() {
             owner: "font-owner".to_string(),
             repo: "font-repo".to_string()
         })
+    );
+    assert_eq!(
+        package.activation_artifacts[0].source_path,
+        PathBuf::from("packages/inter/fonts/Inter-Regular.ttf")
     );
 }
 
@@ -167,6 +177,15 @@ fn manifest_source_json_shape_is_stable() {
     assert_eq!(json["source"]["Registry"]["id"], "inter");
     assert_eq!(json["updateSource"]["GitHub"]["owner"], "font-owner");
     assert_eq!(json["updateSource"]["GitHub"]["repo"], "font-repo");
+    assert_eq!(
+        json["activationArtifacts"][0]["path"],
+        "activated/Inter-Regular.ttf"
+    );
+    assert_eq!(
+        json["activationArtifacts"][0]["sourcePath"],
+        "packages/inter/fonts/Inter-Regular.ttf"
+    );
+    assert_eq!(json["activationArtifacts"][0]["strategy"], "Symlink");
 }
 
 #[test]

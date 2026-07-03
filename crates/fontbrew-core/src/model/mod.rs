@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::activation::{ActivationArtifact, ActivationStrategy};
 use crate::error::{FontbrewError, Result};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
@@ -188,7 +189,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct PackageVersion(String);
 
@@ -200,6 +201,41 @@ impl PackageVersion {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+impl<'de> Deserialize<'de> for PackageVersion {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let version = String::deserialize(deserializer)?;
+
+        validate_package_version_path_segment(&version).map_err(D::Error::custom)?;
+
+        Ok(Self(version))
+    }
+}
+
+fn validate_package_version_path_segment(version: &str) -> Result<()> {
+    if version.is_empty() {
+        return Err(FontbrewError::Manifest {
+            message: "package version cannot be empty".to_string(),
+        });
+    }
+
+    if version == "." || version == ".." {
+        return Err(FontbrewError::Manifest {
+            message: format!("package version is not a safe path segment: {version:?}"),
+        });
+    }
+
+    if version.contains('/') || version.contains('\\') || version.contains('\0') {
+        return Err(FontbrewError::Manifest {
+            message: format!("package version contains an unsafe path separator: {version:?}"),
+        });
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -364,6 +400,45 @@ pub struct InstallPlan {
     pub target_version: Option<PackageVersion>,
     pub changes: Vec<PlannedChange>,
     pub risks: Vec<PlanRisk>,
+    pub already_installed: bool,
+    #[serde(skip)]
+    pub(crate) prepared: Option<PreparedInstallPackage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedInstallPackage {
+    pub version: PackageVersion,
+    pub source: PreparedInstallSource,
+    pub families: Vec<FamilyName>,
+    pub font_files: Vec<PreparedFontFile>,
+    pub activation_dir: PathBuf,
+    pub activation_strategy: ActivationStrategy,
+    pub activation_artifacts: Vec<ActivationArtifact>,
+    pub activation_risks: Vec<PlanRisk>,
+    pub staging_dir: PathBuf,
+    pub files_dir: PathBuf,
+    pub package_store_dir: PathBuf,
+    pub reinstall: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparedInstallSource {
+    LocalArchive { path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedFontFile {
+    pub staging_path: PathBuf,
+    pub stored_path: PathBuf,
+    pub faces: Vec<PreparedFontFace>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedFontFace {
+    pub family: FamilyName,
+    pub style: String,
+    pub weight: u16,
+    pub format: FontFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,6 +446,8 @@ pub struct InstallReport {
     pub package_id: PackageId,
     pub installed_version: PackageVersion,
     pub families: Vec<FamilyName>,
+    pub installed: bool,
+    pub already_installed: bool,
     pub activated: bool,
 }
 

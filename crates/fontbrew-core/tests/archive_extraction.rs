@@ -435,3 +435,63 @@ fn archives_reject_destinations_that_cross_existing_symlink_ancestor() {
     assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
     assert!(!outside_dir.join("Font.ttf").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn archives_reject_symlink_staging_root_without_writing_outside() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let archive_path = temp.path().join("fonts.zip");
+    let outside_dir = temp.path().join("outside-staging");
+    let staging_dir = temp.path().join("staging");
+    write_zip(
+        &archive_path,
+        &[ZipEntry {
+            name: "Inter-Regular.ttf",
+            contents: b"desktop",
+            mode: 0o100644,
+        }],
+    );
+    std::fs::create_dir_all(&outside_dir).expect("create outside staging target");
+    std::os::unix::fs::symlink(&outside_dir, &staging_dir).expect("create staging symlink");
+
+    let error = extract_archive(
+        &archive_path,
+        &staging_dir,
+        ArchiveExtractionOptions::default(),
+    )
+    .expect_err("symlink staging root should reject");
+
+    assert!(matches!(error, FontbrewError::PathResolution { .. }));
+    assert!(!outside_dir.join("Inter-Regular.ttf").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn archives_reject_symlink_staging_parent_without_writing_outside() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let archive_path = temp.path().join("fonts.zip");
+    let outside_parent = temp.path().join("outside-parent");
+    let symlink_parent = temp.path().join("linked-parent");
+    let staging_dir = symlink_parent.join("staging");
+    write_zip(
+        &archive_path,
+        &[ZipEntry {
+            name: "Inter-Regular.ttf",
+            contents: b"desktop",
+            mode: 0o100644,
+        }],
+    );
+    std::fs::create_dir_all(&outside_parent).expect("create outside parent");
+    std::os::unix::fs::symlink(&outside_parent, &symlink_parent)
+        .expect("create staging parent symlink");
+
+    let error = extract_archive(
+        &archive_path,
+        &staging_dir,
+        ArchiveExtractionOptions::default(),
+    )
+    .expect_err("symlink staging parent should reject");
+
+    assert!(matches!(error, FontbrewError::PathResolution { .. }));
+    assert!(!outside_parent.join("staging/Inter-Regular.ttf").exists());
+}
