@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
-    CancellationToken, FontFormat, FontbrewApp, InfoRequest, InstallRequest, InstallSource,
-    PackageId, RemoveRequest,
+    sources::GitHubRepo, CancellationToken, FontFormat, FontbrewApp, InfoRequest, InstallRequest,
+    InstallSource, PackageId, RemoveRequest,
 };
 
 use crate::{
@@ -261,19 +261,29 @@ fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) 
 fn install_source_from_arg(source: &str) -> InstallSource {
     let path = PathBuf::from(source);
 
-    if path.exists() || looks_like_local_path(source) {
+    if path.exists() || looks_like_explicit_local_path(source) {
+        InstallSource::LocalPath(path)
+    } else if let Ok(repo) = GitHubRepo::parse(source) {
+        InstallSource::GitHubRepo {
+            owner: repo.owner,
+            repo: repo.repo,
+        }
+    } else if looks_like_invalid_local_path(source) {
         InstallSource::LocalPath(path)
     } else {
         InstallSource::RegistryName(source.to_string())
     }
 }
 
-fn looks_like_local_path(source: &str) -> bool {
+fn looks_like_explicit_local_path(source: &str) -> bool {
     source.starts_with('.')
         || source.starts_with('/')
-        || source.contains('/')
         || source.contains('\\')
         || source.ends_with(".zip")
+}
+
+fn looks_like_invalid_local_path(source: &str) -> bool {
+    source.contains('/') || source.contains('\\')
 }
 
 fn font_format_preference(args: &InstallArgs) -> Vec<FontFormat> {
@@ -304,5 +314,35 @@ struct NeverCancelled;
 impl CancellationToken for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_source_parses_owner_repo_as_github_repo() {
+        let source = install_source_from_arg("adobe/source-code-pro");
+
+        assert_eq!(
+            source,
+            InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_source_keeps_explicit_local_paths_local() {
+        assert!(matches!(
+            install_source_from_arg("./adobe/source-code-pro"),
+            InstallSource::LocalPath(_)
+        ));
+        assert!(matches!(
+            install_source_from_arg("downloads/fonts.zip"),
+            InstallSource::LocalPath(_)
+        ));
     }
 }

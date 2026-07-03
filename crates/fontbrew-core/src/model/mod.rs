@@ -198,6 +198,12 @@ impl PackageVersion {
         Self(version.into())
     }
 
+    pub fn parse(version: impl AsRef<str>) -> Result<Self> {
+        let version = version.as_ref();
+        validate_package_version_path_segment(version)?;
+        Ok(Self(version.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -407,6 +413,7 @@ pub struct InstallPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedInstallPackage {
+    pub package_id: PackageId,
     pub version: PackageVersion,
     pub source: PreparedInstallSource,
     pub families: Vec<FamilyName>,
@@ -423,7 +430,18 @@ pub(crate) struct PreparedInstallPackage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedInstallSource {
-    LocalArchive { path: PathBuf },
+    LocalArchive {
+        path: PathBuf,
+    },
+    GitHub {
+        owner: String,
+        repo: String,
+    },
+    Registry {
+        id: String,
+        github_owner: String,
+        github_repo: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

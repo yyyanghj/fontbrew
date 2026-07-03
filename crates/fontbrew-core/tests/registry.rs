@@ -137,34 +137,6 @@ fn registry_update_fetches_metadata_with_fake_client_without_caching_fonts() {
 }
 
 #[test]
-fn app_resolves_registry_short_name_before_github_fetch_is_implemented() {
-    let (_temp, paths) = paths();
-    let store = RegistrySnapshotStore::new(paths.clone());
-    let snapshot =
-        RegistrySnapshotStore::parse(&valid_registry_json()).expect("valid registry should parse");
-    store.write_snapshot(&snapshot).expect("write snapshot");
-    let app = FontbrewApp::with_paths(paths);
-
-    let error = app
-        .install_plan(InstallRequest {
-            source: InstallSource::RegistryName("inter".to_string()),
-            format_preference: Vec::new(),
-            asset_selector: None,
-            reinstall: false,
-            refresh: false,
-            offline: false,
-        })
-        .expect_err("Task 11 should resolve registry but leave GitHub fetch to Task 12");
-
-    assert!(matches!(
-        error,
-        FontbrewError::NotImplemented {
-            operation: "github_release_install"
-        }
-    ));
-}
-
-#[test]
 fn app_rejects_invalid_registry_snapshot_before_short_name_use() {
     let (_temp, paths) = paths();
     fs::create_dir_all(paths.managed_store_dir()).expect("create data root");

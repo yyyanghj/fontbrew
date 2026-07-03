@@ -1,4 +1,7 @@
+use std::{fmt, sync::Arc};
+
 use crate::error::{FontbrewError, Result};
+use crate::fetch::{HttpClient, ReqwestHttpClient};
 use crate::install;
 use crate::model::{
     CancellationToken, ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport,
@@ -9,30 +12,60 @@ use crate::model::{
 use crate::platform::FontbrewPaths;
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub struct FontbrewApp {
     paths: Option<FontbrewPaths>,
+    http_client: Option<Arc<dyn HttpClient>>,
 }
 
 impl FontbrewApp {
     pub fn new() -> Self {
-        Self { paths: None }
+        Self {
+            paths: None,
+            http_client: None,
+        }
     }
 
     pub fn with_paths(paths: FontbrewPaths) -> Self {
-        Self { paths: Some(paths) }
+        Self {
+            paths: Some(paths),
+            http_client: None,
+        }
+    }
+
+    pub fn with_paths_and_http_client(
+        paths: FontbrewPaths,
+        http_client: Arc<dyn HttpClient>,
+    ) -> Self {
+        Self {
+            paths: Some(paths),
+            http_client: Some(http_client),
+        }
     }
 
     pub fn install_plan(&self, request: InstallRequest) -> Result<InstallPlan> {
-        match &request.source {
+        match request.source.clone() {
             crate::InstallSource::LocalPath(_) => install::install_plan(&self.paths()?, request),
             crate::InstallSource::RegistryName(short_name) => {
-                RegistrySnapshotStore::new(self.paths()?).resolve_short_name(short_name)?;
-                not_implemented("github_release_install")
+                let recipe =
+                    RegistrySnapshotStore::new(self.paths()?).resolve_short_name(&short_name)?;
+                install::registry_recipe_install_plan(
+                    &self.paths()?,
+                    recipe,
+                    request,
+                    self.http_client()?.as_ref(),
+                )
             }
-            crate::InstallSource::Provider { .. } | crate::InstallSource::GitHubRepo { .. } => {
-                not_implemented("install_plan")
+            crate::InstallSource::GitHubRepo { owner, repo } => {
+                let github_repo = crate::sources::GitHubRepo::parse(format!("{owner}/{repo}"))?;
+                install::github_repo_install_plan(
+                    &self.paths()?,
+                    github_repo,
+                    request,
+                    self.http_client()?.as_ref(),
+                )
             }
+            crate::InstallSource::Provider { .. } => not_implemented("install_plan"),
         }
     }
 
@@ -114,8 +147,35 @@ impl FontbrewApp {
             None => FontbrewPaths::resolve(),
         }
     }
+
+    fn http_client(&self) -> Result<Arc<dyn HttpClient>> {
+        if let Some(http_client) = &self.http_client {
+            return Ok(http_client.clone());
+        }
+
+        Ok(Arc::new(ReqwestHttpClient::try_new()?))
+    }
 }
 
 fn not_implemented<T>(operation: &'static str) -> Result<T> {
     Err(FontbrewError::NotImplemented { operation })
+}
+
+impl Default for FontbrewApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for FontbrewApp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FontbrewApp")
+            .field("paths", &self.paths)
+            .field(
+                "http_client",
+                &self.http_client.as_ref().map(|_| "<http-client>"),
+            )
+            .finish()
+    }
 }

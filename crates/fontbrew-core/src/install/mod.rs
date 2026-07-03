@@ -13,8 +13,10 @@ use crate::{
     archives::{ArchiveExtractionOptions, ZipArchiveExtractor},
     config::FontbrewConfig,
     error::{FontbrewError, Result},
+    fetch::HttpClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
     fs::{ensure_existing_path_does_not_cross_symlink, GlobalFileLock},
+    github,
     manifest::{
         ManifestActivationArtifactRecord, ManifestFontFileFormat, ManifestFontFileRecord,
         ManifestPackageRecord, ManifestSource, ManifestStore,
@@ -27,6 +29,8 @@ use crate::{
         RemoveRequest,
     },
     platform::FontbrewPaths,
+    registry::{RegistryAssetSelection, RegistryPackageRecipe},
+    sources::GitHubRepo,
     FamilyName, PackageId, PackageVersion, PlanRisk,
 };
 
@@ -44,6 +48,88 @@ pub fn install_plan(paths: &FontbrewPaths, request: InstallRequest) -> Result<In
             operation: "install_source",
         }),
     }
+}
+
+pub fn github_repo_install_plan(
+    paths: &FontbrewPaths,
+    repo: GitHubRepo,
+    request: InstallRequest,
+    http_client: &dyn HttpClient,
+) -> Result<InstallPlan> {
+    let options = RemoteInstallOptions::from_request(request);
+    let package_id = package_id_from_repo_name(&repo.repo)?;
+    if let Some(plan) = already_installed_plan(paths, &package_id, options.reinstall)? {
+        return Ok(plan);
+    }
+
+    let prepared = prepare_github_release_archive(
+        paths,
+        &repo,
+        None,
+        package_id.clone(),
+        PreparedInstallSource::GitHub {
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+        },
+        options.with_package_id(package_id),
+        http_client,
+    )?;
+
+    install_plan_from_prepared(paths, prepared)
+}
+
+pub fn registry_recipe_install_plan(
+    paths: &FontbrewPaths,
+    recipe: RegistryPackageRecipe,
+    request: InstallRequest,
+    http_client: &dyn HttpClient,
+) -> Result<InstallPlan> {
+    let options = RemoteInstallOptions::from_request(request);
+    let repo = recipe.github_repo.clone();
+    let package_id = recipe.package_id.clone();
+    if let Some(plan) = already_installed_plan(paths, &package_id, options.reinstall)? {
+        return Ok(plan);
+    }
+
+    let prepared = prepare_github_release_archive(
+        paths,
+        &repo,
+        recipe.asset.as_ref(),
+        package_id.clone(),
+        PreparedInstallSource::Registry {
+            id: package_id.as_str().to_string(),
+            github_owner: repo.owner.clone(),
+            github_repo: repo.repo.clone(),
+        },
+        options.with_package_id(package_id),
+        http_client,
+    )?;
+
+    install_plan_from_prepared(paths, prepared)
+}
+
+fn already_installed_plan(
+    paths: &FontbrewPaths,
+    package_id: &PackageId,
+    reinstall: bool,
+) -> Result<Option<InstallPlan>> {
+    if reinstall {
+        return Ok(None);
+    }
+
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    let Some(record) = manifest.get_package(package_id) else {
+        return Ok(None);
+    };
+
+    Ok(Some(InstallPlan {
+        package_id: package_id.clone(),
+        target_version: Some(record.version.clone()),
+        changes: Vec::new(),
+        risks: Vec::new(),
+        already_installed: true,
+        prepared: None,
+    }))
 }
 
 pub fn apply_install(
@@ -221,6 +307,13 @@ fn local_archive_install_plan(
 ) -> Result<InstallPlan> {
     let archive_path = resolve_local_archive_path(&archive_path)?;
     let prepared = prepare_local_archive(paths, archive_path, reinstall)?;
+    install_plan_from_prepared(paths, prepared)
+}
+
+fn install_plan_from_prepared(
+    paths: &FontbrewPaths,
+    prepared: PreparedInstallPackage,
+) -> Result<InstallPlan> {
     let package_id = prepared_package_id(&prepared);
     let manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
         Ok(manifest) => manifest,
@@ -231,7 +324,7 @@ fn local_archive_install_plan(
     };
 
     if let Some(record) = manifest.get_package(&package_id) {
-        if !reinstall {
+        if !prepared.reinstall {
             cleanup_staging(&prepared.staging_dir);
             return Ok(InstallPlan {
                 package_id,
@@ -261,7 +354,7 @@ fn local_archive_install_plan(
         changes: vec![
             PlannedChange {
                 package_id: package_id.clone(),
-                description: "stage local archive fonts into managed package store".to_string(),
+                description: "stage fonts into managed package store".to_string(),
             },
             PlannedChange {
                 package_id: package_id.clone(),
@@ -284,8 +377,15 @@ fn prepare_local_archive(
     reinstall: bool,
 ) -> Result<PreparedInstallPackage> {
     let staging_dir = new_staging_dir(paths)?;
-    let result =
-        extract_and_parse_local_archive(paths, archive_path, staging_dir.clone(), reinstall);
+    let result = extract_and_parse_archive(
+        paths,
+        archive_path.clone(),
+        staging_dir.clone(),
+        PackageVersion::new(LOCAL_ARCHIVE_VERSION),
+        PreparedInstallSource::LocalArchive { path: archive_path },
+        None,
+        reinstall,
+    );
 
     if result.is_err() {
         cleanup_staging(&staging_dir);
@@ -294,10 +394,98 @@ fn prepare_local_archive(
     result
 }
 
-fn extract_and_parse_local_archive(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteInstallOptions {
+    asset_selector: Option<String>,
+    package_id: Option<PackageId>,
+    reinstall: bool,
+}
+
+impl RemoteInstallOptions {
+    fn from_request(request: InstallRequest) -> Self {
+        Self {
+            asset_selector: request.asset_selector,
+            package_id: None,
+            reinstall: request.reinstall,
+        }
+    }
+
+    fn with_package_id(mut self, package_id: PackageId) -> Self {
+        self.package_id = Some(package_id);
+        self
+    }
+}
+
+fn prepare_github_release_archive(
+    paths: &FontbrewPaths,
+    repo: &GitHubRepo,
+    recipe_asset: Option<&RegistryAssetSelection>,
+    fallback_package_id: PackageId,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+) -> Result<PreparedInstallPackage> {
+    let staging_dir = new_staging_dir(paths)?;
+    let result = download_and_parse_github_archive(
+        paths,
+        repo,
+        recipe_asset,
+        fallback_package_id,
+        source,
+        options,
+        http_client,
+        staging_dir.clone(),
+    );
+
+    if result.is_err() {
+        cleanup_staging(&staging_dir);
+    }
+
+    result
+}
+
+fn download_and_parse_github_archive(
+    paths: &FontbrewPaths,
+    repo: &GitHubRepo,
+    recipe_asset: Option<&RegistryAssetSelection>,
+    fallback_package_id: PackageId,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+    staging_dir: PathBuf,
+) -> Result<PreparedInstallPackage> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+
+    let asset = github::resolve_release_asset(
+        http_client,
+        repo,
+        recipe_asset,
+        options.asset_selector.as_deref(),
+        &fallback_package_id,
+    )?;
+
+    fs::create_dir_all(&staging_dir)?;
+    let archive_path = staging_dir.join("download.zip");
+    github::download_release_asset_to_file(http_client, &asset.download_url, &archive_path)?;
+
+    extract_and_parse_archive(
+        paths,
+        archive_path,
+        staging_dir,
+        asset.version,
+        source,
+        options.package_id,
+        options.reinstall,
+    )
+}
+
+fn extract_and_parse_archive(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
     staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    package_id_hint: Option<PackageId>,
     reinstall: bool,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
@@ -349,8 +537,10 @@ fn extract_and_parse_local_archive(
         });
     };
 
-    let package_id = PackageId::normalize(package_family)?;
-    let version = PackageVersion::new(LOCAL_ARCHIVE_VERSION);
+    let package_id = match package_id_hint {
+        Some(package_id) => package_id,
+        None => PackageId::normalize(package_family)?,
+    };
     let package_store_dir = paths.package_store_dir(&package_id, &version);
     let files_dir = package_store_dir.join("files");
     let families = family_names.into_iter().map(FamilyName::new).collect();
@@ -386,15 +576,16 @@ fn extract_and_parse_local_archive(
         }
     };
     let activation_plan = ActivationPlanner::plan(ActivationRequest {
-        package_id,
+        package_id: package_id.clone(),
         font_files: activation_sources,
         activation_dir: paths.activation_dir(),
         strategy: config.activation_strategy,
     })?;
 
     Ok(PreparedInstallPackage {
+        package_id,
         version,
-        source: PreparedInstallSource::LocalArchive { path: archive_path },
+        source,
         families,
         font_files,
         activation_dir: activation_plan.activation_dir,
@@ -406,6 +597,38 @@ fn extract_and_parse_local_archive(
         package_store_dir,
         reinstall,
     })
+}
+
+fn package_id_from_repo_name(repo: &str) -> Result<PackageId> {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+
+    for character in repo.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+            continue;
+        }
+
+        if matches!(character, '-' | '_' | '.') {
+            if !slug.is_empty() && !previous_was_separator {
+                slug.push('-');
+                previous_was_separator = true;
+            }
+            continue;
+        }
+
+        return Err(FontbrewError::InvalidPackageId {
+            input: repo.to_string(),
+            reason: "GitHub repo name contains an unsafe character".to_string(),
+        });
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    PackageId::parse(slug)
 }
 
 fn apply_prepared_install(
@@ -527,20 +750,7 @@ fn manifest_font_format(format: &FontFormat) -> ManifestFontFileFormat {
 }
 
 fn prepared_package_id(prepared: &PreparedInstallPackage) -> PackageId {
-    prepared
-        .activation_artifacts
-        .first()
-        .map(|artifact| artifact.package_id.clone())
-        .unwrap_or_else(|| {
-            PackageId::normalize(
-                prepared
-                    .families
-                    .first()
-                    .map(FamilyName::as_str)
-                    .unwrap_or("local-font"),
-            )
-            .expect("prepared package id should be valid")
-        })
+    prepared.package_id.clone()
 }
 
 fn copy_prepared_files(paths: &FontbrewPaths, prepared: &PreparedInstallPackage) -> Result<()> {
@@ -677,7 +887,7 @@ fn manifest_record_from_prepared(
         package_id: prepared_package_id(prepared),
         version: prepared.version.clone(),
         source: manifest_source_from_prepared(&prepared.source),
-        update_source: None,
+        update_source: manifest_update_source_from_prepared(&prepared.source),
         families: prepared.families.clone(),
         font_files: manifest_font_files_from_prepared(prepared),
         activation_artifacts: activation_artifacts
@@ -698,6 +908,29 @@ fn manifest_source_from_prepared(source: &PreparedInstallSource) -> ManifestSour
         PreparedInstallSource::LocalArchive { path } => {
             ManifestSource::LocalArchive { path: path.clone() }
         }
+        PreparedInstallSource::GitHub { owner, repo } => ManifestSource::GitHub {
+            owner: owner.clone(),
+            repo: repo.clone(),
+        },
+        PreparedInstallSource::Registry { id, .. } => ManifestSource::Registry { id: id.clone() },
+    }
+}
+
+fn manifest_update_source_from_prepared(source: &PreparedInstallSource) -> Option<ManifestSource> {
+    match source {
+        PreparedInstallSource::LocalArchive { .. } => None,
+        PreparedInstallSource::GitHub { owner, repo } => Some(ManifestSource::GitHub {
+            owner: owner.clone(),
+            repo: repo.clone(),
+        }),
+        PreparedInstallSource::Registry {
+            github_owner,
+            github_repo,
+            ..
+        } => Some(ManifestSource::GitHub {
+            owner: github_owner.clone(),
+            repo: github_repo.clone(),
+        }),
     }
 }
 
