@@ -462,6 +462,7 @@ pub struct RemovePlan {
 pub struct RemoveReport {
     pub package_id: PackageId,
     pub removed: bool,
+    pub planned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -53,6 +53,10 @@ pub fn apply_install(
     progress: &mut dyn ProgressSink,
     _cancellation: &dyn CancellationToken,
 ) -> Result<InstallReport> {
+    if matches!(policy, ExecutionPolicy::DryRun) {
+        return dry_run_install_report(plan);
+    }
+
     require_policy_for_risks(&plan.risks, &policy)?;
 
     if !plan.risks.is_empty() {
@@ -60,10 +64,6 @@ pub fn apply_install(
             package_id: plan.package_id,
             message: "install plan contains unresolved conflicts".to_string(),
         });
-    }
-
-    if matches!(policy, ExecutionPolicy::DryRun) {
-        return dry_run_install_report(plan);
     }
 
     let _lock = GlobalFileLock::try_exclusive(&write_lock_path(paths))?;
@@ -174,9 +174,11 @@ pub fn apply_remove(
     require_policy_for_risks(&plan.risks, &policy)?;
 
     if matches!(policy, ExecutionPolicy::DryRun) {
+        let planned = !plan.changes.is_empty();
         return Ok(RemoveReport {
             package_id: plan.package_id,
             removed: false,
+            planned,
         });
     }
 
@@ -186,6 +188,7 @@ pub fn apply_remove(
         return Ok(RemoveReport {
             package_id: plan.package_id,
             removed: false,
+            planned: false,
         });
     };
 
@@ -207,6 +210,7 @@ pub fn apply_remove(
     Ok(RemoveReport {
         package_id: record.package_id,
         removed: true,
+        planned: false,
     })
 }
 
