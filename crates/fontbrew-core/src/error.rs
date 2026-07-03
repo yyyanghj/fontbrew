@@ -42,6 +42,9 @@ pub enum FontbrewError {
     #[error("registry validation failed: {message}")]
     RegistryValidationFailed { message: String },
 
+    #[error("invalid package id {input:?}: {reason}")]
+    InvalidPackageId { input: String, reason: String },
+
     #[error("configuration error: {message}")]
     Config { message: String },
 

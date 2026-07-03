@@ -8,6 +8,10 @@ use fontbrew_core::{
     FontFormat, FontbrewError, PackageId, PackageVersion,
 };
 
+fn package_id(id: &str) -> PackageId {
+    PackageId::parse(id).expect("test package id should be valid")
+}
+
 #[test]
 fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -19,7 +23,7 @@ fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
 
     assert_eq!(paths.managed_store_dir(), temp.path().join("data"));
     assert_eq!(
-        paths.package_store_dir(&PackageId::new("inter"), &PackageVersion::new("4.0")),
+        paths.package_store_dir(&package_id("inter"), &PackageVersion::new("4.0")),
         temp.path().join("data/packages/inter/4.0")
     );
     assert_eq!(

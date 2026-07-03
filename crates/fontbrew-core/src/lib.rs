@@ -6,10 +6,12 @@ pub mod error;
 pub mod fs;
 pub mod model;
 pub mod platform;
+pub mod version;
 
 pub use app::FontbrewApp;
 pub use error::{FontbrewError, Result};
 pub use model::*;
+pub use version::*;
 
 #[cfg(test)]
 mod tests {
@@ -21,13 +23,17 @@ mod tests {
         ProviderKind,
     };
 
+    fn package_id(id: &str) -> PackageId {
+        PackageId::parse(id).expect("test package id should be valid")
+    }
+
     #[test]
     fn report_shells_serialize_for_frontends() {
         let plan = InstallPlan {
-            package_id: PackageId::new("jetbrains-mono"),
+            package_id: package_id("jetbrains-mono"),
             target_version: Some(PackageVersion::new("2.304")),
             changes: vec![PlannedChange {
-                package_id: PackageId::new("jetbrains-mono"),
+                package_id: package_id("jetbrains-mono"),
                 description: "install managed package".to_string(),
             }],
             risks: Vec::new(),
@@ -83,7 +89,7 @@ mod tests {
     fn info_report_serializes_as_a_frontend_report_shell() {
         let report = InfoReport {
             package: PackageInfo {
-                package_id: PackageId::new("jetbrains-mono"),
+                package_id: package_id("jetbrains-mono"),
                 version: PackageVersion::new("2.304"),
                 families: vec![FamilyName::new("JetBrains Mono")],
                 source: "registry:jetbrains-mono".to_string(),
@@ -103,7 +109,7 @@ mod tests {
     fn package_info_returns_an_info_report_shell() {
         let app = FontbrewApp::new();
         let request = InfoRequest {
-            package_id: PackageId::new("jetbrains-mono"),
+            package_id: package_id("jetbrains-mono"),
         };
 
         let result: crate::Result<InfoReport> = app.package_info(request);

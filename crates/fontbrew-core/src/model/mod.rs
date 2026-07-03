@@ -1,18 +1,190 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use crate::error::{FontbrewError, Result};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct PackageId(String);
 
 impl PackageId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    pub fn parse(id: impl AsRef<str>) -> Result<Self> {
+        let input = id.as_ref();
+
+        validate_package_id(input)?;
+
+        Ok(Self(input.to_string()))
+    }
+
+    pub fn normalize(display_name: impl AsRef<str>) -> Result<Self> {
+        let input = display_name.as_ref();
+        let mut slug = String::new();
+        let mut previous_was_separator = false;
+
+        if input.is_empty() {
+            return invalid_package_id(input, "package id cannot be empty");
+        }
+
+        for character in input.chars() {
+            if character.is_ascii_alphanumeric() {
+                slug.push(character.to_ascii_lowercase());
+                previous_was_separator = false;
+                continue;
+            }
+
+            if character.is_ascii_whitespace() || character == '-' {
+                if slug.is_empty() || previous_was_separator {
+                    return invalid_package_id(input, "package id contains an empty component");
+                }
+
+                slug.push('-');
+                previous_was_separator = true;
+                continue;
+            }
+
+            return invalid_package_id(input, "package id contains an unsafe character");
+        }
+
+        validate_package_id(&slug)?;
+
+        Ok(Self(slug))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let id = String::deserialize(deserializer)?;
+
+        Self::parse(&id).map_err(D::Error::custom)
+    }
+}
+
+fn validate_package_id(input: &str) -> Result<()> {
+    if input.is_empty() {
+        return invalid_package_id(input, "package id cannot be empty");
+    }
+
+    if !input.is_ascii() {
+        return invalid_package_id(input, "package id must be ASCII");
+    }
+
+    let bytes = input.as_bytes();
+    if !is_ascii_lowercase_alnum(bytes[0]) || !is_ascii_lowercase_alnum(bytes[bytes.len() - 1]) {
+        return invalid_package_id(
+            input,
+            "package id must start and end with a lowercase letter or digit",
+        );
+    }
+
+    let mut previous_was_hyphen = false;
+    for byte in bytes {
+        match *byte {
+            b'a'..=b'z' | b'0'..=b'9' => previous_was_hyphen = false,
+            b'-' if !previous_was_hyphen => previous_was_hyphen = true,
+            b'-' => return invalid_package_id(input, "package id contains an empty component"),
+            b'A'..=b'Z' => {
+                return invalid_package_id(input, "package id must be lowercase");
+            }
+            _ => return invalid_package_id(input, "package id contains an unsafe character"),
+        }
+    }
+
+    Ok(())
+}
+
+fn is_ascii_lowercase_alnum(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
+}
+
+fn invalid_package_id<T>(input: &str, reason: &str) -> Result<T> {
+    Err(FontbrewError::InvalidPackageId {
+        input: input.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::PackageId;
+
+    fn package_id(id: &str) -> PackageId {
+        PackageId::parse(id).expect("test package id should be valid")
+    }
+
+    #[test]
+    fn package_id_parse_accepts_lowercase_ascii_kebab_case() {
+        let id = PackageId::parse("source-sans-3").expect("valid package id");
+
+        assert_eq!(id.as_str(), "source-sans-3");
+    }
+
+    #[test]
+    fn package_id_parse_rejects_unsafe_ids() {
+        for input in [
+            "",
+            "Inter",
+            "inter/",
+            "inter\\mono",
+            "inter.mono",
+            "inter_mono",
+            "-inter",
+            "inter-",
+            "inter--mono",
+            "inter-新",
+            "inter mono",
+        ] {
+            assert!(
+                PackageId::parse(input).is_err(),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn package_id_normalize_converts_display_names_to_slugs() {
+        for (input, expected) in [
+            ("Inter", "inter"),
+            ("JetBrains Mono", "jetbrains-mono"),
+            ("Source Sans 3", "source-sans-3"),
+            ("Maple Mono NF CN", "maple-mono-nf-cn"),
+        ] {
+            let id = PackageId::normalize(input).expect("display name should normalize");
+
+            assert_eq!(id.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn package_id_normalize_rejects_unsafe_display_names() {
+        for input in ["", "Inter/Mono", "Inter_Mono", "Inter..Mono", "字体"] {
+            assert!(
+                PackageId::normalize(input).is_err(),
+                "{input:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn package_id_deserialize_rejects_unsafe_ids() {
+        let error = serde_json::from_str::<PackageId>("\"Inter/Mono\"")
+            .expect_err("invalid package id should not deserialize");
+
+        assert!(error.to_string().contains("invalid package id"));
+    }
+
+    #[test]
+    fn package_id_deserialize_accepts_valid_ids() {
+        let id: PackageId =
+            serde_json::from_str("\"jetbrains-mono\"").expect("valid package id should parse");
+
+        assert_eq!(id, package_id("jetbrains-mono"));
     }
 }
 
