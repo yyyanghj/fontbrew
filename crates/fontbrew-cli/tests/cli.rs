@@ -49,6 +49,18 @@ fn stderr_text(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("stderr should be utf-8")
 }
 
+fn staging_is_empty_or_absent(home: &Path) -> bool {
+    let staging_dir = home.join(".local/share/fontbrew/staging");
+    match fs::read_dir(&staging_dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => panic!(
+            "could not read staging dir {}: {error}",
+            staging_dir.display()
+        ),
+    }
+}
+
 fn write_registry_snapshot(path: &Path) {
     fs::write(
         path,
@@ -257,8 +269,93 @@ fn json_install_with_unmanaged_activation_conflict_fails_without_prompting() {
 
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["error"]["kind"], "approval_required");
+    assert_eq!(
+        json["error"]["risks"][0]["Conflict"]["package_id"],
+        "source-code-pro"
+    );
+    assert!(json["error"]["risks"][0]["Conflict"]["description"]
+        .as_str()
+        .expect("risk description")
+        .contains("SourceCodePro-Regular.ttf"));
     assert!(!stdout_text.contains("Continue?"));
     assert!(stderr_text(&output).is_empty());
+}
+
+#[test]
+fn json_install_with_same_family_overlap_requires_yes_and_reports_structured_risk() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    let user_fonts_dir = home.join("Library/Fonts");
+    fs::create_dir_all(&user_fonts_dir).expect("create user fonts dir");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        user_fonts_dir.join("ManualSourceCodePro.ttf"),
+    )
+    .expect("write unmanaged same-family font");
+
+    let output = fontbrew(&home)
+        .args(["--json", "install"])
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["error"]["kind"], "approval_required");
+    assert_eq!(
+        json["error"]["risks"][0]["UnmanagedFontOverlap"]["family_name"],
+        "Source Code Pro"
+    );
+    assert!(
+        json["error"]["risks"][0]["UnmanagedFontOverlap"]["description"]
+            .as_str()
+            .expect("risk description")
+            .contains("ManualSourceCodePro.ttf")
+    );
+    assert!(stderr_text(&output).is_empty());
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
+fn json_install_with_same_family_overlap_and_yes_installs_without_overwriting_unmanaged_font() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    let user_fonts_dir = home.join("Library/Fonts");
+    fs::create_dir_all(&user_fonts_dir).expect("create user fonts dir");
+    let unmanaged_font = user_fonts_dir.join("ManualSourceCodePro.ttf");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &unmanaged_font,
+    )
+    .expect("write unmanaged same-family font");
+    let unmanaged_bytes = fs::read(&unmanaged_font).expect("read unmanaged font");
+
+    let output = fontbrew(&home)
+        .args(["--json", "install", "--yes"])
+        .arg(&archive_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "install");
+    assert_eq!(json["report"]["installed"], true);
+    assert_eq!(
+        fs::read(&unmanaged_font).expect("unmanaged font remains"),
+        unmanaged_bytes
+    );
 }
 
 #[test]

@@ -116,3 +116,58 @@ impl Confirmer for JsonConfirmer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use fontbrew_core::{FamilyName, PackageId, PlanRisk};
+
+    use super::*;
+
+    fn package_id(id: &str) -> PackageId {
+        PackageId::parse(id).expect("test package id should parse")
+    }
+
+    fn risk() -> PlanRisk {
+        PlanRisk::UnmanagedFontOverlap {
+            family_name: FamilyName::new("Source Code Pro"),
+            description: "unmanaged same-family font".to_string(),
+        }
+    }
+
+    #[test]
+    fn human_confirmer_assume_yes_maps_risky_plan_to_approved_policy() {
+        let mut confirmer = HumanConfirmer::new();
+
+        let policy = confirmer
+            .execution_policy(
+                &[risk()],
+                ConfirmationOptions {
+                    assume_yes: true,
+                    dry_run: false,
+                },
+            )
+            .expect("assume yes should approve risks");
+
+        assert_eq!(policy, ExecutionPolicy::AssumeYes);
+    }
+
+    #[test]
+    fn json_confirmer_requires_explicit_approval_for_risky_apply() {
+        let mut confirmer = JsonConfirmer::new();
+
+        let error = confirmer
+            .execution_policy(
+                &[PlanRisk::Conflict {
+                    package_id: package_id("source-code-pro"),
+                    description: "activation conflict".to_string(),
+                }],
+                ConfirmationOptions {
+                    assume_yes: false,
+                    dry_run: false,
+                },
+            )
+            .expect_err("JSON mode should require --yes or --dry-run");
+
+        assert!(matches!(error, CliError::ApprovalRequired { .. }));
+    }
+}

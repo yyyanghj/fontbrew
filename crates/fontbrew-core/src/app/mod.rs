@@ -80,6 +80,10 @@ impl FontbrewApp {
         install::apply_install(&self.paths()?, plan, policy, progress, cancellation)
     }
 
+    pub fn discard_install_plan(&self, plan: InstallPlan) {
+        install::discard_install_plan(plan);
+    }
+
     pub fn list_packages(&self) -> Result<ListReport> {
         install::list_packages(&self.paths()?)
     }

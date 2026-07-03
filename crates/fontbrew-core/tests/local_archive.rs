@@ -5,11 +5,12 @@ use std::{
 };
 
 use fontbrew_core::{
+    activation::ActivationStrategy,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InfoRequest, InstallRequest,
-    InstallSource, PackageId, PackageVersion, ProgressEvent, ProgressSink, RemovePlan,
-    RemoveRequest,
+    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InfoRequest,
+    InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
+    ProgressSink, RemovePlan, RemoveRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -586,4 +587,445 @@ fn activation_conflict_blocks_install_without_manifest_update() {
         b"unmanaged"
     );
     assert!(!paths.manifest_path().exists());
+}
+
+#[test]
+fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_safe_policy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let user_fonts_dir = paths
+        .activation_dir()
+        .parent()
+        .expect("activation dir has parent")
+        .to_path_buf();
+    fs::create_dir_all(&user_fonts_dir).expect("create user font dir");
+    let unmanaged_font = user_fonts_dir.join("ManualSourceCodePro.ttf");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &unmanaged_font,
+    )
+    .expect("write unmanaged same-family font");
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan install with unmanaged family overlap");
+
+    assert!(plan.risks.iter().any(|risk| matches!(
+        risk,
+        PlanRisk::UnmanagedFontOverlap {
+            family_name,
+            description
+        } if family_name.as_str() == "Source Code Pro"
+            && description.contains("ManualSourceCodePro.ttf")
+    )));
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("safe policy should reject same-family unmanaged overlap");
+
+    assert!(matches!(
+        error,
+        FontbrewError::ExecutionPolicyRequired { .. }
+    ));
+    assert!(unmanaged_font.exists());
+    assert!(!paths.manifest_path().exists());
+    assert!(!paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_plan_reports_activation_artifact_managed_by_another_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let other_package_id = package_id("other-package");
+    let other_version = PackageVersion::new("1.0.0");
+    let other_source_path = paths
+        .package_store_dir(&other_package_id, &other_version)
+        .join("files/SourceCodePro-Regular.ttf");
+    fs::create_dir_all(other_source_path.parent().expect("other source parent"))
+        .expect("create other package store");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &other_source_path,
+    )
+    .expect("write other managed font");
+
+    fs::create_dir_all(paths.activation_dir()).expect("create activation dir");
+    let shared_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
+    std::os::unix::fs::symlink(&other_source_path, &shared_activation_path)
+        .expect("create other package activation");
+
+    let mut manifest = ManifestV1::empty();
+    manifest
+        .insert_package(ManifestPackageRecord {
+            package_id: other_package_id.clone(),
+            version: other_version.clone(),
+            source: ManifestSource::LocalArchive {
+                path: temp.path().join("other.zip"),
+            },
+            update_source: None,
+            families: vec![FamilyName::new("Source Code Pro")],
+            font_files: Vec::new(),
+            activation_artifacts: vec![fontbrew_core::manifest::ManifestActivationArtifactRecord {
+                path: shared_activation_path.clone(),
+                source_path: other_source_path.clone(),
+                strategy: ActivationStrategy::Symlink,
+            }],
+            installed_at: "unix:1".to_string(),
+            active_version: Some(other_version),
+        })
+        .expect("insert other package record");
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan install with other managed activation conflict");
+
+    assert!(plan.risks.iter().any(|risk| matches!(
+        risk,
+        PlanRisk::Conflict {
+            package_id: risk_package_id,
+            description
+        } if risk_package_id == &package_id("source-code-pro")
+            && description.contains("other-package")
+            && description.contains("SourceCodePro-Regular.ttf")
+    )));
+}
+
+#[test]
+fn install_plan_reports_already_managed_package_from_different_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let first_archive = temp.path().join("source-code-pro-first.zip");
+    let second_archive = temp.path().join("source-code-pro-second.zip");
+    write_fixture_archive(
+        &first_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    write_fixture_archive(
+        &second_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    apply_install(&app, &first_archive).expect("initial install");
+
+    let plan = app
+        .install_plan(local_archive_request(&second_archive, false))
+        .expect("plan same package from different source");
+
+    assert!(plan.risks.iter().any(|risk| matches!(
+        risk,
+        PlanRisk::Conflict {
+            package_id: risk_package_id,
+            description
+        } if risk_package_id == &package_id("source-code-pro")
+            && description.contains("different source")
+            && description.contains("source-code-pro-first.zip")
+            && description.contains("source-code-pro-second.zip")
+    )));
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("safe policy should reject source conflict");
+
+    assert!(matches!(
+        error,
+        FontbrewError::ExecutionPolicyRequired { .. }
+    ));
+}
+
+#[test]
+fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let first_archive = temp.path().join("source-code-pro-first.zip");
+    let second_archive = temp.path().join("source-code-pro-second.zip");
+    write_fixture_archive(
+        &first_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    write_fixture_archive(
+        &second_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    apply_install(&app, &first_archive).expect("initial install");
+
+    let plan = app
+        .install_plan(local_archive_request(&second_archive, true))
+        .expect("plan reinstall from different source");
+    assert!(!plan.risks.is_empty());
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::AssumeYes,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("approved risk should not silently adopt a different source");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    let info = app
+        .package_info(InfoRequest {
+            package_id: package_id("source-code-pro"),
+        })
+        .expect("package info after rejected reinstall");
+    assert!(info.package.source.contains("source-code-pro-first.zip"));
+    assert!(!info.package.source.contains("source-code-pro-second.zip"));
+}
+
+#[cfg(unix)]
+#[test]
+fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let user_fonts_dir = paths
+        .activation_dir()
+        .parent()
+        .expect("activation dir has parent")
+        .to_path_buf();
+    let symlink_target_dir = temp.path().join("manual-font-targets");
+    let symlink_target = symlink_target_dir.join("SourceCodePro-Regular.ttf");
+    fs::create_dir_all(&user_fonts_dir).expect("create user font dir");
+    fs::create_dir_all(&symlink_target_dir).expect("create symlink target dir");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &symlink_target,
+    )
+    .expect("write symlink target font");
+    let unmanaged_symlink = user_fonts_dir.join("ManualSourceCodePro.ttf");
+    std::os::unix::fs::symlink(&symlink_target, &unmanaged_symlink)
+        .expect("create unmanaged font symlink");
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan install with unmanaged symlink family overlap");
+
+    assert!(plan.risks.iter().any(|risk| matches!(
+        risk,
+        PlanRisk::UnmanagedFontOverlap {
+            family_name,
+            description
+        } if family_name.as_str() == "Source Code Pro"
+            && description.contains("ManualSourceCodePro.ttf")
+    )));
+}
+
+#[test]
+fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan install before unmanaged font appears");
+    assert!(plan.risks.is_empty());
+
+    let user_fonts_dir = paths
+        .activation_dir()
+        .parent()
+        .expect("activation dir has parent")
+        .to_path_buf();
+    fs::create_dir_all(&user_fonts_dir).expect("create user font dir");
+    let unmanaged_font = user_fonts_dir.join("ManualSourceCodePro.ttf");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &unmanaged_font,
+    )
+    .expect("write unmanaged same-family font after planning");
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("stale plan should recheck same-family overlap");
+
+    assert!(matches!(
+        error,
+        FontbrewError::ExecutionPolicyRequired { .. }
+    ));
+    assert!(unmanaged_font.exists());
+    assert!(!paths.manifest_path().exists());
+    assert!(!paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan install before managed conflict appears");
+    assert!(plan.risks.is_empty());
+
+    let other_package_id = package_id("other-package");
+    let other_version = PackageVersion::new("1.0.0");
+    let other_source_path = paths
+        .package_store_dir(&other_package_id, &other_version)
+        .join("files/SourceCodePro-Regular.ttf");
+    fs::create_dir_all(other_source_path.parent().expect("other source parent"))
+        .expect("create other package store");
+    fs::copy(
+        fixture_font_path("SourceCodePro-Regular.ttf"),
+        &other_source_path,
+    )
+    .expect("write other managed font");
+    fs::create_dir_all(paths.activation_dir()).expect("create activation dir");
+    let shared_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
+    std::os::unix::fs::symlink(&other_source_path, &shared_activation_path)
+        .expect("create other package activation");
+
+    let mut manifest = ManifestV1::empty();
+    manifest
+        .insert_package(ManifestPackageRecord {
+            package_id: other_package_id.clone(),
+            version: other_version.clone(),
+            source: ManifestSource::LocalArchive {
+                path: temp.path().join("other.zip"),
+            },
+            update_source: None,
+            families: vec![FamilyName::new("Source Code Pro")],
+            font_files: Vec::new(),
+            activation_artifacts: vec![fontbrew_core::manifest::ManifestActivationArtifactRecord {
+                path: shared_activation_path.clone(),
+                source_path: other_source_path.clone(),
+                strategy: ActivationStrategy::Symlink,
+            }],
+            installed_at: "unix:1".to_string(),
+            active_version: Some(other_version.clone()),
+        })
+        .expect("insert other package record");
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::AssumeYes,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("approved stale plan should not overwrite other managed activation");
+
+    match error {
+        FontbrewError::Conflict { message, .. } => {
+            assert!(message.contains("already managed by package other-package"));
+        }
+        other => panic!("expected conflict error, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_link(&shared_activation_path).expect("other activation remains"),
+        other_source_path
+    );
+    assert!(ManifestStore::read_or_empty(&paths.manifest_path())
+        .expect("read manifest")
+        .get_package(&other_package_id)
+        .is_some());
+    assert!(!paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_plan_scan_error_removes_staging_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let user_fonts_dir = paths
+        .activation_dir()
+        .parent()
+        .expect("activation dir has parent")
+        .to_path_buf();
+    fs::create_dir_all(paths.activation_dir()).expect("create activation dir");
+    let original_permissions = fs::metadata(&user_fonts_dir)
+        .expect("user font dir metadata")
+        .permissions();
+    let mut execute_only_permissions = original_permissions.clone();
+    execute_only_permissions.set_mode(0o111);
+    fs::set_permissions(&user_fonts_dir, execute_only_permissions)
+        .expect("make user font dir unreadable");
+
+    let result = app.install_plan(local_archive_request(&archive_path, false));
+
+    fs::set_permissions(&user_fonts_dir, original_permissions).expect("restore user font dir");
+    let error = result.expect_err("unreadable scan dir should fail planning");
+    assert!(matches!(error, FontbrewError::Io(_)));
+    assert!(
+        !paths.staging_dir().exists() || {
+            fs::read_dir(paths.staging_dir())
+                .expect("read staging root")
+                .next()
+                .is_none()
+        }
+    );
 }

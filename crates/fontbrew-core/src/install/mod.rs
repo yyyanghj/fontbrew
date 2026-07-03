@@ -19,7 +19,7 @@ use crate::{
     github,
     manifest::{
         ManifestActivationArtifactRecord, ManifestFontFileFormat, ManifestFontFileRecord,
-        ManifestPackageRecord, ManifestSource, ManifestStore,
+        ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
     },
     model::{
         CancellationToken, ExecutionPolicy, FontFormat, InfoReport, InfoRequest, InstallPlan,
@@ -58,7 +58,18 @@ pub fn github_repo_install_plan(
 ) -> Result<InstallPlan> {
     let options = RemoteInstallOptions::from_request(request);
     let package_id = package_id_from_repo_name(&repo.repo)?;
-    if let Some(plan) = already_installed_plan(paths, &package_id, options.reinstall)? {
+    let requested_source = ManifestSource::GitHub {
+        owner: repo.owner.clone(),
+        repo: repo.repo.clone(),
+    };
+    let requested_update_source = Some(requested_source.clone());
+    if let Some(plan) = already_installed_plan(
+        paths,
+        &package_id,
+        options.reinstall,
+        &requested_source,
+        requested_update_source.as_ref(),
+    )? {
         return Ok(plan);
     }
 
@@ -87,7 +98,20 @@ pub fn registry_recipe_install_plan(
     let options = RemoteInstallOptions::from_request(request);
     let repo = recipe.github_repo.clone();
     let package_id = recipe.package_id.clone();
-    if let Some(plan) = already_installed_plan(paths, &package_id, options.reinstall)? {
+    let requested_source = ManifestSource::Registry {
+        id: package_id.as_str().to_string(),
+    };
+    let requested_update_source = Some(ManifestSource::GitHub {
+        owner: repo.owner.clone(),
+        repo: repo.repo.clone(),
+    });
+    if let Some(plan) = already_installed_plan(
+        paths,
+        &package_id,
+        options.reinstall,
+        &requested_source,
+        requested_update_source.as_ref(),
+    )? {
         return Ok(plan);
     }
 
@@ -112,6 +136,8 @@ fn already_installed_plan(
     paths: &FontbrewPaths,
     package_id: &PackageId,
     reinstall: bool,
+    requested_source: &ManifestSource,
+    requested_update_source: Option<&ManifestSource>,
 ) -> Result<Option<InstallPlan>> {
     if reinstall {
         return Ok(None);
@@ -121,6 +147,14 @@ fn already_installed_plan(
     let Some(record) = manifest.get_package(package_id) else {
         return Ok(None);
     };
+
+    if let Some(risk) = source_conflict_risk(record, requested_source, requested_update_source) {
+        return Ok(Some(source_conflict_plan(
+            package_id.clone(),
+            record.version.clone(),
+            risk,
+        )));
+    }
 
     Ok(Some(InstallPlan {
         package_id: package_id.clone(),
@@ -143,17 +177,36 @@ pub fn apply_install(
         return dry_run_install_report(plan);
     }
 
-    require_policy_for_risks(&plan.risks, &policy)?;
+    let planned_risks = plan.risks.clone();
+    let package_id = plan.package_id.clone();
 
-    if !plan.risks.is_empty() {
+    if let Err(error) = require_policy_for_risks(&plan.risks, &policy) {
+        cleanup_install_plan_staging(&plan);
+        return Err(error);
+    }
+
+    if let Some(description) = first_blocking_conflict_description(&plan.risks) {
+        cleanup_install_plan_staging(&plan);
         return Err(FontbrewError::Conflict {
-            package_id: plan.package_id,
-            message: "install plan contains unresolved conflicts".to_string(),
+            package_id,
+            message: description,
         });
     }
 
-    let _lock = GlobalFileLock::try_exclusive(&write_lock_path(paths))?;
-    let mut manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    let _lock = match GlobalFileLock::try_exclusive(&write_lock_path(paths)) {
+        Ok(lock) => lock,
+        Err(error) => {
+            cleanup_install_plan_staging(&plan);
+            return Err(error);
+        }
+    };
+    let mut manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            cleanup_install_plan_staging(&plan);
+            return Err(error);
+        }
+    };
 
     if plan.already_installed {
         let record = manifest
@@ -171,7 +224,39 @@ pub fn apply_install(
         });
     };
 
+    let mut current_risks = planned_risks;
+    match current_install_risks(paths, &manifest, &prepared) {
+        Ok(risks) => current_risks.extend(risks),
+        Err(error) => {
+            cleanup_staging(&prepared.staging_dir);
+            return Err(error);
+        }
+    }
+    if let Err(error) = require_policy_for_risks(&current_risks, &policy) {
+        cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
+    if let Some(description) = first_blocking_conflict_description(&current_risks) {
+        cleanup_staging(&prepared.staging_dir);
+        return Err(FontbrewError::Conflict {
+            package_id: prepared_package_id(&prepared),
+            message: description,
+        });
+    }
+
+    let requested_source = manifest_source_from_prepared(&prepared.source);
+    let requested_update_source = manifest_update_source_from_prepared(&prepared.source);
     if let Some(record) = manifest.get_package(&prepared_package_id(&prepared)) {
+        if let Some(risk) =
+            source_conflict_risk(record, &requested_source, requested_update_source.as_ref())
+        {
+            cleanup_staging(&prepared.staging_dir);
+            return Err(conflict_error_from_risk(
+                &prepared_package_id(&prepared),
+                &risk,
+            ));
+        }
+
         if !prepared.reinstall {
             cleanup_staging(&prepared.staging_dir);
             return Ok(install_report_from_record(record, false, true));
@@ -182,6 +267,10 @@ pub fn apply_install(
     cleanup_staging(&prepared.staging_dir);
 
     result
+}
+
+pub fn discard_install_plan(plan: InstallPlan) {
+    cleanup_install_plan_staging(&plan);
 }
 
 pub fn list_packages(paths: &FontbrewPaths) -> Result<ListReport> {
@@ -323,7 +412,21 @@ fn install_plan_from_prepared(
         }
     };
 
+    let requested_source = manifest_source_from_prepared(&prepared.source);
+    let requested_update_source = manifest_update_source_from_prepared(&prepared.source);
+
     if let Some(record) = manifest.get_package(&package_id) {
+        if let Some(risk) =
+            source_conflict_risk(record, &requested_source, requested_update_source.as_ref())
+        {
+            cleanup_staging(&prepared.staging_dir);
+            return Ok(source_conflict_plan(
+                package_id,
+                record.version.clone(),
+                risk,
+            ));
+        }
+
         if !prepared.reinstall {
             cleanup_staging(&prepared.staging_dir);
             return Ok(InstallPlan {
@@ -337,16 +440,13 @@ fn install_plan_from_prepared(
         }
     }
 
-    let mut risks = prepared.activation_risks.clone();
-    if prepared.package_store_dir.exists() && manifest.get_package(&package_id).is_none() {
-        risks.push(PlanRisk::Conflict {
-            package_id: package_id.clone(),
-            description: format!(
-                "package store directory exists outside manifest management: {}",
-                prepared.package_store_dir.display()
-            ),
-        });
-    }
+    let risks = match current_install_risks(paths, &manifest, &prepared) {
+        Ok(risks) => risks,
+        Err(error) => {
+            cleanup_staging(&prepared.staging_dir);
+            return Err(error);
+        }
+    };
 
     Ok(InstallPlan {
         package_id: package_id.clone(),
@@ -369,6 +469,26 @@ fn install_plan_from_prepared(
         already_installed: false,
         prepared: Some(prepared),
     })
+}
+
+fn source_conflict_plan(
+    package_id: PackageId,
+    target_version: PackageVersion,
+    risk: PlanRisk,
+) -> InstallPlan {
+    InstallPlan {
+        package_id: package_id.clone(),
+        target_version: Some(target_version),
+        changes: vec![PlannedChange {
+            package_id,
+            description:
+                "refuse install because package is already managed from a different source"
+                    .to_string(),
+        }],
+        risks: vec![risk],
+        already_installed: true,
+        prepared: None,
+    }
 }
 
 fn prepare_local_archive(
@@ -1062,6 +1182,42 @@ fn dry_run_install_report(plan: InstallPlan) -> Result<InstallReport> {
     })
 }
 
+fn cleanup_install_plan_staging(plan: &InstallPlan) {
+    if let Some(prepared) = &plan.prepared {
+        cleanup_staging(&prepared.staging_dir);
+    }
+}
+
+fn first_blocking_conflict_description(risks: &[PlanRisk]) -> Option<String> {
+    risks.iter().find_map(|risk| match risk {
+        PlanRisk::Conflict { description, .. } => Some(description.clone()),
+        PlanRisk::AmbiguousAsset { .. } | PlanRisk::UnmanagedFontOverlap { .. } => None,
+    })
+}
+
+fn conflict_error_from_risk(default_package_id: &PackageId, risk: &PlanRisk) -> FontbrewError {
+    match risk {
+        PlanRisk::Conflict {
+            package_id,
+            description,
+        } => FontbrewError::Conflict {
+            package_id: package_id.clone(),
+            message: description.clone(),
+        },
+        PlanRisk::AmbiguousAsset {
+            package_id,
+            description,
+        } => FontbrewError::Conflict {
+            package_id: package_id.clone(),
+            message: description.clone(),
+        },
+        PlanRisk::UnmanagedFontOverlap { description, .. } => FontbrewError::Conflict {
+            package_id: default_package_id.clone(),
+            message: description.clone(),
+        },
+    }
+}
+
 fn source_label(source: &ManifestSource) -> String {
     match source {
         ManifestSource::Registry { id } => format!("registry:{id}"),
@@ -1069,6 +1225,253 @@ fn source_label(source: &ManifestSource) -> String {
         ManifestSource::Provider { provider, id } => format!("provider:{provider:?}:{id}"),
         ManifestSource::LocalArchive { path } => format!("local archive:{}", path.display()),
     }
+}
+
+fn optional_source_label(source: Option<&ManifestSource>) -> String {
+    source
+        .map(source_label)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn source_conflict_risk(
+    record: &ManifestPackageRecord,
+    requested_source: &ManifestSource,
+    requested_update_source: Option<&ManifestSource>,
+) -> Option<PlanRisk> {
+    if &record.source == requested_source
+        && record.update_source.as_ref() == requested_update_source
+    {
+        return None;
+    }
+
+    Some(PlanRisk::Conflict {
+        package_id: record.package_id.clone(),
+        description: format!(
+            "package is already managed from a different source; installed source: {}; requested source: {}; installed update source: {}; requested update source: {}",
+            source_label(&record.source),
+            source_label(requested_source),
+            optional_source_label(record.update_source.as_ref()),
+            optional_source_label(requested_update_source),
+        ),
+    })
+}
+
+fn current_install_risks(
+    paths: &FontbrewPaths,
+    manifest: &ManifestV1,
+    prepared: &PreparedInstallPackage,
+) -> Result<Vec<PlanRisk>> {
+    let package_id = prepared_package_id(prepared);
+    let mut risks = managed_activation_path_conflict_risks(manifest, prepared);
+    risks.extend(current_activation_artifact_risks(prepared)?);
+    risks.extend(unmanaged_same_family_overlap_risks(
+        paths, manifest, prepared,
+    )?);
+
+    if prepared.package_store_dir.exists() && manifest.get_package(&package_id).is_none() {
+        risks.push(PlanRisk::Conflict {
+            package_id,
+            description: format!(
+                "package store directory exists outside manifest management: {}",
+                prepared.package_store_dir.display()
+            ),
+        });
+    }
+
+    Ok(risks)
+}
+
+fn current_activation_artifact_risks(prepared: &PreparedInstallPackage) -> Result<Vec<PlanRisk>> {
+    let activation_plan = ActivationPlanner::plan(ActivationRequest {
+        package_id: prepared_package_id(prepared),
+        font_files: prepared
+            .activation_artifacts
+            .iter()
+            .map(|artifact| artifact.source_path.clone())
+            .collect(),
+        activation_dir: prepared.activation_dir.clone(),
+        strategy: prepared.activation_strategy,
+    })?;
+
+    Ok(activation_plan.risks)
+}
+
+fn managed_activation_path_conflict_risks(
+    manifest: &ManifestV1,
+    prepared: &PreparedInstallPackage,
+) -> Vec<PlanRisk> {
+    let mut risks = Vec::new();
+    let package_id = prepared_package_id(prepared);
+
+    for artifact in &prepared.activation_artifacts {
+        for record in manifest.packages.values() {
+            if record.package_id == package_id {
+                continue;
+            }
+
+            if record
+                .activation_artifacts
+                .iter()
+                .any(|existing| existing.path == artifact.path)
+            {
+                risks.push(PlanRisk::Conflict {
+                    package_id: package_id.clone(),
+                    description: format!(
+                        "activation artifact path is already managed by package {}: {}",
+                        record.package_id.as_str(),
+                        artifact.path.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    risks
+}
+
+fn unmanaged_same_family_overlap_risks(
+    paths: &FontbrewPaths,
+    manifest: &ManifestV1,
+    prepared: &PreparedInstallPackage,
+) -> Result<Vec<PlanRisk>> {
+    let mut managed_paths = manifest
+        .packages
+        .values()
+        .flat_map(|record| record.activation_artifacts.iter())
+        .map(|artifact| artifact.path.clone())
+        .collect::<BTreeSet<_>>();
+    managed_paths.extend(
+        prepared
+            .activation_artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone()),
+    );
+
+    let mut scan_dirs = BTreeSet::new();
+    scan_dirs.insert(paths.activation_dir());
+    if let Some(user_fonts_dir) = paths.activation_dir().parent() {
+        scan_dirs.insert(user_fonts_dir.to_path_buf());
+    }
+
+    let reader = TtfParserMetadataReader::default();
+    let mut risks = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for scan_dir in scan_dirs {
+        let entries = match fs::read_dir(&scan_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path == paths.activation_dir() || managed_paths.contains(&path) {
+                continue;
+            }
+
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !is_scannable_font_artifact(&path, &metadata)? {
+                continue;
+            }
+
+            if let Some(family) = overlapping_family(&reader, &path, &prepared.families) {
+                let key = (family.as_str().to_string(), path.clone());
+                if seen.insert(key) {
+                    risks.push(PlanRisk::UnmanagedFontOverlap {
+                        family_name: family.clone(),
+                        description: format!(
+                            "unmanaged font file may overlap family {}: {}",
+                            family.as_str(),
+                            path.display()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(risks)
+}
+
+fn is_scannable_font_artifact(path: &Path, metadata: &fs::Metadata) -> Result<bool> {
+    if !is_desktop_font_path(path) {
+        return Ok(false);
+    }
+
+    if metadata.file_type().is_file() {
+        return Ok(true);
+    }
+
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+
+    match fs::metadata(path) {
+        Ok(target_metadata) => Ok(target_metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn is_desktop_font_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc" | "otc"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn overlapping_family(
+    reader: &TtfParserMetadataReader,
+    path: &Path,
+    installed_families: &[FamilyName],
+) -> Option<FamilyName> {
+    if let Ok(faces) = reader.read_file(path) {
+        for face in faces {
+            if let Some(family) = installed_families
+                .iter()
+                .find(|family| same_family_name(&face.family_name, family))
+            {
+                return Some(family.clone());
+            }
+        }
+    }
+
+    installed_families
+        .iter()
+        .find(|family| path_name_matches_family(path, family))
+        .cloned()
+}
+
+fn same_family_name(left: &FamilyName, right: &FamilyName) -> bool {
+    normalized_font_name(left.as_str()) == normalized_font_name(right.as_str())
+}
+
+fn path_name_matches_family(path: &Path, family: &FamilyName) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let stem = normalized_font_name(stem);
+    let family = normalized_font_name(family.as_str());
+
+    !family.is_empty() && stem.contains(&family)
+}
+
+fn normalized_font_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn require_policy_for_risks(risks: &[PlanRisk], policy: &ExecutionPolicy) -> Result<()> {

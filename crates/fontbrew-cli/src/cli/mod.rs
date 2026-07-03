@@ -235,13 +235,19 @@ fn install(
         offline: args.offline,
     };
     let plan = app.install_plan(request)?;
-    let policy = confirmer.execution_policy(
+    let policy = match confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {
             assume_yes: args.yes,
             dry_run: args.dry_run,
         },
-    )?;
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            app.discard_install_plan(plan);
+            return Err(error);
+        }
+    };
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
         let report = app.apply_install(plan, policy, &mut progress, &NeverCancelled)?;
