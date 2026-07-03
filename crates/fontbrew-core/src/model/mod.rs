@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::error::{FontbrewError, Result};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct PackageId(String);
 

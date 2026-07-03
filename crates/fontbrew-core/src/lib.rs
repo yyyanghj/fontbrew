@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod fonts;
 pub mod fs;
+pub mod manifest;
 pub mod model;
 pub mod platform;
 pub mod version;

@@ -51,6 +51,12 @@ pub enum FontbrewError {
     #[error("path resolution error: {message}")]
     PathResolution { message: String },
 
+    #[error("manifest error: {message}")]
+    Manifest { message: String },
+
+    #[error("unsupported manifest schema version: found {found:?}, supported {supported}")]
+    ManifestSchema { found: Option<u64>, supported: u64 },
+
     #[error("could not acquire lock at {path:?}: {source}")]
     Lock {
         path: PathBuf,
