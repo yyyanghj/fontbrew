@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    FamilyName, InfoReport, InstallReport, ListReport, ProgressEvent, RegistryStatusReport,
-    RegistryUpdateReport, RemoveReport,
+    FamilyName, InfoReport, InstallReport, ListReport, OutdatedReport, ProgressEvent,
+    RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
 };
 
 use crate::{
@@ -117,6 +117,58 @@ impl Reporter for HumanReporter {
             writeln!(stdout, "Removed {}.", report.package_id.as_str())?;
         } else {
             writeln!(stdout, "{} is not installed.", report.package_id.as_str())?;
+        }
+
+        Ok(())
+    }
+
+    fn render_search_report(&mut self, report: SearchReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        if report.results.is_empty() {
+            writeln!(stdout, "No registry packages found.")?;
+            return Ok(());
+        }
+
+        for result in report.results {
+            writeln!(
+                stdout,
+                "{}\t{}\t{}\t{}",
+                result.package_id.as_str(),
+                result.display_name,
+                families_label(&result.families),
+                result.source
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn render_outdated_report(&mut self, report: OutdatedReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        if report.packages.is_empty() && report.not_updatable.is_empty() {
+            writeln!(stdout, "All checked packages are up to date.")?;
+            return Ok(());
+        }
+
+        for package in report.packages {
+            writeln!(
+                stdout,
+                "{}\t{} -> {}",
+                package.package_id.as_str(),
+                package.current_version.as_str(),
+                package.latest_version.as_str()
+            )?;
+        }
+
+        for package in report.not_updatable {
+            writeln!(
+                stdout,
+                "{}\tnot updatable: {}",
+                package.package_id.as_str(),
+                package.reason
+            )?;
         }
 
         Ok(())

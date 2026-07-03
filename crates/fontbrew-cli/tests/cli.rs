@@ -74,6 +74,35 @@ fn write_registry_snapshot(path: &Path) {
     .expect("write registry snapshot fixture");
 }
 
+fn write_search_registry_snapshot(path: &Path) {
+    fs::write(
+        path,
+        r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "inter": {
+      "name": "Inter",
+      "source": {
+        "type": "github",
+        "repo": "rsms/inter"
+      },
+      "families": ["Inter"]
+    },
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": {
+        "type": "github",
+        "repo": "adobe/source-code-pro"
+      },
+      "families": ["Source Code Pro"]
+    }
+  }
+}"#,
+    )
+    .expect("write search registry snapshot fixture");
+}
+
 #[test]
 fn list_on_empty_home_prints_human_empty_state_on_stdout_only() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -423,4 +452,118 @@ fn registry_status_reports_missing_and_present_snapshots() {
         json["report"]["registry_updated_at"],
         "2026-07-03T00:00:00Z"
     );
+}
+
+#[test]
+fn json_search_refreshes_registry_snapshot_and_reports_matches_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let registry_path = temp.path().join("registry.json");
+    write_search_registry_snapshot(&registry_path);
+
+    let output = fontbrew(&home)
+        .env(
+            REGISTRY_URL_ENV_VAR,
+            format!("file://{}", registry_path.display()),
+        )
+        .args(["--json", "search", "code", "--limit", "1", "--refresh"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "search");
+    assert_eq!(
+        json["report"]["results"][0]["package_id"],
+        "source-code-pro"
+    );
+    assert_eq!(
+        json["report"]["results"][0]["display_name"],
+        "Source Code Pro"
+    );
+    assert!(stderr_text(&output).is_empty());
+}
+
+#[test]
+fn human_search_reports_registry_result_fields_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let registry_path = temp.path().join("registry.json");
+    write_search_registry_snapshot(&registry_path);
+
+    fontbrew(&home)
+        .env(
+            REGISTRY_URL_ENV_VAR,
+            format!("file://{}", registry_path.display()),
+        )
+        .args(["search", "code", "--limit", "1", "--refresh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "source-code-pro\tSource Code Pro\tSource Code Pro\tregistry:source-code-pro",
+        ))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn json_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    let output = fontbrew(&home)
+        .args(["--json", "outdated", "--offline", "source-code-pro"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "outdated");
+    assert_eq!(json["report"]["packages"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        json["report"]["not_updatable"][0]["package_id"],
+        "source-code-pro"
+    );
+    assert!(json["report"]["not_updatable"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no GitHub update source"));
+    assert!(stderr_text(&output).is_empty());
+}
+
+#[test]
+fn human_outdated_offline_reports_local_archive_as_not_updatable_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    fontbrew(&home)
+        .args(["outdated", "--offline", "source-code-pro"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("source-code-pro")
+                .and(predicate::str::contains("not updatable")),
+        )
+        .stderr(predicate::str::is_empty());
 }

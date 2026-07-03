@@ -114,6 +114,10 @@ impl RegistrySnapshotStore {
     pub fn resolve_short_name(&self, short_name: &str) -> Result<RegistryPackageRecipe> {
         self.read_snapshot()?.resolve_short_name(short_name)
     }
+
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<RegistryPackageRecipe>> {
+        self.read_snapshot()?.search(query, limit)
+    }
 }
 
 pub trait RegistryHttpClient {
@@ -191,6 +195,25 @@ impl RegistrySnapshotV1 {
         package.recipe(package_id)
     }
 
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<RegistryPackageRecipe>> {
+        let query = query.trim().to_lowercase();
+        let mut results = Vec::new();
+
+        for (package_id, package) in &self.packages {
+            if !query.is_empty() && !package_matches_query(package_id, package, &query) {
+                continue;
+            }
+
+            if limit.is_some_and(|limit| results.len() >= limit) {
+                break;
+            }
+
+            results.push(package.recipe(package_id.clone())?);
+        }
+
+        Ok(results)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.schema_version != REGISTRY_SCHEMA_VERSION {
             return registry_invalid(format!(
@@ -211,6 +234,19 @@ impl RegistrySnapshotV1 {
 
         Ok(())
     }
+}
+
+fn package_matches_query(
+    package_id: &PackageId,
+    package: &RegistryPackageRecord,
+    query: &str,
+) -> bool {
+    package_id.as_str().contains(query)
+        || package.name.to_lowercase().contains(query)
+        || package
+            .families
+            .iter()
+            .any(|family| family.as_str().to_lowercase().contains(query))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

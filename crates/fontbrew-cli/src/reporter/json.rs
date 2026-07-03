@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    InfoReport, InstallReport, ListReport, ProgressEvent, RegistryStatusReport,
-    RegistryUpdateReport, RemoveReport,
+    InfoReport, InstallReport, ListReport, OutdatedReport, ProgressEvent, RegistryStatusReport,
+    RegistryUpdateReport, RemoveReport, SearchReport,
 };
 use serde::Serialize;
 
@@ -62,6 +62,14 @@ impl Reporter for JsonReporter {
 
     fn render_remove_report(&mut self, report: RemoveReport) -> CliResult<()> {
         self.render_report("remove", &report)
+    }
+
+    fn render_search_report(&mut self, report: SearchReport) -> CliResult<()> {
+        self.render_report("search", &report)
+    }
+
+    fn render_outdated_report(&mut self, report: OutdatedReport) -> CliResult<()> {
+        self.render_report("outdated", &report)
     }
 
     fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()> {

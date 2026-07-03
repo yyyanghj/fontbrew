@@ -317,6 +317,7 @@ pub struct InfoRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutdatedRequest {
     pub package_ids: Vec<PackageId>,
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +329,8 @@ pub struct UpdateRequest {
 pub struct SearchRequest {
     pub query: String,
     pub limit: Option<usize>,
+    pub refresh: bool,
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

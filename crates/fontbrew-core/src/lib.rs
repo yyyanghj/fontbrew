@@ -15,6 +15,7 @@ pub mod model;
 pub mod platform;
 pub mod registry;
 pub mod sources;
+mod update;
 pub mod version;
 
 pub use app::FontbrewApp;

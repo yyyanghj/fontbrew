@@ -28,13 +28,22 @@ pub(crate) fn resolve_release_asset(
     package_id: &PackageId,
 ) -> Result<ResolvedGitHubAsset> {
     let release = fetch_latest_stable_release(http_client, repo)?;
-    let version = PackageVersion::parse(&release.tag_name)?;
+    let version = release_version(&release)?;
     let asset = select_release_asset(&release, recipe_asset, asset_selector, package_id)?;
 
     Ok(ResolvedGitHubAsset {
         version,
         download_url: asset.browser_download_url,
     })
+}
+
+pub(crate) fn resolve_latest_stable_release_version(
+    http_client: &dyn HttpClient,
+    repo: &GitHubRepo,
+) -> Result<PackageVersion> {
+    let release = fetch_latest_stable_release(http_client, repo)?;
+
+    release_version(&release)
 }
 
 pub(crate) fn download_release_asset_to_file(
@@ -93,6 +102,10 @@ fn fetch_latest_stable_release(
         .ok_or_else(|| FontbrewError::ArchiveRejected {
             reason: format!("GitHub repository {} has no stable releases", repo.label()),
         })
+}
+
+fn release_version(release: &GitHubRelease) -> Result<PackageVersion> {
+    PackageVersion::parse(&release.tag_name)
 }
 
 fn select_release_asset(

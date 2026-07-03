@@ -11,6 +11,7 @@ use crate::model::{
 };
 use crate::platform::FontbrewPaths;
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
+use crate::update;
 
 #[derive(Clone)]
 pub struct FontbrewApp {
@@ -101,8 +102,8 @@ impl FontbrewApp {
         install::apply_remove(&self.paths()?, plan, policy, progress, cancellation)
     }
 
-    pub fn outdated(&self, _request: OutdatedRequest) -> Result<OutdatedReport> {
-        not_implemented("outdated")
+    pub fn outdated(&self, request: OutdatedRequest) -> Result<OutdatedReport> {
+        update::outdated(&self.paths()?, request, self.http_client()?.as_ref())
     }
 
     pub fn update_plan(
@@ -124,8 +125,30 @@ impl FontbrewApp {
         not_implemented("apply_update")
     }
 
-    pub fn search(&self, _request: SearchRequest) -> Result<SearchReport> {
-        not_implemented("search")
+    pub fn search(&self, request: SearchRequest) -> Result<SearchReport> {
+        if request.refresh && request.offline {
+            return Err(FontbrewError::Config {
+                message: "search cannot use --refresh with --offline".to_string(),
+            });
+        }
+
+        if request.refresh {
+            self.registry_update()?;
+        }
+
+        let results = RegistrySnapshotStore::new(self.paths()?)
+            .search(&request.query, request.limit)?
+            .into_iter()
+            .map(|recipe| crate::SearchResult {
+                package_id: recipe.package_id.clone(),
+                display_name: recipe.name,
+                source: format!("registry:{}", recipe.package_id.as_str()),
+                version: None,
+                families: recipe.families,
+            })
+            .collect();
+
+        Ok(SearchReport { results })
     }
 
     pub fn registry_update(&self) -> Result<RegistryUpdateReport> {

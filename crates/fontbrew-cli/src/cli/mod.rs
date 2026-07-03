@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::GitHubRepo, CancellationToken, FontFormat, FontbrewApp, InfoRequest, InstallRequest,
-    InstallSource, PackageId, RemoveRequest,
+    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest,
 };
 
 use crate::{
@@ -54,6 +54,10 @@ enum Command {
     /// Remove a managed package.
     #[command(alias = "uninstall")]
     Remove(RemoveArgs),
+    /// Search packages in the local registry snapshot.
+    Search(SearchArgs),
+    /// Check managed packages for available updates.
+    Outdated(OutdatedArgs),
     /// Manage the local first-party registry snapshot.
     Registry(RegistryArgs),
 }
@@ -105,6 +109,28 @@ struct RemoveArgs {
 
     #[arg(long, help = "Build the remove plan without applying changes")]
     dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct SearchArgs {
+    query: Option<String>,
+
+    #[arg(long, help = "Maximum number of results to return")]
+    limit: Option<usize>,
+
+    #[arg(long, help = "Refresh registry metadata before searching")]
+    refresh: bool,
+
+    #[arg(long, help = "Use the local registry snapshot only")]
+    offline: bool,
+}
+
+#[derive(Debug, Args)]
+struct OutdatedArgs {
+    package_ids: Vec<String>,
+
+    #[arg(long, help = "Do not query GitHub release metadata")]
+    offline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -171,6 +197,8 @@ fn execute(
         Command::List => list(app, reporter),
         Command::Info(args) => info(args, app, reporter),
         Command::Remove(args) => remove(args, app, reporter, confirmer),
+        Command::Search(args) => search(args, app, reporter),
+        Command::Outdated(args) => outdated(args, app, reporter),
         Command::Registry(args) => registry(args, app, reporter),
     }
 }
@@ -243,6 +271,31 @@ fn remove(
     };
 
     reporter.render_remove_report(report)
+}
+
+fn search(args: SearchArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    let report = app.search(SearchRequest {
+        query: args.query.unwrap_or_default(),
+        limit: args.limit,
+        refresh: args.refresh,
+        offline: args.offline,
+    })?;
+
+    reporter.render_search_report(report)
+}
+
+fn outdated(args: OutdatedArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    let package_ids = args
+        .package_ids
+        .into_iter()
+        .map(PackageId::parse)
+        .collect::<fontbrew_core::Result<Vec<_>>>()?;
+    let report = app.outdated(OutdatedRequest {
+        package_ids,
+        offline: args.offline,
+    })?;
+
+    reporter.render_outdated_report(report)
 }
 
 fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
