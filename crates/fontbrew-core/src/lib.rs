@@ -1,6 +1,7 @@
 //! Reusable application core for Fontbrew-owned frontends.
 
 pub mod app;
+pub mod archives;
 pub mod config;
 pub mod error;
 pub mod fonts;

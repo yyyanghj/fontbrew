@@ -19,6 +19,7 @@ tempfile = "3"
 thiserror = "2"
 ttf-parser = "0.25.1"
 toml = "0.9"
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
