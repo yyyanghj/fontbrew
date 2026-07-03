@@ -1,0 +1,3 @@
+# Activation strategy is switchable
+
+Fontbrew initially activates installed packages by creating symlinks from a Fontbrew-owned activation directory into its managed store. The activation layer must remain strategy-based so Fontbrew can switch to copying font files if macOS or font tooling compatibility problems appear. Fontbrew only manages activation artifacts inside its own activation directory and does not touch user-installed fonts outside that boundary.
