@@ -15,6 +15,7 @@ pub mod model;
 pub mod platform;
 pub mod registry;
 pub mod sources;
+pub mod tasks;
 mod update;
 pub mod version;
 

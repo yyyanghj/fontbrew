@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     activation::ActivationStrategy,
     error::{FontbrewError, Result},
-    fs::write_atomically,
+    fs::{write_atomically_with_commit_status, AtomicWriteCommitStatus},
     FamilyName, PackageId, PackageVersion, ProviderKind,
 };
 
@@ -119,14 +119,50 @@ impl ManifestStore {
     }
 
     pub fn write(path: &Path, manifest: &ManifestV1) -> Result<()> {
-        validate_manifest(manifest)?;
+        Self::write_with_commit_status(path, manifest).map_err(ManifestWriteError::into_error)
+    }
 
-        let content =
-            serde_json::to_vec_pretty(manifest).map_err(|source| FontbrewError::Manifest {
+    pub fn write_with_commit_status(
+        path: &Path,
+        manifest: &ManifestV1,
+    ) -> std::result::Result<(), ManifestWriteError> {
+        validate_manifest(manifest).map_err(ManifestWriteError::not_committed)?;
+
+        let content = serde_json::to_vec_pretty(manifest)
+            .map_err(|source| FontbrewError::Manifest {
                 message: format!("could not serialize manifest: {source}"),
-            })?;
+            })
+            .map_err(ManifestWriteError::not_committed)?;
 
-        write_atomically(path, &content)
+        write_atomically_with_commit_status(path, &content).map_err(ManifestWriteError::from)
+    }
+}
+
+#[derive(Debug)]
+pub struct ManifestWriteError {
+    pub commit_status: AtomicWriteCommitStatus,
+    pub error: FontbrewError,
+}
+
+impl ManifestWriteError {
+    fn not_committed(error: FontbrewError) -> Self {
+        Self {
+            commit_status: AtomicWriteCommitStatus::NotCommitted,
+            error,
+        }
+    }
+
+    pub fn into_error(self) -> FontbrewError {
+        self.error
+    }
+}
+
+impl From<crate::fs::AtomicWriteError> for ManifestWriteError {
+    fn from(error: crate::fs::AtomicWriteError) -> Self {
+        Self {
+            commit_status: error.commit_status,
+            error: error.error,
+        }
     }
 }
 

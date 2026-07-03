@@ -108,21 +108,27 @@ impl FontbrewApp {
 
     pub fn update_plan(
         &self,
-        _request: UpdateRequest,
-        _progress: &mut dyn ProgressSink,
-        _cancellation: &dyn CancellationToken,
+        request: UpdateRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: &dyn CancellationToken,
     ) -> Result<UpdatePlan> {
-        not_implemented("update_plan")
+        update::update_plan(
+            &self.paths()?,
+            request,
+            self.http_client()?.as_ref(),
+            progress,
+            cancellation,
+        )
     }
 
     pub fn apply_update(
         &self,
-        _plan: UpdatePlan,
-        _policy: ExecutionPolicy,
-        _progress: &mut dyn ProgressSink,
-        _cancellation: &dyn CancellationToken,
+        plan: UpdatePlan,
+        policy: ExecutionPolicy,
+        progress: &mut dyn ProgressSink,
+        cancellation: &dyn CancellationToken,
     ) -> Result<UpdateReport> {
-        not_implemented("apply_update")
+        update::apply_update(&self.paths()?, plan, policy, progress, cancellation)
     }
 
     pub fn search(&self, request: SearchRequest) -> Result<SearchReport> {

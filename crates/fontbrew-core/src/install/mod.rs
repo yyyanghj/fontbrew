@@ -395,10 +395,10 @@ fn prepare_local_archive(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteInstallOptions {
-    asset_selector: Option<String>,
-    package_id: Option<PackageId>,
-    reinstall: bool,
+pub(crate) struct RemoteInstallOptions {
+    pub(crate) asset_selector: Option<String>,
+    pub(crate) package_id: Option<PackageId>,
+    pub(crate) reinstall: bool,
 }
 
 impl RemoteInstallOptions {
@@ -413,6 +413,14 @@ impl RemoteInstallOptions {
     fn with_package_id(mut self, package_id: PackageId) -> Self {
         self.package_id = Some(package_id);
         self
+    }
+
+    pub(crate) fn for_update(package_id: PackageId) -> Self {
+        Self {
+            asset_selector: None,
+            package_id: Some(package_id),
+            reinstall: false,
+        }
     }
 }
 
@@ -464,6 +472,48 @@ fn download_and_parse_github_archive(
         &fallback_package_id,
     )?;
 
+    download_and_parse_resolved_github_archive(
+        paths,
+        asset,
+        source,
+        options,
+        http_client,
+        staging_dir,
+    )
+}
+
+pub(crate) fn prepare_resolved_github_release_archive(
+    paths: &FontbrewPaths,
+    asset: github::ResolvedGitHubAsset,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+) -> Result<PreparedInstallPackage> {
+    let staging_dir = new_staging_dir(paths)?;
+    let result = download_and_parse_resolved_github_archive(
+        paths,
+        asset,
+        source,
+        options,
+        http_client,
+        staging_dir.clone(),
+    );
+
+    if result.is_err() {
+        cleanup_staging(&staging_dir);
+    }
+
+    result
+}
+
+fn download_and_parse_resolved_github_archive(
+    paths: &FontbrewPaths,
+    asset: github::ResolvedGitHubAsset,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+    staging_dir: PathBuf,
+) -> Result<PreparedInstallPackage> {
     fs::create_dir_all(&staging_dir)?;
     let archive_path = staging_dir.join("download.zip");
     github::download_release_asset_to_file(http_client, &asset.download_url, &archive_path)?;
@@ -753,7 +803,10 @@ fn prepared_package_id(prepared: &PreparedInstallPackage) -> PackageId {
     prepared.package_id.clone()
 }
 
-fn copy_prepared_files(paths: &FontbrewPaths, prepared: &PreparedInstallPackage) -> Result<()> {
+pub(crate) fn copy_prepared_files(
+    paths: &FontbrewPaths,
+    prepared: &PreparedInstallPackage,
+) -> Result<()> {
     ensure_existing_path_does_not_cross_symlink(
         &paths.managed_store_dir(),
         &prepared.package_store_dir,
@@ -879,7 +932,7 @@ fn rollback_package_store(package_store_dir: &Path, backup_dir: Option<&Path>) {
     }
 }
 
-fn manifest_record_from_prepared(
+pub(crate) fn manifest_record_from_prepared(
     prepared: &PreparedInstallPackage,
     activation_artifacts: Vec<ActivationArtifact>,
 ) -> Result<ManifestPackageRecord> {
@@ -954,7 +1007,9 @@ fn manifest_font_files_from_prepared(
     records
 }
 
-fn activation_artifacts_from_record(record: &ManifestPackageRecord) -> Vec<ActivationArtifact> {
+pub(crate) fn activation_artifacts_from_record(
+    record: &ManifestPackageRecord,
+) -> Vec<ActivationArtifact> {
     record
         .activation_artifacts
         .iter()
@@ -1067,7 +1122,7 @@ fn operation_suffix() -> Result<String> {
     Ok(format!("{timestamp}-{counter}"))
 }
 
-fn cleanup_staging(path: &Path) {
+pub(crate) fn cleanup_staging(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
 
@@ -1105,7 +1160,7 @@ fn installed_at_now() -> String {
     format!("unix:{seconds}")
 }
 
-fn write_lock_path(paths: &FontbrewPaths) -> PathBuf {
+pub(crate) fn write_lock_path(paths: &FontbrewPaths) -> PathBuf {
     paths.managed_store_dir().join(".fontbrew.lock")
 }
 

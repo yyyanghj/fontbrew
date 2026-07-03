@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use fontbrew_core::{
     FamilyName, InfoReport, InstallReport, ListReport, OutdatedReport, ProgressEvent,
-    RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
+    RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport, UpdateReport,
 };
 
 use crate::{
@@ -166,6 +166,45 @@ impl Reporter for HumanReporter {
             writeln!(
                 stdout,
                 "{}\tnot updatable: {}",
+                package.package_id.as_str(),
+                package.reason
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn render_update_report(&mut self, report: UpdateReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        if report.planned.is_empty() && report.updated.is_empty() {
+            writeln!(stdout, "No updates prepared.")?;
+        }
+
+        for package in report.planned {
+            writeln!(
+                stdout,
+                "Planned update {} {} -> {}; no changes applied.",
+                package.package_id.as_str(),
+                package.current_version.as_str(),
+                package.target_version.as_str()
+            )?;
+        }
+
+        for package in report.updated {
+            writeln!(
+                stdout,
+                "Updated {} {} -> {}.",
+                package.package_id.as_str(),
+                package.previous_version.as_str(),
+                package.installed_version.as_str()
+            )?;
+        }
+
+        for package in report.skipped {
+            writeln!(
+                stdout,
+                "{}\tnot prepared: {}",
                 package.package_id.as_str(),
                 package.reason
             )?;

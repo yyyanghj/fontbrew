@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::GitHubRepo, CancellationToken, FontFormat, FontbrewApp, InfoRequest, InstallRequest,
-    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest,
+    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
@@ -58,6 +58,8 @@ enum Command {
     Search(SearchArgs),
     /// Check managed packages for available updates.
     Outdated(OutdatedArgs),
+    /// Update managed packages.
+    Update(UpdateArgs),
     /// Manage the local first-party registry snapshot.
     Registry(RegistryArgs),
 }
@@ -134,6 +136,20 @@ struct OutdatedArgs {
 }
 
 #[derive(Debug, Args)]
+struct UpdateArgs {
+    package_ids: Vec<String>,
+
+    #[arg(long, help = "Assume yes for approval prompts")]
+    yes: bool,
+
+    #[arg(long, help = "Prepare the update plan without applying changes")]
+    dry_run: bool,
+
+    #[arg(long, help = "Maximum number of concurrent prepare jobs")]
+    jobs: Option<usize>,
+}
+
+#[derive(Debug, Args)]
 struct RegistryArgs {
     #[command(subcommand)]
     command: RegistryCommand,
@@ -199,6 +215,7 @@ fn execute(
         Command::Remove(args) => remove(args, app, reporter, confirmer),
         Command::Search(args) => search(args, app, reporter),
         Command::Outdated(args) => outdated(args, app, reporter),
+        Command::Update(args) => update(args, app, reporter, confirmer),
         Command::Registry(args) => registry(args, app, reporter),
     }
 }
@@ -296,6 +313,40 @@ fn outdated(args: OutdatedArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) 
     })?;
 
     reporter.render_outdated_report(report)
+}
+
+fn update(
+    args: UpdateArgs,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+) -> CliResult<()> {
+    let package_ids = args
+        .package_ids
+        .into_iter()
+        .map(PackageId::parse)
+        .collect::<fontbrew_core::Result<Vec<_>>>()?;
+    let request = UpdateRequest {
+        package_ids,
+        jobs: args.jobs,
+        offline: false,
+    };
+    let report = {
+        let mut progress = ProgressAdapter::new(reporter);
+        let plan = app.update_plan(request, &mut progress, &NeverCancelled)?;
+        let policy = confirmer.execution_policy(
+            &plan.risks,
+            ConfirmationOptions {
+                assume_yes: args.yes,
+                dry_run: args.dry_run,
+            },
+        )?;
+        let report = app.apply_update(plan, policy, &mut progress, &NeverCancelled)?;
+        progress.finish()?;
+        report
+    };
+
+    reporter.render_update_report(report)
 }
 
 fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {

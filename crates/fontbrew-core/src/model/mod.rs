@@ -323,6 +323,8 @@ pub struct OutdatedRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRequest {
     pub package_ids: Vec<PackageId>,
+    pub jobs: Option<usize>,
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +542,8 @@ pub struct UpdatePlan {
     pub risks: Vec<PlanRisk>,
     pub prepared: Vec<UpdatePlanPackage>,
     pub failed: Vec<UpdatePlanFailure>,
+    #[serde(skip)]
+    pub(crate) prepared_packages: Vec<PreparedUpdatePackage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,9 +559,16 @@ pub struct UpdatePlanFailure {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedUpdatePackage {
+    pub summary: UpdatePlanPackage,
+    pub prepared: PreparedInstallPackage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateReport {
     pub operation_id: OperationId,
+    pub planned: Vec<UpdatePlanPackage>,
     pub updated: Vec<UpdatedPackage>,
     pub skipped: Vec<UpdatePlanFailure>,
 }

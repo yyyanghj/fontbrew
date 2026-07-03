@@ -567,3 +567,72 @@ fn human_outdated_offline_reports_local_archive_as_not_updatable_on_stdout_only(
         )
         .stderr(predicate::str::is_empty());
 }
+
+#[test]
+fn json_update_dry_run_reports_local_package_as_failed_without_prompting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    let output = fontbrew(&home)
+        .args([
+            "--json",
+            "update",
+            "--dry-run",
+            "--jobs",
+            "2",
+            "source-code-pro",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "update");
+    assert_eq!(json["report"]["planned"].as_array().unwrap().len(), 0);
+    assert_eq!(json["report"]["updated"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        json["report"]["skipped"][0]["package_id"],
+        "source-code-pro"
+    );
+    assert!(json["report"]["skipped"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no GitHub update source"));
+    assert!(stderr_text(&output).is_empty());
+}
+
+#[test]
+fn human_update_dry_run_reports_skipped_package_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    fontbrew(&home)
+        .args(["update", "--dry-run", "source-code-pro"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("No updates prepared.")
+                .and(predicate::str::contains("source-code-pro"))
+                .and(predicate::str::contains("not prepared")),
+        )
+        .stderr(predicate::str::is_empty());
+}
