@@ -1,0 +1,16 @@
+[package]
+name = "fontbrew-cli"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "fontbrew"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fontbrew-core = { path = "../fontbrew-core" }
+
+[lints]
+workspace = true
