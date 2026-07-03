@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::model::{FamilyName, PackageId};
 
 pub type Result<T> = std::result::Result<T, FontbrewError>;
@@ -39,6 +41,19 @@ pub enum FontbrewError {
 
     #[error("registry validation failed: {message}")]
     RegistryValidationFailed { message: String },
+
+    #[error("configuration error: {message}")]
+    Config { message: String },
+
+    #[error("path resolution error: {message}")]
+    PathResolution { message: String },
+
+    #[error("could not acquire lock at {path:?}: {source}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

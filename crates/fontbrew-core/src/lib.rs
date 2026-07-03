@@ -1,8 +1,11 @@
 //! Reusable application core for Fontbrew-owned frontends.
 
 pub mod app;
+pub mod config;
 pub mod error;
+pub mod fs;
 pub mod model;
+pub mod platform;
 
 pub use app::FontbrewApp;
 pub use error::{FontbrewError, Result};
