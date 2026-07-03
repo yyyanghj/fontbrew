@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+pub use crate::activation::ActivationStrategy;
 use crate::error::{FontbrewError, Result};
 use crate::model::FontFormat;
 
@@ -49,12 +50,6 @@ impl Default for FontbrewConfig {
             update_concurrency: DEFAULT_UPDATE_CONCURRENCY,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivationStrategy {
-    Symlink,
-    Copy,
 }
 
 #[derive(Debug, Deserialize)]
