@@ -561,3 +561,20 @@ pub struct SearchResult {
     pub version: Option<PackageVersion>,
     pub families: Vec<FamilyName>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryUpdateReport {
+    pub registry_url: String,
+    pub snapshot_path: PathBuf,
+    pub registry_updated_at: String,
+    pub package_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryStatusReport {
+    pub available: bool,
+    pub snapshot_path: PathBuf,
+    pub registry_updated_at: Option<String>,
+    pub snapshot_modified_at: Option<String>,
+    pub package_count: usize,
+}

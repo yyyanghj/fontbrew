@@ -2,11 +2,12 @@ use crate::error::{FontbrewError, Result};
 use crate::install;
 use crate::model::{
     CancellationToken, ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport,
-    InstallRequest, ListReport, OutdatedReport, OutdatedRequest, ProgressSink, RemovePlan,
-    RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
-    UpdateRequest,
+    InstallRequest, ListReport, OutdatedReport, OutdatedRequest, ProgressSink,
+    RegistryStatusReport, RegistryUpdateReport, RemovePlan, RemoveReport, RemoveRequest,
+    SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
+use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
 
 #[derive(Debug, Default, Clone)]
 pub struct FontbrewApp {
@@ -23,11 +24,16 @@ impl FontbrewApp {
     }
 
     pub fn install_plan(&self, request: InstallRequest) -> Result<InstallPlan> {
-        if !matches!(request.source, crate::InstallSource::LocalPath(_)) {
-            return not_implemented("install_plan");
+        match &request.source {
+            crate::InstallSource::LocalPath(_) => install::install_plan(&self.paths()?, request),
+            crate::InstallSource::RegistryName(short_name) => {
+                RegistrySnapshotStore::new(self.paths()?).resolve_short_name(short_name)?;
+                not_implemented("github_release_install")
+            }
+            crate::InstallSource::Provider { .. } | crate::InstallSource::GitHubRepo { .. } => {
+                not_implemented("install_plan")
+            }
         }
-
-        install::install_plan(&self.paths()?, request)
     }
 
     pub fn apply_install(
@@ -87,6 +93,19 @@ impl FontbrewApp {
 
     pub fn search(&self, _request: SearchRequest) -> Result<SearchReport> {
         not_implemented("search")
+    }
+
+    pub fn registry_update(&self) -> Result<RegistryUpdateReport> {
+        let paths = self.paths()?;
+        let store = RegistrySnapshotStore::new(paths);
+        let client = ReqwestRegistryHttpClient::default();
+        let registry_url = registry_url_from_env();
+
+        store.update_from_client(&client, &registry_url)
+    }
+
+    pub fn registry_status(&self) -> Result<RegistryStatusReport> {
+        RegistrySnapshotStore::new(self.paths()?).status()
     }
 
     fn paths(&self) -> Result<FontbrewPaths> {

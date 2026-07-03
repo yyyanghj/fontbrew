@@ -6,6 +6,7 @@ use std::{
 };
 
 use assert_cmd::Command;
+use fontbrew_core::registry::REGISTRY_URL_ENV_VAR;
 use predicates::prelude::*;
 use serde_json::Value;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -46,6 +47,31 @@ fn stdout_json(output: &Output) -> Value {
 
 fn stderr_text(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("stderr should be utf-8")
+}
+
+fn write_registry_snapshot(path: &Path) {
+    fs::write(
+        path,
+        r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "inter": {
+      "name": "Inter",
+      "source": {
+        "type": "github",
+        "repo": "rsms/inter"
+      },
+      "families": ["Inter"],
+      "asset": {
+        "include": ["*Inter*.zip"],
+        "exclude": ["*web*", "*.woff2"]
+      }
+    }
+  }
+}"#,
+    )
+    .expect("write registry snapshot fixture");
 }
 
 #[test]
@@ -327,4 +353,74 @@ fn json_parse_errors_are_rendered_as_json_stdout() {
 
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["error"]["kind"], "usage");
+}
+
+#[test]
+fn registry_update_uses_env_url_and_writes_metadata_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let registry_path = temp.path().join("registry.json");
+    write_registry_snapshot(&registry_path);
+
+    let output = fontbrew(&home)
+        .env(
+            REGISTRY_URL_ENV_VAR,
+            format!("file://{}", registry_path.display()),
+        )
+        .args(["--json", "registry", "update"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "registry_update");
+    assert_eq!(json["report"]["package_count"], 1);
+    assert!(home.join(".local/share/fontbrew/registry.json").exists());
+    assert!(!home.join(".local/share/fontbrew/packages").exists());
+    assert!(!home.join(".local/share/fontbrew/staging").exists());
+}
+
+#[test]
+fn registry_status_reports_missing_and_present_snapshots() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let registry_path = temp.path().join("registry.json");
+
+    fontbrew(&home)
+        .args(["registry", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Registry snapshot: missing"))
+        .stderr(predicate::str::is_empty());
+
+    write_registry_snapshot(&registry_path);
+    fontbrew(&home)
+        .env(
+            REGISTRY_URL_ENV_VAR,
+            format!("file://{}", registry_path.display()),
+        )
+        .args(["registry", "update"])
+        .assert()
+        .success();
+
+    let output = fontbrew(&home)
+        .args(["--json", "registry", "status"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "registry_status");
+    assert_eq!(json["report"]["available"], true);
+    assert_eq!(json["report"]["package_count"], 1);
+    assert_eq!(
+        json["report"]["registry_updated_at"],
+        "2026-07-03T00:00:00Z"
+    );
 }

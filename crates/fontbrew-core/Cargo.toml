@@ -7,6 +7,7 @@ version.workspace = true
 directories.workspace = true
 fs2.workspace = true
 globset.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true

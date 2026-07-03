@@ -11,6 +11,8 @@ mod install;
 pub mod manifest;
 pub mod model;
 pub mod platform;
+pub mod registry;
+pub mod sources;
 pub mod version;
 
 pub use app::FontbrewApp;
@@ -134,7 +136,10 @@ mod tests {
     fn app_methods_return_structured_not_implemented_errors() {
         let app = FontbrewApp::new();
         let request = InstallRequest {
-            source: InstallSource::RegistryName("jetbrains-mono".to_string()),
+            source: InstallSource::Provider {
+                provider: ProviderKind::Google,
+                id: "inter".to_string(),
+            },
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,

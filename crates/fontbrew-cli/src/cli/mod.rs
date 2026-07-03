@@ -54,6 +54,8 @@ enum Command {
     /// Remove a managed package.
     #[command(alias = "uninstall")]
     Remove(RemoveArgs),
+    /// Manage the local first-party registry snapshot.
+    Registry(RegistryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -103,6 +105,20 @@ struct RemoveArgs {
 
     #[arg(long, help = "Build the remove plan without applying changes")]
     dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct RegistryArgs {
+    #[command(subcommand)]
+    command: RegistryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RegistryCommand {
+    /// Refresh the local registry metadata snapshot.
+    Update,
+    /// Show local registry snapshot status.
+    Status,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -155,6 +171,7 @@ fn execute(
         Command::List => list(app, reporter),
         Command::Info(args) => info(args, app, reporter),
         Command::Remove(args) => remove(args, app, reporter, confirmer),
+        Command::Registry(args) => registry(args, app, reporter),
     }
 }
 
@@ -226,6 +243,19 @@ fn remove(
     };
 
     reporter.render_remove_report(report)
+}
+
+fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    match args.command {
+        RegistryCommand::Update => {
+            let report = app.registry_update()?;
+            reporter.render_registry_update_report(report)
+        }
+        RegistryCommand::Status => {
+            let report = app.registry_status()?;
+            reporter.render_registry_status_report(report)
+        }
+    }
 }
 
 fn install_source_from_arg(source: &str) -> InstallSource {

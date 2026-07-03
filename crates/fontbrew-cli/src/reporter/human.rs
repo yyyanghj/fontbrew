@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    FamilyName, InfoReport, InstallReport, ListReport, ProgressEvent, RemoveReport,
+    FamilyName, InfoReport, InstallReport, ListReport, ProgressEvent, RegistryStatusReport,
+    RegistryUpdateReport, RemoveReport,
 };
 
 use crate::{
@@ -117,6 +118,44 @@ impl Reporter for HumanReporter {
         } else {
             writeln!(stdout, "{} is not installed.", report.package_id.as_str())?;
         }
+
+        Ok(())
+    }
+
+    fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        writeln!(stdout, "Updated registry snapshot.")?;
+        writeln!(stdout, "Source: {}", report.registry_url)?;
+        writeln!(stdout, "Snapshot: {}", report.snapshot_path.display())?;
+        writeln!(
+            stdout,
+            "Registry updated at: {}",
+            report.registry_updated_at
+        )?;
+        writeln!(stdout, "Packages: {}", report.package_count)?;
+
+        Ok(())
+    }
+
+    fn render_registry_status_report(&mut self, report: RegistryStatusReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        if !report.available {
+            writeln!(stdout, "Registry snapshot: missing")?;
+            writeln!(stdout, "Path: {}", report.snapshot_path.display())?;
+            return Ok(());
+        }
+
+        writeln!(stdout, "Registry snapshot: available")?;
+        writeln!(stdout, "Path: {}", report.snapshot_path.display())?;
+        if let Some(updated_at) = report.registry_updated_at {
+            writeln!(stdout, "Registry updated at: {updated_at}")?;
+        }
+        if let Some(modified_at) = report.snapshot_modified_at {
+            writeln!(stdout, "Snapshot refreshed at: {modified_at}")?;
+        }
+        writeln!(stdout, "Packages: {}", report.package_count)?;
 
         Ok(())
     }
