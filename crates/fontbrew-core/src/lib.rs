@@ -3,6 +3,7 @@
 pub mod app;
 pub mod config;
 pub mod error;
+pub mod fonts;
 pub mod fs;
 pub mod model;
 pub mod platform;
