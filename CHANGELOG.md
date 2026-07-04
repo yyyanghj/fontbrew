@@ -2,6 +2,12 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.3 - 2026-07-05
+
+- Fixed multi-family install progress so repeated planning for the same source reports `Resolving` once.
+- Fixed desktop format selection to apply the configured preference even when OTF and TTF coverage differs.
+- Improved interactive family selection by making checked and unchecked states more visible.
+
 ## 0.0.2 - 2026-07-05
 
 - Added `fontbrew self-update` for standalone release binaries.
