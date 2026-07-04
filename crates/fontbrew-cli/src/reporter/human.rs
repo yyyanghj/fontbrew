@@ -413,6 +413,7 @@ fn write_table<const COLUMN_COUNT: usize>(
     let widths = table_widths(&headers, &rows);
 
     write_table_row(stdout, &headers, &widths)?;
+    write_table_separator(stdout, &widths)?;
     for row in rows {
         write_table_row(stdout, &row, &widths)?;
     }
@@ -433,6 +434,22 @@ fn table_widths<const COLUMN_COUNT: usize>(
     }
 
     widths
+}
+
+fn write_table_separator<const COLUMN_COUNT: usize>(
+    stdout: &mut impl Write,
+    widths: &[usize; COLUMN_COUNT],
+) -> CliResult<()> {
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            write!(stdout, "  ")?;
+        }
+
+        write!(stdout, "{}", "-".repeat(*width))?;
+    }
+    writeln!(stdout)?;
+
+    Ok(())
 }
 
 fn write_table_row<T, const COLUMN_COUNT: usize>(
@@ -699,7 +716,24 @@ mod tests {
 
     use crate::self_update::{SelfUpdateInstallMethod, SelfUpdateStatus};
 
-    use super::{self_update_status_message, SelfUpdateReport};
+    use super::{self_update_status_message, write_table, SelfUpdateReport};
+
+    #[test]
+    fn write_table_separates_header_from_body() {
+        let mut output = Vec::new();
+
+        write_table(
+            &mut output,
+            ["Name", "Status"],
+            vec![["source-code-pro".to_string(), "active".to_string()]],
+        )
+        .expect("write table");
+
+        assert_eq!(
+            String::from_utf8(output).expect("table output should be utf-8"),
+            "Name             Status\n---------------  ------\nsource-code-pro  active\n"
+        );
+    }
 
     fn report(status: SelfUpdateStatus, current_version: &str) -> SelfUpdateReport {
         SelfUpdateReport {
