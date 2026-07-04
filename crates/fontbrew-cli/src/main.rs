@@ -7,6 +7,7 @@ mod confirm;
 mod exit;
 mod progress;
 mod reporter;
+mod self_update;
 
 fn main() -> ExitCode {
     match cli::Cli::try_parse() {

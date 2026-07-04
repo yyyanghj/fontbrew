@@ -19,6 +19,7 @@ use crate::{
     exit::{self, CliResult},
     progress::ProgressAdapter,
     reporter::{human::HumanReporter, json::JsonReporter, Reporter},
+    self_update::{self as self_update_command, SelfUpdateRequest},
 };
 
 #[derive(Debug, Parser)]
@@ -72,13 +73,15 @@ enum Command {
     Config(ConfigArgs),
     /// Manage the local first-party registry snapshot.
     Registry(RegistryArgs),
+    /// Update the fontbrew CLI binary to the latest stable release.
+    SelfUpdate(SelfUpdateArgs),
 }
 
 impl Command {
     fn consumes_cancellation(&self) -> bool {
         matches!(
             self,
-            Command::Install(_) | Command::Remove(_) | Command::Update(_)
+            Command::Install(_) | Command::Remove(_) | Command::Update(_) | Command::SelfUpdate(_)
         )
     }
 }
@@ -202,6 +205,24 @@ enum RegistryCommand {
     Status,
 }
 
+#[derive(Debug, Args)]
+struct SelfUpdateArgs {
+    #[arg(
+        long,
+        help = "Check the latest release without replacing the executable"
+    )]
+    dry_run: bool,
+
+    #[arg(long, help = "Assume yes for the replacement prompt")]
+    yes: bool,
+
+    #[arg(
+        long,
+        help = "Reinstall latest stable even when current is latest or newer"
+    )]
+    force: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliFontFormat {
     Otf,
@@ -275,6 +296,7 @@ fn execute(
         Command::Update(args) => update(args, app, reporter, confirmer, cancellation),
         Command::Config(args) => config(args, app, reporter),
         Command::Registry(args) => registry(args, app, reporter),
+        Command::SelfUpdate(args) => run_self_update(args, reporter, confirmer, cancellation),
     }
 }
 
@@ -452,6 +474,17 @@ fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) 
             reporter.render_registry_status_report(report)
         }
     }
+}
+
+fn run_self_update(
+    args: SelfUpdateArgs,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
+) -> CliResult<()> {
+    let request = SelfUpdateRequest::from_environment(args.dry_run, args.yes, args.force)?;
+
+    self_update_command::run(request, reporter, confirmer, cancellation)
 }
 
 fn install_source_from_arg(source: &str) -> InstallSource {

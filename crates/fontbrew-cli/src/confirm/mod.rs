@@ -1,4 +1,7 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    io::{self, IsTerminal, Write},
+    path::Path,
+};
 
 use fontbrew_core::{ExecutionPolicy, PlanRisk};
 
@@ -16,6 +19,13 @@ pub trait Confirmer {
         risks: &[PlanRisk],
         options: ConfirmationOptions,
     ) -> CliResult<ExecutionPolicy>;
+
+    fn confirm_self_update(
+        &mut self,
+        executable_path: &Path,
+        target_version: &str,
+        assume_yes: bool,
+    ) -> CliResult<()>;
 }
 
 pub struct HumanConfirmer {
@@ -63,6 +73,32 @@ impl Confirmer for HumanConfirmer {
             Err(CliError::Cancelled)
         }
     }
+
+    fn confirm_self_update(
+        &mut self,
+        executable_path: &Path,
+        target_version: &str,
+        assume_yes: bool,
+    ) -> CliResult<()> {
+        if assume_yes {
+            return Ok(());
+        }
+
+        if !self.stdin.is_terminal() {
+            return Err(CliError::SelfUpdatePromptUnavailable {
+                message: format!(
+                    "approval is required before replacing {} with fontbrew {target_version}; rerun with --yes or --dry-run, or use an interactive terminal",
+                    executable_path.display()
+                ),
+            });
+        }
+
+        if self.prompt_for_self_update(executable_path, target_version)? {
+            Ok(())
+        } else {
+            Err(CliError::Cancelled)
+        }
+    }
 }
 
 impl HumanConfirmer {
@@ -74,6 +110,28 @@ impl HumanConfirmer {
                 writeln!(stderr, "- {risk:?}")?;
             }
             write!(stderr, "Continue? [y/N] ")?;
+            stderr.flush()?;
+        }
+
+        let mut answer = String::new();
+        self.stdin.read_line(&mut answer)?;
+        let answer = answer.trim().to_ascii_lowercase();
+
+        Ok(answer == "y" || answer == "yes")
+    }
+
+    fn prompt_for_self_update(
+        &mut self,
+        executable_path: &Path,
+        target_version: &str,
+    ) -> CliResult<bool> {
+        {
+            let mut stderr = self.stderr.lock();
+            write!(
+                stderr,
+                "Replace {} with fontbrew {target_version}? [y/N] ",
+                executable_path.display()
+            )?;
             stderr.flush()?;
         }
 
@@ -113,6 +171,24 @@ impl Confirmer for JsonConfirmer {
 
         Err(CliError::ApprovalRequired {
             risks: risks.to_vec(),
+        })
+    }
+
+    fn confirm_self_update(
+        &mut self,
+        executable_path: &Path,
+        target_version: &str,
+        assume_yes: bool,
+    ) -> CliResult<()> {
+        if assume_yes {
+            return Ok(());
+        }
+
+        Err(CliError::SelfUpdateApprovalRequired {
+            message: format!(
+                "approval is required before replacing {} with fontbrew {target_version}; rerun with --yes or --dry-run",
+                executable_path.display()
+            ),
         })
     }
 }

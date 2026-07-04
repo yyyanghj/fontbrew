@@ -10,6 +10,7 @@ use fontbrew_core::{
 use crate::{
     exit::{CliError, CliResult},
     reporter::Reporter,
+    self_update::{SelfUpdateReport, SelfUpdateStatus},
 };
 
 pub struct HumanReporter {
@@ -325,6 +326,14 @@ impl Reporter for HumanReporter {
         Ok(())
     }
 
+    fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        writeln!(stdout, "{}", self_update_status_message(&report))?;
+
+        Ok(())
+    }
+
     fn render_error(&mut self, error: &CliError) -> CliResult<()> {
         let mut stderr = self.stderr.lock();
 
@@ -395,6 +404,17 @@ impl Reporter for HumanReporter {
                 writeln!(stderr, "Finished {}", package_id.as_str())?;
             }
         }
+
+        Ok(())
+    }
+
+    fn self_update_progress(&mut self, message: &str) -> CliResult<()> {
+        if self.quiet || !self.show_progress {
+            return Ok(());
+        }
+
+        let mut stderr = self.stderr.lock();
+        writeln!(stderr, "{message}")?;
 
         Ok(())
     }
@@ -528,5 +548,73 @@ fn config_value_label(value: &ConfigValue) -> String {
         ConfigValue::String(value) => value.clone(),
         ConfigValue::Bool(value) => value.to_string(),
         ConfigValue::Integer(value) => value.to_string(),
+    }
+}
+
+fn self_update_status_message(report: &SelfUpdateReport) -> String {
+    match report.status {
+        SelfUpdateStatus::UpToDate => {
+            format!("fontbrew {} is up to date.", report.current_version)
+        }
+        SelfUpdateStatus::Planned => format!(
+            "Planned self-update {} -> {}; no changes applied.",
+            report.current_version, report.target_version
+        ),
+        SelfUpdateStatus::Updated => format!(
+            "Updated fontbrew {} -> {}.",
+            report.current_version, report.target_version
+        ),
+        SelfUpdateStatus::Reinstalled => {
+            format!("Reinstalled fontbrew {}.", report.target_version)
+        }
+        SelfUpdateStatus::SkippedNewerCurrent => format!(
+            "fontbrew {} is newer than the latest stable release {}.",
+            report.current_version, report.latest_version
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::self_update::{SelfUpdateInstallMethod, SelfUpdateStatus};
+
+    use super::{self_update_status_message, SelfUpdateReport};
+
+    fn report(status: SelfUpdateStatus, current_version: &str) -> SelfUpdateReport {
+        SelfUpdateReport {
+            current_version: current_version.to_string(),
+            latest_version: "0.1.2".to_string(),
+            target_version: "0.1.2".to_string(),
+            executable_path: PathBuf::from("/tmp/bin/fontbrew"),
+            install_method: SelfUpdateInstallMethod::Standalone,
+            status,
+            backup_path: None,
+        }
+    }
+
+    #[test]
+    fn self_update_status_messages_match_human_output_contract() {
+        assert_eq!(
+            self_update_status_message(&report(SelfUpdateStatus::UpToDate, "0.1.2")),
+            "fontbrew 0.1.2 is up to date."
+        );
+        assert_eq!(
+            self_update_status_message(&report(SelfUpdateStatus::Planned, "0.1.1")),
+            "Planned self-update 0.1.1 -> 0.1.2; no changes applied."
+        );
+        assert_eq!(
+            self_update_status_message(&report(SelfUpdateStatus::Updated, "0.1.1")),
+            "Updated fontbrew 0.1.1 -> 0.1.2."
+        );
+        assert_eq!(
+            self_update_status_message(&report(SelfUpdateStatus::Reinstalled, "0.1.2")),
+            "Reinstalled fontbrew 0.1.2."
+        );
+        assert_eq!(
+            self_update_status_message(&report(SelfUpdateStatus::SkippedNewerCurrent, "0.1.3")),
+            "fontbrew 0.1.3 is newer than the latest stable release 0.1.2."
+        );
     }
 }

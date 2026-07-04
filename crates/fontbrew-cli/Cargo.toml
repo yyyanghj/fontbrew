@@ -11,9 +11,13 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 ctrlc = "3"
+flate2 = "1"
 fontbrew-core = { path = "../fontbrew-core" }
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+tar = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2"

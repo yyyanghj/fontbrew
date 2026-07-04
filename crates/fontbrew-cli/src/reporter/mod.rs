@@ -7,6 +7,7 @@ use fontbrew_core::{
 };
 
 use crate::exit::{CliError, CliResult};
+use crate::self_update::SelfUpdateReport;
 
 pub trait Reporter {
     fn render_install_report(&mut self, report: InstallReport) -> CliResult<()>;
@@ -20,8 +21,10 @@ pub trait Reporter {
     fn render_config_set_report(&mut self, report: ConfigReport) -> CliResult<()>;
     fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()>;
     fn render_registry_status_report(&mut self, report: RegistryStatusReport) -> CliResult<()>;
+    fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()>;
     fn render_error(&mut self, error: &CliError) -> CliResult<()>;
     #[allow(dead_code)]
     fn warn(&mut self, warning: &str) -> CliResult<()>;
     fn progress(&mut self, event: &ProgressEvent) -> CliResult<()>;
+    fn self_update_progress(&mut self, message: &str) -> CliResult<()>;
 }

@@ -14,6 +14,12 @@ pub enum CliError {
     Json(serde_json::Error),
     ApprovalRequired { risks: Vec<PlanRisk> },
     PromptUnavailable { risks: Vec<PlanRisk> },
+    SelfUpdateApprovalRequired { message: String },
+    SelfUpdatePromptUnavailable { message: String },
+    SelfUpdateUnavailable { message: String },
+    SelfUpdateInvalidRelease { message: String },
+    SelfUpdateChecksumMismatch { message: String },
+    SelfUpdateFailed { message: String },
     Cancelled,
     Usage { message: String },
 }
@@ -26,6 +32,12 @@ impl CliError {
             Self::Json(_) => "json",
             Self::ApprovalRequired { .. } => "approval_required",
             Self::PromptUnavailable { .. } => "prompt_unavailable",
+            Self::SelfUpdateApprovalRequired { .. } => "approval_required",
+            Self::SelfUpdatePromptUnavailable { .. } => "prompt_unavailable",
+            Self::SelfUpdateUnavailable { .. } => "self_update_unavailable",
+            Self::SelfUpdateInvalidRelease { .. } => "self_update_invalid_release",
+            Self::SelfUpdateChecksumMismatch { .. } => "self_update_checksum_mismatch",
+            Self::SelfUpdateFailed { .. } => "self_update_failed",
             Self::Cancelled => "cancelled",
             Self::Usage { .. } => "usage",
         }
@@ -41,6 +53,12 @@ impl CliError {
                 "{}; rerun with --yes or --dry-run, or use an interactive terminal",
                 approval_message(risks)
             ),
+            Self::SelfUpdateApprovalRequired { message }
+            | Self::SelfUpdatePromptUnavailable { message }
+            | Self::SelfUpdateUnavailable { message }
+            | Self::SelfUpdateInvalidRelease { message }
+            | Self::SelfUpdateChecksumMismatch { message }
+            | Self::SelfUpdateFailed { message } => message.clone(),
             Self::Cancelled => "operation cancelled".to_string(),
             Self::Usage { message } => message.clone(),
         }

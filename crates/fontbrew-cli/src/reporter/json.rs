@@ -9,7 +9,10 @@ use serde::Serialize;
 use crate::{
     exit::{CliError, CliResult},
     reporter::Reporter,
+    self_update::SelfUpdateReport,
 };
+
+const SELF_UPDATE_COMMAND: &str = "self_update";
 
 pub struct JsonReporter {
     stdout: io::Stdout,
@@ -92,6 +95,10 @@ impl Reporter for JsonReporter {
         self.render_report("registry_status", &report)
     }
 
+    fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()> {
+        self.render_report(SELF_UPDATE_COMMAND, &report)
+    }
+
     fn render_error(&mut self, error: &CliError) -> CliResult<()> {
         let envelope = ErrorEnvelope {
             schema_version: 1,
@@ -110,6 +117,10 @@ impl Reporter for JsonReporter {
     }
 
     fn progress(&mut self, _event: &ProgressEvent) -> CliResult<()> {
+        Ok(())
+    }
+
+    fn self_update_progress(&mut self, _message: &str) -> CliResult<()> {
         Ok(())
     }
 }
@@ -139,4 +150,37 @@ struct ErrorBody<'a> {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     risks: Option<&'a [fontbrew_core::PlanRisk]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::self_update::{SelfUpdateInstallMethod, SelfUpdateReport, SelfUpdateStatus};
+
+    use super::{ReportEnvelope, SELF_UPDATE_COMMAND};
+
+    #[test]
+    fn self_update_json_envelope_uses_stable_command_name() {
+        let report = SelfUpdateReport {
+            current_version: "0.1.1".to_string(),
+            latest_version: "0.1.2".to_string(),
+            target_version: "0.1.2".to_string(),
+            executable_path: PathBuf::from("/tmp/bin/fontbrew"),
+            install_method: SelfUpdateInstallMethod::Standalone,
+            status: SelfUpdateStatus::Planned,
+            backup_path: None,
+        };
+        let envelope = ReportEnvelope {
+            schema_version: 1,
+            command: SELF_UPDATE_COMMAND,
+            report: &report,
+        };
+
+        let json = serde_json::to_value(envelope).expect("serialize envelope");
+
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["command"], "self_update");
+        assert_eq!(json["report"]["status"], "planned");
+    }
 }

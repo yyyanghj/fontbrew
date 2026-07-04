@@ -756,6 +756,41 @@ fn json_parse_errors_are_rendered_as_json_stdout() {
 }
 
 #[test]
+fn self_update_rejects_development_build_on_stderr() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    fontbrew(&home)
+        .arg("self-update")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("development build"));
+}
+
+#[test]
+fn json_self_update_rejects_development_build_on_stdout_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    let output = fontbrew(&home)
+        .args(["--json", "self-update"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["error"]["kind"], "self_update_unavailable");
+    assert!(json["error"]["message"]
+        .as_str()
+        .expect("error message should be a string")
+        .contains("development build"));
+}
+
+#[test]
 fn registry_update_uses_env_url_and_writes_metadata_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
