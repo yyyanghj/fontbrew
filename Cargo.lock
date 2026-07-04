@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "fontbrew-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "fontbrew-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "directories",
  "fs2",

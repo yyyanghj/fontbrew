@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, such as v0.0.1.
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - name: Verify release tag matches Cargo version
+        run: |
+          set -euo pipefail
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          expected_tag="v${cargo_version}"
+
+          if [ "${RELEASE_TAG}" != "${expected_tag}" ]; then
+            echo "Release tag ${RELEASE_TAG} does not match Cargo version ${cargo_version}." >&2
+            echo "Expected ${expected_tag}." >&2
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo +stable build --release -p fontbrew-cli --target ${{ matrix.target }}
+
+      - name: Package release asset
+        run: |
+          set -euo pipefail
+          asset_name="fontbrew-${{ matrix.target }}"
+          staging_dir="dist/${asset_name}"
+
+          mkdir -p "${staging_dir}"
+          cp "target/${{ matrix.target }}/release/fontbrew" "${staging_dir}/fontbrew"
+          cp README.md LICENSE "${staging_dir}/"
+
+          tar -czf "dist/${asset_name}.tar.gz" -C dist "${asset_name}"
+          (
+            cd dist
+            shasum -a 256 "${asset_name}.tar.gz" > "${asset_name}.tar.gz.sha256"
+          )
+          rm -rf "${staging_dir}"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: fontbrew-${{ matrix.target }}
+          path: |
+            dist/fontbrew-${{ matrix.target }}.tar.gz
+            dist/fontbrew-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" dist/* \
+              --verify-tag \
+              --title "Fontbrew ${RELEASE_TAG}" \
+              --generate-notes
+          fi
