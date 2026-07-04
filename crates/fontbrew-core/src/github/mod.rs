@@ -55,6 +55,7 @@ pub(crate) fn download_release_asset_to_file(
     http_client.download_to_file(
         HttpRequest {
             url: url.to_string(),
+            display_url: None,
             headers: github_headers(),
         },
         destination,
@@ -87,6 +88,7 @@ fn fetch_latest_stable_release(
     );
     let response = http_client.get(HttpRequest {
         url: url.clone(),
+        display_url: None,
         headers: github_headers(),
     })?;
     let body = successful_response_body(response.status, response.body, &url)?;

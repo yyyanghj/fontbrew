@@ -153,6 +153,28 @@ auto_udpate = true
 }
 
 #[test]
+fn google_fonts_api_key_is_not_accepted_in_persisted_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = 1
+
+[google]
+api_key = "secret"
+"#,
+    )
+    .expect("write config");
+
+    let error = FontbrewConfig::load(&config_path)
+        .expect_err("Google Fonts API key belongs in GOOGLE_FONTS_API_KEY, not config");
+
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    assert!(error.to_string().contains("google"));
+}
+
+#[test]
 fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);

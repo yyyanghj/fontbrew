@@ -13,8 +13,9 @@ use crate::model::{
     SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
-use crate::providers::{FontsourceProvider, ProviderSearchRequest};
+use crate::providers::{FontsourceProvider, GoogleProvider, ProviderSearchRequest};
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
+use crate::sources::ProviderSource;
 use crate::update;
 
 #[derive(Clone)]
@@ -97,8 +98,14 @@ impl FontbrewApp {
             ),
             crate::InstallSource::Provider {
                 provider: crate::ProviderKind::Google,
-                ..
-            } => not_implemented("install_plan"),
+                id,
+            } => install::google_install_plan(
+                &paths,
+                id,
+                request,
+                self.http_client()?.as_ref(),
+                cancellation,
+            ),
         }
     }
 
@@ -191,6 +198,11 @@ impl FontbrewApp {
         }
 
         let paths = self.paths()?;
+        if let Some(provider_source) = ProviderSource::parse_prefixed(&request.query) {
+            let results = self.search_provider_source(&paths, provider_source, &request)?;
+            return Ok(SearchReport { results });
+        }
+
         let mut results = RegistrySnapshotStore::new(paths.clone())
             .search(&request.query, None)?
             .into_iter()
@@ -207,13 +219,30 @@ impl FontbrewApp {
             .limit
             .map(|limit| limit.saturating_sub(results.len()));
         if remaining_limit != Some(0) {
-            let fontsource_results = FontsourceProvider::new(&paths, self.http_client()?.as_ref())
-                .search(ProviderSearchRequest {
+            let http_client = self.http_client()?;
+            let fontsource_results = FontsourceProvider::new(&paths, http_client.as_ref()).search(
+                ProviderSearchRequest {
                     query: &request.query,
                     limit: remaining_limit,
                     offline: request.offline,
-                })?;
+                },
+            )?;
             results.extend(fontsource_results);
+        }
+
+        let remaining_limit = request
+            .limit
+            .map(|limit| limit.saturating_sub(results.len()));
+        if remaining_limit != Some(0) && !request.offline && GoogleProvider::api_key_is_configured()
+        {
+            let google_results = GoogleProvider::new(&paths, self.http_client()?.as_ref()).search(
+                ProviderSearchRequest {
+                    query: &request.query,
+                    limit: remaining_limit,
+                    offline: false,
+                },
+            )?;
+            results.extend(google_results);
         }
 
         if let Some(limit) = request.limit {
@@ -261,10 +290,31 @@ impl FontbrewApp {
 
         Ok(Arc::new(ReqwestHttpClient::try_new()?))
     }
-}
 
-fn not_implemented<T>(operation: &'static str) -> Result<T> {
-    Err(FontbrewError::NotImplemented { operation })
+    fn search_provider_source(
+        &self,
+        paths: &FontbrewPaths,
+        provider_source: ProviderSource,
+        request: &SearchRequest,
+    ) -> Result<Vec<crate::SearchResult>> {
+        let http_client = self.http_client()?;
+
+        match provider_source.provider {
+            crate::ProviderKind::Fontsource => FontsourceProvider::new(paths, http_client.as_ref())
+                .search(ProviderSearchRequest {
+                    query: &provider_source.id,
+                    limit: request.limit,
+                    offline: request.offline,
+                }),
+            crate::ProviderKind::Google => {
+                GoogleProvider::new(paths, http_client.as_ref()).search(ProviderSearchRequest {
+                    query: &provider_source.id,
+                    limit: request.limit,
+                    offline: request.offline,
+                })
+            }
+        }
+    }
 }
 
 impl Default for FontbrewApp {

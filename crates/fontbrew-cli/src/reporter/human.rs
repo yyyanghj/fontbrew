@@ -127,7 +127,7 @@ impl Reporter for HumanReporter {
         let mut stdout = self.stdout.lock();
 
         if report.results.is_empty() {
-            writeln!(stdout, "No registry packages found.")?;
+            writeln!(stdout, "No packages found.")?;
             return Ok(());
         }
 

@@ -62,7 +62,7 @@ enum Command {
     /// Remove a managed package.
     #[command(alias = "uninstall")]
     Remove(RemoveArgs),
-    /// Search packages in the local registry snapshot.
+    /// Search installable registry and provider packages.
     Search(SearchArgs),
     /// Check managed packages for available updates.
     Outdated(OutdatedArgs),
@@ -85,7 +85,10 @@ impl Command {
 
 #[derive(Debug, Args)]
 struct InstallArgs {
-    /// Source to install. Local archive paths are supported in the MVP.
+    #[arg(
+        help = "Source to install: registry name, provider:id, owner/repo, or local archive.",
+        long_help = "Source to install: registry name, provider:id, owner/repo, or local archive. Google Fonts sources use google:<id>, require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+    )]
     source: String,
 
     #[arg(long, help = "Reinstall an already managed package")]
@@ -134,6 +137,10 @@ struct RemoveArgs {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
+    #[arg(
+        help = "Query or provider:id to search.",
+        long_help = "Query or provider:id to search. Google Fonts provider searches use google:<id>, require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+    )]
     query: Option<String>,
 
     #[arg(long, help = "Maximum number of results to return")]
@@ -142,7 +149,7 @@ struct SearchArgs {
     #[arg(long, help = "Refresh registry metadata before searching")]
     refresh: bool,
 
-    #[arg(long, help = "Use the local registry snapshot only")]
+    #[arg(long, help = "Use local registry and provider metadata snapshots only")]
     offline: bool,
 }
 
@@ -555,6 +562,30 @@ impl CancellationToken for CliCancellation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_help_documents_google_fonts_api_key_environment_variable() {
+        let mut install_command = Cli::command();
+        let install_help = install_command
+            .find_subcommand_mut("install")
+            .expect("install subcommand")
+            .render_long_help()
+            .to_string();
+        let mut search_command = Cli::command();
+        let search_help = search_command
+            .find_subcommand_mut("search")
+            .expect("search subcommand")
+            .render_long_help()
+            .to_string();
+
+        for help in [install_help, search_help] {
+            assert!(help.contains("google:<id>"));
+            assert!(help.contains("GOOGLE_FONTS_API_KEY"));
+            assert!(help.contains("environment"));
+            assert!(help.contains("never stored in config"));
+        }
+    }
 
     #[test]
     fn install_source_parses_owner_repo_as_github_repo() {
@@ -578,6 +609,19 @@ mod tests {
             InstallSource::Provider {
                 provider: fontbrew_core::ProviderKind::Fontsource,
                 id: "abel".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_source_parses_google_prefix_as_provider_source() {
+        let source = install_source_from_arg("google:source-sans-3");
+
+        assert_eq!(
+            source,
+            InstallSource::Provider {
+                provider: fontbrew_core::ProviderKind::Google,
+                id: "source-sans-3".to_string(),
             }
         );
     }

@@ -29,7 +29,7 @@ use crate::{
         RemoveReport, RemoveRequest,
     },
     platform::FontbrewPaths,
-    providers::{self, FontsourceProvider, FontsourceResolvedPackage},
+    providers::{self, FontsourceProvider, GoogleProvider, ResolvedProviderPackage},
     registry::{RegistryAssetSelection, RegistryPackageRecipe},
     sources::GitHubRepo,
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
@@ -209,7 +209,55 @@ pub fn fontsource_install_plan(
 
     let resolved =
         FontsourceProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
-    let prepared = prepare_fontsource_package(paths, resolved, options, http_client, cancellation)?;
+    let prepared = prepare_provider_package(paths, resolved, options, http_client, cancellation)?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
+
+    install_plan_from_prepared(paths, prepared)
+}
+
+pub fn google_install_plan(
+    paths: &FontbrewPaths,
+    provider_id: String,
+    request: InstallRequest,
+    http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
+) -> Result<InstallPlan> {
+    ensure_not_cancelled(cancellation)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
+    let offline = request.offline;
+    let options = RemoteInstallOptions::from_request(request);
+    let package_id = PackageId::parse(&provider_id)?;
+    let requested_source = ManifestSource::Provider {
+        provider: ProviderKind::Google,
+        id: provider_id.clone(),
+    };
+    if let Some(plan) = already_installed_plan(
+        paths,
+        &package_id,
+        options.reinstall,
+        &requested_source,
+        None,
+    )? {
+        return Ok(plan);
+    }
+
+    if options.asset_selector.is_some() {
+        return Err(FontbrewError::Config {
+            message: "--asset is not supported for Google Fonts provider sources".to_string(),
+        });
+    }
+
+    if offline {
+        return Err(FontbrewError::Config {
+            message: "Google Fonts installs require network because font binaries are not cached"
+                .to_string(),
+        });
+    }
+
+    let resolved = GoogleProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
+    let prepared = prepare_provider_package(paths, resolved, options, http_client, cancellation)?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
@@ -767,9 +815,9 @@ fn prepare_github_release_archive(
     result
 }
 
-fn prepare_fontsource_package(
+fn prepare_provider_package(
     paths: &FontbrewPaths,
-    resolved: FontsourceResolvedPackage,
+    resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
@@ -778,7 +826,7 @@ fn prepare_fontsource_package(
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
     ensure_not_cancelled(cancellation)?;
-    let result = download_and_parse_fontsource_fonts(
+    let result = download_and_parse_provider_fonts(
         paths,
         resolved,
         options,
@@ -794,9 +842,9 @@ fn prepare_fontsource_package(
     result
 }
 
-fn download_and_parse_fontsource_fonts(
+fn download_and_parse_provider_fonts(
     paths: &FontbrewPaths,
-    resolved: FontsourceResolvedPackage,
+    resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
@@ -822,7 +870,7 @@ fn download_and_parse_fontsource_fonts(
         let destination = staging_dir.join(&asset.file_name);
         ensure_path_inside(&staging_dir, &destination)?;
         let downloaded = http_client.download_to_file(
-            providers::fontsource_asset_request(&asset.url),
+            providers::provider_asset_request(&asset.url),
             &destination,
             MAX_PROVIDER_FONT_DOWNLOAD_BYTES,
             cancellation,
@@ -856,7 +904,7 @@ fn download_and_parse_fontsource_fonts(
         staging_dir,
         resolved.version,
         PreparedInstallSource::Provider {
-            provider: ProviderKind::Fontsource,
+            provider: resolved.provider,
             id: resolved.provider_id,
         },
         Some(resolved.package_id),

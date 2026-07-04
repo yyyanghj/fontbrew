@@ -12,6 +12,9 @@ use crate::model::{ConfigGetRequest, ConfigReport, ConfigSetRequest, ConfigValue
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_METADATA_TTL_HOURS: u64 = 24;
 const DEFAULT_UPDATE_CONCURRENCY: usize = 4;
+/// Google Fonts API key environment variable. The key is intentionally not a
+/// persisted config value because it is a secret.
+pub const GOOGLE_FONTS_API_KEY_ENV_VAR: &str = "GOOGLE_FONTS_API_KEY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontbrewConfig {

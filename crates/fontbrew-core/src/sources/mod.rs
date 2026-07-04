@@ -42,8 +42,15 @@ impl ProviderSource {
     pub fn parse_prefixed(input: impl AsRef<str>) -> Option<Self> {
         let input = input.as_ref();
 
-        input.strip_prefix("fontsource:").map(|id| Self {
-            provider: ProviderKind::Fontsource,
+        if let Some(id) = input.strip_prefix("fontsource:") {
+            return Some(Self {
+                provider: ProviderKind::Fontsource,
+                id: id.to_string(),
+            });
+        }
+
+        input.strip_prefix("google:").map(|id| Self {
+            provider: ProviderKind::Google,
             id: id.to_string(),
         })
     }
@@ -159,5 +166,14 @@ mod tests {
 
         assert_eq!(source.provider, crate::ProviderKind::Fontsource);
         assert_eq!(source.id, "abel");
+    }
+
+    #[test]
+    fn provider_source_parse_accepts_google_prefix() {
+        let source = ProviderSource::parse_prefixed("google:source-sans-3")
+            .expect("google source should parse");
+
+        assert_eq!(source.provider, crate::ProviderKind::Google);
+        assert_eq!(source.id, "source-sans-3");
     }
 }

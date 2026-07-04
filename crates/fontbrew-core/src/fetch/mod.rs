@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     fs::{self, File},
     io::{Read, Write},
     path::Path,
@@ -22,7 +23,14 @@ pub struct HttpHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub url: String,
+    pub display_url: Option<String>,
     pub headers: Vec<HttpHeader>,
+}
+
+impl HttpRequest {
+    pub fn display_url(&self) -> &str {
+        self.display_url.as_deref().unwrap_or(&self.url)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,15 +82,21 @@ impl HttpClient for ReqwestHttpClient {
             builder = builder.header(&header.name, &header.value);
         }
 
-        let response = builder.send().map_err(|source| FontbrewError::Network {
-            message: format!("could not fetch {}: {source}", request.url),
+        let response = builder.send().map_err(|source| {
+            let source = request_error_source(&request, source);
+            FontbrewError::Network {
+                message: format!("could not fetch {}: {source}", request.display_url()),
+            }
         })?;
         let status = response.status().as_u16();
-        let body = response.bytes().map_err(|source| FontbrewError::Network {
-            message: format!(
-                "could not read response body from {}: {source}",
-                request.url
-            ),
+        let body = response.bytes().map_err(|source| {
+            let source = request_error_source(&request, source);
+            FontbrewError::Network {
+                message: format!(
+                    "could not read response body from {}: {source}",
+                    request.display_url()
+                ),
+            }
         })?;
 
         Ok(HttpResponse {
@@ -105,21 +119,24 @@ impl HttpClient for ReqwestHttpClient {
             builder = builder.header(&header.name, &header.value);
         }
 
-        let mut response = builder.send().map_err(|source| FontbrewError::Network {
-            message: format!("could not fetch {}: {source}", request.url),
+        let mut response = builder.send().map_err(|source| {
+            let source = request_error_source(&request, source);
+            FontbrewError::Network {
+                message: format!("could not fetch {}: {source}", request.display_url()),
+            }
         })?;
         let status = response.status();
         if !status.is_success() {
             return Err(FontbrewError::Network {
                 message: format!(
                     "HTTP request failed with status {status} for {}",
-                    request.url
+                    request.display_url()
                 ),
             });
         }
 
         if let Some(content_length) = response.content_length() {
-            reject_oversized_download(content_length, max_bytes, &request.url)?;
+            reject_oversized_download(content_length, max_bytes, request.display_url())?;
         }
 
         if let Some(parent) = destination.parent() {
@@ -130,7 +147,7 @@ impl HttpClient for ReqwestHttpClient {
             &mut response,
             &mut destination_file,
             max_bytes,
-            &request.url,
+            request.display_url(),
             cancellation,
         );
         if result.is_err() {
@@ -139,6 +156,16 @@ impl HttpClient for ReqwestHttpClient {
 
         result
     }
+}
+
+fn request_error_source(request: &HttpRequest, source: impl fmt::Display) -> String {
+    let message = source.to_string();
+    let display_url = request.display_url();
+    if display_url == request.url {
+        return message;
+    }
+
+    message.replace(&request.url, display_url)
 }
 
 fn copy_limited_response(
@@ -191,7 +218,7 @@ mod tests {
 
     use crate::Result;
 
-    use super::ReqwestHttpClient;
+    use super::{request_error_source, HttpRequest, ReqwestHttpClient};
 
     #[test]
     fn reqwest_client_try_new_uses_explicit_timeout() -> Result<()> {
@@ -199,5 +226,23 @@ mod tests {
 
         assert_eq!(client.timeout, Duration::from_secs(30));
         Ok(())
+    }
+
+    #[test]
+    fn request_error_source_uses_redacted_display_url() {
+        let request = HttpRequest {
+            url: "https://www.googleapis.com/webfonts/v1/webfonts?family=Inter&key=test-google-key"
+                .to_string(),
+            display_url: Some(
+                "https://www.googleapis.com/webfonts/v1/webfonts?family=Inter&key=<redacted>"
+                    .to_string(),
+            ),
+            headers: Vec::new(),
+        };
+
+        let message = request_error_source(&request, format!("request failed for {}", request.url));
+
+        assert!(!message.contains("test-google-key"));
+        assert!(message.contains("key=<redacted>"));
     }
 }

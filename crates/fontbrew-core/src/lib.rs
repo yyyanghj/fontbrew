@@ -27,16 +27,53 @@ pub use version::*;
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        ffi::OsString,
+        path::PathBuf,
+        sync::{Mutex, MutexGuard},
+    };
 
     use crate::{
-        platform::FontbrewPaths, FamilyName, FontFormat, FontbrewApp, FontbrewError, InfoReport,
-        InfoRequest, InstallPlan, InstallRequest, InstallSource, PackageId, PackageInfo,
-        PackageVersion, PlannedChange, ProviderKind,
+        config::GOOGLE_FONTS_API_KEY_ENV_VAR, platform::FontbrewPaths, FamilyName, FontFormat,
+        FontbrewApp, FontbrewError, InfoReport, InfoRequest, InstallPlan, InstallRequest,
+        InstallSource, PackageId, PackageInfo, PackageVersion, PlannedChange, ProviderKind,
     };
 
     fn package_id(id: &str) -> PackageId {
         PackageId::parse(id).expect("test package id should be valid")
+    }
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn unset_google_fonts_api_key() -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original = std::env::var_os(GOOGLE_FONTS_API_KEY_ENV_VAR);
+            std::env::remove_var(GOOGLE_FONTS_API_KEY_ENV_VAR);
+
+            Self {
+                key: GOOGLE_FONTS_API_KEY_ENV_VAR,
+                original,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 
     #[test]
@@ -138,8 +175,14 @@ mod tests {
     }
 
     #[test]
-    fn app_methods_return_structured_not_implemented_errors() {
-        let app = FontbrewApp::new();
+    fn google_install_without_api_key_returns_actionable_config_error() {
+        let _env = EnvVarGuard::unset_google_fonts_api_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = FontbrewApp::with_paths(FontbrewPaths::for_tests(
+            temp.path().join("data"),
+            temp.path().join("config"),
+            temp.path().join("home"),
+        ));
         let request = InstallRequest {
             source: InstallSource::Provider {
                 provider: ProviderKind::Google,
@@ -152,13 +195,11 @@ mod tests {
             offline: false,
         };
 
-        let error = app.install_plan(request).expect_err("stub should fail");
+        let error = app
+            .install_plan(request)
+            .expect_err("missing Google Fonts API key should fail");
 
-        assert!(matches!(
-            error,
-            FontbrewError::NotImplemented {
-                operation: "install_plan"
-            }
-        ));
+        assert!(matches!(error, FontbrewError::Config { .. }));
+        assert!(error.to_string().contains("GOOGLE_FONTS_API_KEY"));
     }
 }
