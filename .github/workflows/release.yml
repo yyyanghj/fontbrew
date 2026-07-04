@@ -109,6 +109,6 @@ jobs:
           else
             gh release create "${RELEASE_TAG}" dist/* \
               --verify-tag \
-              --title "Fontbrew ${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
               --generate-notes
           fi
