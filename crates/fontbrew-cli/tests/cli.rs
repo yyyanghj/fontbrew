@@ -158,10 +158,10 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("PACKAGE ID")
-                .and(predicate::str::contains("VERSION"))
-                .and(predicate::str::contains("FAMILIES"))
-                .and(predicate::str::contains("STATUS"))
+            predicate::str::contains("Package")
+                .and(predicate::str::contains("Version"))
+                .and(predicate::str::contains("Families"))
+                .and(predicate::str::contains("Status"))
                 .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("Source Code Pro")),
         )
@@ -178,11 +178,11 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
                 .and(predicate::str::contains("Status: active"))
                 .and(predicate::str::contains("Updates: not configured"))
                 .and(predicate::str::contains("Fonts:"))
-                .and(predicate::str::contains("NAME"))
-                .and(predicate::str::contains("WEIGHT"))
-                .and(predicate::str::contains("ITALIC"))
-                .and(predicate::str::contains("INSTALLED"))
-                .and(predicate::str::contains("ACTIVATED"))
+                .and(predicate::str::contains("Name"))
+                .and(predicate::str::contains("Weight"))
+                .and(predicate::str::contains("Italic"))
+                .and(predicate::str::contains("Installed"))
+                .and(predicate::str::contains("Activated"))
                 .and(predicate::str::contains("SourceCodePro-Regular.ttf"))
                 .and(predicate::str::contains("400"))
                 .and(predicate::str::contains("yes"))
@@ -1088,10 +1088,10 @@ fn human_search_reports_registry_result_fields_on_stdout_only() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
 
     assert!(stdout.lines().next().is_some_and(|line| {
-        line.contains("PACKAGE ID")
-            && line.contains("NAME")
-            && line.contains("FAMILIES")
-            && line.contains("SOURCE")
+        !line.contains("Package")
+            && line.contains("Name")
+            && line.contains("Families")
+            && line.contains("Source")
     }));
     assert!(stdout.contains("source-code-pro"));
     assert!(stdout.contains("Source Code Pro"));
@@ -1152,9 +1152,9 @@ fn human_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("PACKAGE ID")
-                .and(predicate::str::contains("STATUS"))
-                .and(predicate::str::contains("REASON"))
+            predicate::str::contains("Package")
+                .and(predicate::str::contains("Status"))
+                .and(predicate::str::contains("Reason"))
                 .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("not updatable")),
         )
@@ -1224,9 +1224,9 @@ fn human_update_dry_run_reports_skipped_package_on_stdout_only() {
         .success()
         .stdout(
             predicate::str::contains("No updates prepared.")
-                .and(predicate::str::contains("PACKAGE ID"))
-                .and(predicate::str::contains("STATUS"))
-                .and(predicate::str::contains("REASON"))
+                .and(predicate::str::contains("Package"))
+                .and(predicate::str::contains("Status"))
+                .and(predicate::str::contains("Reason"))
                 .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("not prepared")),
         )

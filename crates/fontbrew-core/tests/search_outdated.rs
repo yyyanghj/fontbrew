@@ -146,8 +146,8 @@ fn github_releases_url(owner: &str, repo: &str) -> String {
     format!("https://api.github.com/repos/{owner}/{repo}/releases")
 }
 
-fn fontsource_list_url(query: &str) -> String {
-    format!("https://api.fontsource.org/v1/fonts?family={query}")
+fn fontsource_list_url() -> String {
+    "https://api.fontsource.org/v1/fonts".to_string()
 }
 
 fn fontsource_detail_url(id: &str) -> String {
@@ -217,7 +217,7 @@ fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(TEST_REGISTRY_URL, registry_snapshot_json());
     fake_http.with_text(
-        &fontsource_list_url("Abel"),
+        &fontsource_list_url(),
         r#"[
   {
     "id": "abel",
@@ -271,7 +271,7 @@ fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
         fake_http.requested_urls(),
         vec![
             TEST_REGISTRY_URL.to_string(),
-            fontsource_list_url("Abel"),
+            fontsource_list_url(),
             fontsource_detail_url("abel"),
         ]
     );
@@ -284,7 +284,7 @@ fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
     let paths = test_paths(&temp);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        &fontsource_list_url("Inter"),
+        &fontsource_list_url(),
         r#"[
   {
     "id": "inter",
@@ -326,7 +326,7 @@ fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
 
     let report = app
         .search(SearchRequest {
-            query: "inter".to_string(),
+            query: "iner".to_string(),
             limit: Some(1),
         })
         .expect("search should skip registry when registry URL is not configured");
@@ -336,7 +336,7 @@ fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
     assert_eq!(report.results[0].source, "fontsource:inter");
     assert_eq!(
         fake_http.requested_urls(),
-        vec![fontsource_list_url("Inter"), fontsource_detail_url("inter")]
+        vec![fontsource_list_url(), fontsource_detail_url("inter")]
     );
     assert!(paths.registry_snapshot_path().exists());
 }
@@ -349,7 +349,7 @@ fn unprefixed_search_uses_provider_fallback_when_registry_refresh_fails_without_
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_network_error(TEST_REGISTRY_URL, "registry unavailable");
     fake_http.with_text(
-        &fontsource_list_url("Inter"),
+        &fontsource_list_url(),
         r#"[
   {
     "id": "inter",
@@ -403,7 +403,7 @@ fn unprefixed_search_uses_provider_fallback_when_registry_refresh_fails_without_
         fake_http.requested_urls(),
         vec![
             TEST_REGISTRY_URL.to_string(),
-            fontsource_list_url("Inter"),
+            fontsource_list_url(),
             fontsource_detail_url("inter"),
         ]
     );
@@ -440,7 +440,7 @@ fn unprefixed_search_uses_cached_registry_snapshot_when_refresh_fails() {
 }
 
 #[test]
-fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit() {
+fn search_refreshes_registry_snapshot_with_fuzzy_matching_and_limit() {
     let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -462,7 +462,7 @@ fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit()
 
     let family_report = app
         .search(SearchRequest {
-            query: "MAPLE MONO".to_string(),
+            query: "MPLE MONO".to_string(),
             limit: Some(1),
         })
         .expect("search registry families");

@@ -16,6 +16,7 @@ use crate::{
     fs::{write_atomically, GlobalFileLock},
     model::{FontFormat, RegistryStatusReport, RegistryUpdateReport},
     platform::FontbrewPaths,
+    search::{best_search_match_score, SearchMatchScore},
     sources::GitHubRepo,
     FamilyName, PackageId,
 };
@@ -196,22 +197,28 @@ impl RegistrySnapshotV1 {
     }
 
     pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<RegistryPackageRecipe>> {
-        let query = query.trim().to_lowercase();
-        let mut results = Vec::new();
+        let query = query.trim();
+        let mut matches = Vec::new();
 
         for (package_id, package) in &self.packages {
-            if !query.is_empty() && !package_matches_query(package_id, package, &query) {
+            let Some(score) = package_match_score(package_id, package, query) else {
                 continue;
-            }
+            };
 
-            if limit.is_some_and(|limit| results.len() >= limit) {
-                break;
-            }
-
-            results.push(package.recipe(package_id.clone())?);
+            matches.push((
+                score,
+                package_id.clone(),
+                package.recipe(package_id.clone())?,
+            ));
         }
 
-        Ok(results)
+        matches.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        Ok(matches
+            .into_iter()
+            .take(limit.unwrap_or(usize::MAX))
+            .map(|(_, _, recipe)| recipe)
+            .collect())
     }
 
     fn validate(&self) -> Result<()> {
@@ -236,17 +243,15 @@ impl RegistrySnapshotV1 {
     }
 }
 
-fn package_matches_query(
+fn package_match_score(
     package_id: &PackageId,
     package: &RegistryPackageRecord,
     query: &str,
-) -> bool {
-    package_id.as_str().contains(query)
-        || package.name.to_lowercase().contains(query)
-        || package
-            .families
-            .iter()
-            .any(|family| family.as_str().to_lowercase().contains(query))
+) -> Option<SearchMatchScore> {
+    let mut candidates = vec![package_id.as_str(), package.name.as_str()];
+    candidates.extend(package.families.iter().map(FamilyName::as_str));
+
+    best_search_match_score(query, candidates)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

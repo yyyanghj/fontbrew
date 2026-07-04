@@ -91,7 +91,7 @@ impl Command {
 struct InstallArgs {
     #[arg(
         help = "Source to install: registry name, provider:id, owner/repo, or local archive.",
-        long_help = "Source to install: registry name, provider:id, owner/repo, or local archive. Google Fonts sources use google:<id>, require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+        long_help = "Source to install: registry name, provider:id, owner/repo, or local archive. Provider sources include fontsource:<id> and google:<id>. Google Fonts sources require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
     )]
     source: String,
 
@@ -159,7 +159,7 @@ struct RemoveArgs {
 struct SearchArgs {
     #[arg(
         help = "Query or provider:id to search.",
-        long_help = "Query or provider:id to search. Google Fonts provider searches use google:<id>, require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+        long_help = "Query or provider:id to search. Provider sources include fontsource:<id> and google:<id>. Google Fonts searches require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
     )]
     query: Option<String>,
 
@@ -741,7 +741,7 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn cli_help_documents_google_fonts_api_key_environment_variable() {
+    fn cli_help_documents_provider_prefixes_and_google_fonts_api_key_environment_variable() {
         let mut install_command = Cli::command();
         let install_help = install_command
             .find_subcommand_mut("install")
@@ -756,6 +756,7 @@ mod tests {
             .to_string();
 
         for help in [install_help, search_help] {
+            assert!(help.contains("fontsource:<id>"));
             assert!(help.contains("google:<id>"));
             assert!(help.contains("GOOGLE_FONTS_API_KEY"));
             assert!(help.contains("environment"));

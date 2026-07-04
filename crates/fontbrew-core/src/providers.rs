@@ -1,19 +1,27 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 use serde::Deserialize;
 
 use crate::{
+    config::FontbrewConfig,
     config::GOOGLE_FONTS_API_KEY_ENV_VAR,
     error::{FontbrewError, Result},
     fetch::{HttpClient, HttpHeader, HttpRequest},
     fs::write_atomically,
     model::{FamilyName, FontFormat, PackageVersion, SearchResult},
     platform::FontbrewPaths,
+    search::{best_search_match_score, SearchMatchScore},
     PackageId, ProviderKind,
 };
 
 const FONTSOURCE_API_BASE_URL: &str = "https://api.fontsource.org/v1";
 const GOOGLE_FONTS_API_BASE_URL: &str = "https://www.googleapis.com/webfonts/v1/webfonts";
+const DEFAULT_PROVIDER_SEARCH_LIMIT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderSearchRequest<'a> {
@@ -58,14 +66,22 @@ impl<'a> FontsourceProvider<'a> {
         if raw_query.is_empty() {
             return Ok(Vec::new());
         }
-        let query = fontsource_family_query(raw_query);
-
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
-        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, &query)?;
+        let metadata_ttl = provider_metadata_ttl(self.paths)?;
+        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, metadata_ttl)?;
+        let mut matched_records = list_records
+            .into_iter()
+            .filter_map(|record| {
+                fontsource_record_match_score(raw_query, &record).map(|score| (score, record))
+            })
+            .collect::<Vec<_>>();
+        matched_records
+            .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.id.cmp(&right.1.id)));
 
         let mut results = Vec::new();
-        for record in list_records {
-            if request.limit.is_some_and(|limit| results.len() >= limit) {
+        let result_limit = provider_search_limit(request.limit);
+        for (_, record) in matched_records {
+            if results.len() >= result_limit {
                 break;
             }
 
@@ -73,7 +89,12 @@ impl<'a> FontsourceProvider<'a> {
                 continue;
             }
 
-            let detail = fetch_fontsource_detail(self.http_client, &snapshot_store, &record.id)?;
+            let detail = fetch_fontsource_detail(
+                self.http_client,
+                &snapshot_store,
+                &record.id,
+                metadata_ttl,
+            )?;
 
             let Some(result) = search_result_from_detail(&detail)? else {
                 continue;
@@ -90,7 +111,9 @@ impl<'a> FontsourceProvider<'a> {
     ) -> Result<FontsourceResolvedPackage> {
         let package_id = PackageId::parse(provider_id)?;
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
-        let detail = fetch_fontsource_detail(self.http_client, &snapshot_store, provider_id)?;
+        let metadata_ttl = provider_metadata_ttl(self.paths)?;
+        let detail =
+            fetch_fontsource_detail(self.http_client, &snapshot_store, provider_id, metadata_ttl)?;
 
         if detail.id != provider_id {
             return Err(FontbrewError::ArchiveRejected {
@@ -149,21 +172,29 @@ impl<'a> GoogleProvider<'a> {
         if raw_query.is_empty() {
             return Ok(Vec::new());
         }
-        let query = google_family_query(raw_query);
-
         let snapshot_store = GoogleSnapshotStore::new(self.paths);
-        let response = fetch_google_family(self.http_client, &snapshot_store, &query)?;
+        let response = fetch_google_webfonts(self.http_client, &snapshot_store, None)?;
+
+        let mut matched_records = response
+            .items
+            .into_iter()
+            .filter_map(|record| {
+                let package_id = PackageId::normalize(&record.family).ok()?;
+                let provider_id = package_id.as_str();
+                let score =
+                    best_search_match_score(raw_query, [provider_id, record.family.as_str()])?;
+                Some((score, package_id, record))
+            })
+            .collect::<Vec<_>>();
+        matched_records.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
 
         let mut results = Vec::new();
-        for record in response.items {
-            if request.limit.is_some_and(|limit| results.len() >= limit) {
+        let result_limit = provider_search_limit(request.limit);
+        for (_, package_id, record) in matched_records {
+            if results.len() >= result_limit {
                 break;
             }
 
-            let package_id = match PackageId::normalize(&record.family) {
-                Ok(package_id) => package_id,
-                Err(_) => continue,
-            };
             let provider_id = package_id.as_str().to_string();
             if google_desktop_assets(&record, &provider_id).is_empty() {
                 continue;
@@ -223,6 +254,7 @@ impl<'a> GoogleProvider<'a> {
 #[serde(rename_all = "camelCase")]
 struct FontsourceListRecord {
     id: String,
+    family: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -268,18 +300,38 @@ impl<'a> FontsourceSnapshotStore<'a> {
         Self { paths }
     }
 
-    fn write_list(&self, query: &str, body: &[u8]) -> Result<()> {
-        write_atomically(&self.list_path(query), body)
+    fn write_list(&self, body: &[u8]) -> Result<()> {
+        write_atomically(&self.list_path(), body)
     }
 
     fn write_detail(&self, provider_id: &str, body: &[u8]) -> Result<()> {
         write_atomically(&self.detail_path(provider_id), body)
     }
 
-    fn list_path(&self, query: &str) -> PathBuf {
+    fn read_fresh_list(&self, metadata_ttl: Duration) -> Result<Option<Vec<u8>>> {
+        read_fresh_snapshot(&self.list_path(), metadata_ttl)
+    }
+
+    fn read_list(&self) -> Result<Option<Vec<u8>>> {
+        read_snapshot(&self.list_path())
+    }
+
+    fn read_fresh_detail(
+        &self,
+        provider_id: &str,
+        metadata_ttl: Duration,
+    ) -> Result<Option<Vec<u8>>> {
+        read_fresh_snapshot(&self.detail_path(provider_id), metadata_ttl)
+    }
+
+    fn read_detail(&self, provider_id: &str) -> Result<Option<Vec<u8>>> {
+        read_snapshot(&self.detail_path(provider_id))
+    }
+
+    fn list_path(&self) -> PathBuf {
         self.paths
             .provider_metadata_dir()
-            .join(format!("fontsource-list-{}.json", hex_key(query)))
+            .join("fontsource-list-all.json")
     }
 
     fn detail_path(&self, provider_id: &str) -> PathBuf {
@@ -313,20 +365,31 @@ impl<'a> GoogleSnapshotStore<'a> {
 fn fetch_fontsource_list(
     http_client: &dyn HttpClient,
     snapshot_store: &FontsourceSnapshotStore<'_>,
-    query: &str,
+    metadata_ttl: Duration,
 ) -> Result<Vec<FontsourceListRecord>> {
-    let url = format!(
-        "{FONTSOURCE_API_BASE_URL}/fonts?family={}",
-        percent_encode(query)
-    );
-    let response = http_client.get(HttpRequest {
+    if let Some(body) = snapshot_store.read_fresh_list(metadata_ttl)? {
+        if let Ok(records) = parse_fontsource_list(&body) {
+            return Ok(records);
+        }
+    }
+
+    let url = format!("{FONTSOURCE_API_BASE_URL}/fonts");
+    let response = match http_client.get(HttpRequest {
         url: url.clone(),
         display_url: None,
         headers: fontsource_headers(),
-    })?;
-    let body = successful_response_body(response.status, response.body, &url)?;
-    let records = parse_fontsource_list(&body, query)?;
-    snapshot_store.write_list(query, &body)?;
+    }) {
+        Ok(response) => response,
+        Err(error) => {
+            return fontsource_cached_list_or_error(snapshot_store, error);
+        }
+    };
+    let body = match successful_response_body(response.status, response.body, &url) {
+        Ok(body) => body,
+        Err(error) => return fontsource_cached_list_or_error(snapshot_store, error),
+    };
+    let records = parse_fontsource_list(&body)?;
+    snapshot_store.write_list(&body)?;
 
     Ok(records)
 }
@@ -335,18 +398,62 @@ fn fetch_fontsource_detail(
     http_client: &dyn HttpClient,
     snapshot_store: &FontsourceSnapshotStore<'_>,
     provider_id: &str,
+    metadata_ttl: Duration,
 ) -> Result<FontsourceDetailRecord> {
+    if let Some(body) = snapshot_store.read_fresh_detail(provider_id, metadata_ttl)? {
+        if let Ok(detail) = parse_fontsource_detail(&body, provider_id) {
+            return Ok(detail);
+        }
+    }
+
     let url = format!("{FONTSOURCE_API_BASE_URL}/fonts/{provider_id}");
-    let response = http_client.get(HttpRequest {
+    let response = match http_client.get(HttpRequest {
         url: url.clone(),
         display_url: None,
         headers: fontsource_headers(),
-    })?;
-    let body = successful_response_body(response.status, response.body, &url)?;
+    }) {
+        Ok(response) => response,
+        Err(error) => {
+            return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+        }
+    };
+    let body = match successful_response_body(response.status, response.body, &url) {
+        Ok(body) => body,
+        Err(error) => {
+            return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+        }
+    };
     let detail = parse_fontsource_detail(&body, provider_id)?;
     snapshot_store.write_detail(provider_id, &body)?;
 
     Ok(detail)
+}
+
+fn fontsource_cached_list_or_error(
+    snapshot_store: &FontsourceSnapshotStore<'_>,
+    error: FontbrewError,
+) -> Result<Vec<FontsourceListRecord>> {
+    if let Some(body) = snapshot_store.read_list()? {
+        if let Ok(records) = parse_fontsource_list(&body) {
+            return Ok(records);
+        }
+    }
+
+    Err(error)
+}
+
+fn fontsource_cached_detail_or_error(
+    snapshot_store: &FontsourceSnapshotStore<'_>,
+    provider_id: &str,
+    error: FontbrewError,
+) -> Result<FontsourceDetailRecord> {
+    if let Some(body) = snapshot_store.read_detail(provider_id)? {
+        if let Ok(detail) = parse_fontsource_detail(&body, provider_id) {
+            return Ok(detail);
+        }
+    }
+
+    Err(error)
 }
 
 fn fetch_google_family(
@@ -354,31 +461,45 @@ fn fetch_google_family(
     snapshot_store: &GoogleSnapshotStore<'_>,
     family_query: &str,
 ) -> Result<GoogleWebfontsResponse> {
+    fetch_google_webfonts(http_client, snapshot_store, Some(family_query))
+}
+
+fn fetch_google_webfonts(
+    http_client: &dyn HttpClient,
+    snapshot_store: &GoogleSnapshotStore<'_>,
+    family_query: Option<&str>,
+) -> Result<GoogleWebfontsResponse> {
     let api_key = google_api_key_from_env_required()?;
-    let url = format!(
-        "{GOOGLE_FONTS_API_BASE_URL}?family={}&key={}",
-        percent_encode(family_query),
-        percent_encode(&api_key)
-    );
-    let display_url = format!(
-        "{GOOGLE_FONTS_API_BASE_URL}?family={}&key=<redacted>",
-        percent_encode(family_query)
-    );
+    let query = match family_query {
+        Some(family_query) => format!(
+            "family={}&key={}",
+            percent_encode(family_query),
+            percent_encode(&api_key)
+        ),
+        None => format!("key={}", percent_encode(&api_key)),
+    };
+    let display_query = match family_query {
+        Some(family_query) => format!("family={}&key=<redacted>", percent_encode(family_query)),
+        None => "key=<redacted>".to_string(),
+    };
+    let url = format!("{GOOGLE_FONTS_API_BASE_URL}?{query}");
+    let display_url = format!("{GOOGLE_FONTS_API_BASE_URL}?{display_query}");
     let response = http_client.get(HttpRequest {
         url,
         display_url: Some(display_url),
         headers: google_headers(),
     })?;
-    let body = successful_google_response_body(response.status, response.body, family_query)?;
-    let response = parse_google_webfonts_response(&body, family_query)?;
-    snapshot_store.write_family(family_query, &body)?;
+    let request_label = family_query.unwrap_or("all families");
+    let body = successful_google_response_body(response.status, response.body, request_label)?;
+    let response = parse_google_webfonts_response(&body, request_label)?;
+    snapshot_store.write_family(request_label, &body)?;
 
     Ok(response)
 }
 
-fn parse_fontsource_list(body: &[u8], query: &str) -> Result<Vec<FontsourceListRecord>> {
+fn parse_fontsource_list(body: &[u8]) -> Result<Vec<FontsourceListRecord>> {
     serde_json::from_slice(body).map_err(|source| FontbrewError::Network {
-        message: format!("could not parse Fontsource search results for {query:?}: {source}"),
+        message: format!("could not parse Fontsource search results: {source}"),
     })
 }
 
@@ -413,6 +534,55 @@ fn search_result_from_detail(detail: &FontsourceDetailRecord) -> Result<Option<S
         version: fontsource_version(detail).ok(),
         families: vec![FamilyName::new(detail.family.clone())],
     }))
+}
+
+fn fontsource_record_match_score(
+    query: &str,
+    record: &FontsourceListRecord,
+) -> Option<SearchMatchScore> {
+    best_search_match_score(query, [record.id.as_str(), record.family.as_str()])
+}
+
+fn provider_search_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_PROVIDER_SEARCH_LIMIT)
+}
+
+fn provider_metadata_ttl(paths: &FontbrewPaths) -> Result<Duration> {
+    Ok(FontbrewConfig::load(&paths.config_path())?.metadata_ttl)
+}
+
+fn read_fresh_snapshot(path: &Path, metadata_ttl: Duration) -> Result<Option<Vec<u8>>> {
+    if !snapshot_is_fresh(path, metadata_ttl)? {
+        return Ok(None);
+    }
+
+    read_snapshot(path)
+}
+
+fn snapshot_is_fresh(path: &Path, metadata_ttl: Duration) -> Result<bool> {
+    if metadata_ttl.is_zero() {
+        return Ok(false);
+    }
+
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let modified_at = metadata.modified()?;
+
+    match SystemTime::now().duration_since(modified_at) {
+        Ok(age) => Ok(age <= metadata_ttl),
+        Err(_) => Ok(true),
+    }
+}
+
+fn read_snapshot(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(body) => Ok(Some(body)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn fontsource_version(detail: &FontsourceDetailRecord) -> Result<PackageVersion> {
@@ -560,22 +730,6 @@ fn provider_id_to_family_query(provider_id: &str) -> String {
         .map(title_case_ascii)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn google_family_query(query: &str) -> String {
-    if PackageId::parse(query).is_ok() {
-        return provider_id_to_family_query(query);
-    }
-
-    query.to_string()
-}
-
-fn fontsource_family_query(query: &str) -> String {
-    if PackageId::parse(query).is_ok() {
-        return provider_id_to_family_query(query);
-    }
-
-    query.to_string()
 }
 
 fn title_case_ascii(component: &str) -> String {

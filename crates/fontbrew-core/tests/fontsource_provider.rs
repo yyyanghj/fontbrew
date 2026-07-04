@@ -1,10 +1,11 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs::{self, File},
+    fs::{self, File, FileTimes},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
+    time::{Duration, SystemTime},
 };
 
 use fontbrew_core::{
@@ -205,8 +206,8 @@ fn fixture_font_bytes(filename: &str) -> Vec<u8> {
     bytes
 }
 
-fn fontsource_list_url(query: &str) -> String {
-    format!("https://api.fontsource.org/v1/fonts?family={query}")
+fn fontsource_list_url() -> String {
+    "https://api.fontsource.org/v1/fonts".to_string()
 }
 
 fn fontsource_detail_url(id: &str) -> String {
@@ -215,6 +216,10 @@ fn fontsource_detail_url(id: &str) -> String {
 
 fn google_webfonts_url(family: &str, key: &str) -> String {
     format!("https://www.googleapis.com/webfonts/v1/webfonts?family={family}&key={key}")
+}
+
+fn google_webfonts_all_url(key: &str) -> String {
+    format!("https://www.googleapis.com/webfonts/v1/webfonts?key={key}")
 }
 
 fn provider_metadata_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
@@ -226,6 +231,27 @@ fn provider_metadata_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
     collect_files(&paths.provider_metadata_dir(), &mut files);
     files.sort();
     files
+}
+
+fn fontsource_list_snapshot_path(paths: &FontbrewPaths) -> PathBuf {
+    paths
+        .provider_metadata_dir()
+        .join("fontsource-list-all.json")
+}
+
+fn fontsource_detail_snapshot_path(paths: &FontbrewPaths, provider_id: &str) -> PathBuf {
+    paths
+        .provider_metadata_dir()
+        .join(format!("fontsource-detail-{provider_id}.json"))
+}
+
+fn set_file_modified_time(path: &Path, modified_at: SystemTime) {
+    let file = File::options()
+        .write(true)
+        .open(path)
+        .expect("open cached metadata file");
+    file.set_times(FileTimes::new().set_modified(modified_at))
+        .expect("set cached metadata modified time");
 }
 
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -303,7 +329,7 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        &fontsource_list_url("Abel"),
+        &fontsource_list_url(),
         r#"[
   {
     "id": "abel",
@@ -316,8 +342,8 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     "type": "google"
   },
   {
-    "id": "web-only",
-    "family": "Web Only",
+    "id": "abel-web-only",
+    "family": "Abel Web Only",
     "subsets": ["latin"],
     "weights": [400],
     "styles": ["normal"],
@@ -354,10 +380,10 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
 }"#,
     );
     fake_http.with_text(
-        &fontsource_detail_url("web-only"),
+        &fontsource_detail_url("abel-web-only"),
         r#"{
-  "id": "web-only",
-  "family": "Web Only",
+  "id": "abel-web-only",
+  "family": "Abel Web Only",
   "subsets": ["latin"],
   "weights": [400],
   "styles": ["normal"],
@@ -382,7 +408,7 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
 
     let report = app
         .search(SearchRequest {
-            query: "fontsource:Abel".to_string(),
+            query: "fontsource:Abl".to_string(),
             limit: None,
         })
         .expect("search Fontsource");
@@ -402,9 +428,9 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     assert_eq!(
         fake_http.requested_urls(),
         vec![
-            fontsource_list_url("Abel"),
+            fontsource_list_url(),
             fontsource_detail_url("abel"),
-            fontsource_detail_url("web-only"),
+            fontsource_detail_url("abel-web-only"),
         ]
     );
     assert!(!provider_metadata_files(&paths).is_empty());
@@ -426,7 +452,7 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        &google_webfonts_url("Source%20Sans%203", "test-google-key"),
+        &google_webfonts_all_url("test-google-key"),
         r#"{
   "kind": "webfonts#webfontList",
   "items": [
@@ -447,7 +473,7 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
 
     let report = app
         .search(SearchRequest {
-            query: "google:source-sans-3".to_string(),
+            query: "google:sorce-sans-3".to_string(),
             limit: None,
         })
         .expect("search Google Fonts");
@@ -466,7 +492,7 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
     );
     assert_eq!(
         fake_http.requested_urls(),
-        vec![google_webfonts_url("Source%20Sans%203", "test-google-key"),]
+        vec![google_webfonts_all_url("test-google-key"),]
     );
     assert!(!provider_metadata_files(&paths).is_empty());
     assert_provider_metadata_has_no_font_binaries(&paths);
@@ -480,7 +506,7 @@ fn google_search_filters_results_without_desktop_font_files() {
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        &google_webfonts_url("Web%20Only", "test-google-key"),
+        &google_webfonts_all_url("test-google-key"),
         r#"{
   "kind": "webfonts#webfontList",
   "items": [
@@ -539,7 +565,7 @@ fn google_rate_limit_returns_actionable_error() {
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_status(
-        &google_webfonts_url("Source%20Sans%203", "test-google-key"),
+        &google_webfonts_all_url("test-google-key"),
         429,
         r#"{"error":{"code":429,"message":"quota exceeded"}}"#,
     );
@@ -709,14 +735,14 @@ fn explicit_google_install_without_api_key_returns_actionable_error() {
 }
 
 #[test]
-fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
+fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
     let _env = EnvVarGuard::set_google_fonts_api_key(None);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        &fontsource_list_url("Abel"),
+        &fontsource_list_url(),
         r#"[{
   "id": "abel",
   "family": "Abel",
@@ -758,7 +784,7 @@ fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
             query: "fontsource:Abel".to_string(),
             limit: None,
         })
-        .expect("first search should refresh Fontsource metadata snapshot");
+        .expect("first search should write Fontsource metadata snapshot");
 
     assert_eq!(first_report.results.len(), 1);
     assert_eq!(
@@ -770,6 +796,52 @@ fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
         "v18"
     );
 
+    fake_http.fail_gets_with_transport_error();
+
+    let second_report = app
+        .search(SearchRequest {
+            query: "fontsource:Abel".to_string(),
+            limit: None,
+        })
+        .expect("second search should use fresh Fontsource metadata snapshot");
+
+    assert_eq!(second_report.results.len(), 1);
+    assert_eq!(second_report.results[0].source, "fontsource:abel");
+    assert_eq!(
+        second_report.results[0]
+            .version
+            .as_ref()
+            .expect("version")
+            .as_str(),
+        "v18"
+    );
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![fontsource_list_url(), fontsource_detail_url("abel")]
+    );
+    assert_provider_metadata_has_no_font_binaries(&paths);
+}
+
+#[test]
+fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() {
+    let _env = EnvVarGuard::set_google_fonts_api_key(None);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_empty_registry_snapshot(&paths);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &fontsource_list_url(),
+        r#"[{
+  "id": "abel",
+  "family": "Abel",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "license": "OFL-1.1",
+  "type": "google"
+}]"#,
+    );
     fake_http.with_text(
         &fontsource_detail_url("abel"),
         r#"{
@@ -778,8 +850,8 @@ fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
   "subsets": ["latin"],
   "weights": [400],
   "styles": ["normal"],
-  "lastModified": "2025-06-01",
-  "version": "v19",
+  "lastModified": "2025-05-30",
+  "version": "v18",
   "license": "OFL-1.1",
   "variants": {
     "400": {
@@ -794,30 +866,42 @@ fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
   }
 }"#,
     );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
 
-    let second_report = app
+    app.search(SearchRequest {
+        query: "fontsource:Abel".to_string(),
+        limit: None,
+    })
+    .expect("first search should write Fontsource metadata snapshot");
+
+    let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+    set_file_modified_time(&fontsource_list_snapshot_path(&paths), stale_time);
+    set_file_modified_time(&fontsource_detail_snapshot_path(&paths, "abel"), stale_time);
+    fake_http.fail_gets_with_transport_error();
+
+    let stale_report = app
         .search(SearchRequest {
             query: "fontsource:Abel".to_string(),
             limit: None,
         })
-        .expect("second search should refresh Fontsource metadata snapshot");
+        .expect("stale Fontsource metadata should be used when refresh fails");
 
-    assert_eq!(second_report.results.len(), 1);
-    assert_eq!(second_report.results[0].source, "fontsource:abel");
+    assert_eq!(stale_report.results.len(), 1);
+    assert_eq!(stale_report.results[0].source, "fontsource:abel");
     assert_eq!(
-        second_report.results[0]
+        stale_report.results[0]
             .version
             .as_ref()
             .expect("version")
             .as_str(),
-        "v19"
+        "v18"
     );
     assert_eq!(
         fake_http.requested_urls(),
         vec![
-            fontsource_list_url("Abel"),
+            fontsource_list_url(),
             fontsource_detail_url("abel"),
-            fontsource_list_url("Abel"),
+            fontsource_list_url(),
             fontsource_detail_url("abel"),
         ]
     );

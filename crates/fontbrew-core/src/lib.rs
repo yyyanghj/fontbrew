@@ -15,6 +15,7 @@ pub mod model;
 pub mod platform;
 mod providers;
 pub mod registry;
+mod search;
 pub mod sources;
 pub mod tasks;
 mod update;

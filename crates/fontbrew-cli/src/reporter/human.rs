@@ -100,7 +100,7 @@ impl Reporter for HumanReporter {
 
         write_table(
             &mut stdout,
-            ["PACKAGE ID", "VERSION", "FAMILIES", "STATUS"],
+            ["Package", "Version", "Families", "Status"],
             rows,
         )
     }
@@ -189,7 +189,6 @@ impl Reporter for HumanReporter {
             .into_iter()
             .map(|result| {
                 [
-                    result.package_id.as_str().to_string(),
                     result.display_name,
                     families_label(&result.families),
                     result.source,
@@ -197,11 +196,7 @@ impl Reporter for HumanReporter {
             })
             .collect::<Vec<_>>();
 
-        write_table(
-            &mut stdout,
-            ["PACKAGE ID", "NAME", "FAMILIES", "SOURCE"],
-            rows,
-        )
+        write_table(&mut stdout, ["Name", "Families", "Source"], rows)
     }
 
     fn render_outdated_report(&mut self, report: OutdatedReport) -> CliResult<()> {
@@ -238,7 +233,7 @@ impl Reporter for HumanReporter {
 
         write_table(
             &mut stdout,
-            ["PACKAGE ID", "CURRENT", "LATEST", "STATUS", "REASON"],
+            ["Package", "Current", "Latest", "Status", "Reason"],
             rows,
         )
     }
@@ -282,7 +277,7 @@ impl Reporter for HumanReporter {
                     ]
                 })
                 .collect::<Vec<_>>();
-            write_table(&mut stdout, ["PACKAGE ID", "STATUS", "REASON"], rows)?;
+            write_table(&mut stdout, ["Package", "Status", "Reason"], rows)?;
         }
 
         Ok(())
@@ -589,7 +584,7 @@ fn write_font_status_table(
 
     write_table(
         stdout,
-        ["NAME", "WEIGHT", "ITALIC", "INSTALLED", "ACTIVATED"],
+        ["Name", "Weight", "Italic", "Installed", "Activated"],
         table_rows,
     )
 }
