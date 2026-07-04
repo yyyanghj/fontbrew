@@ -252,6 +252,7 @@ fn app_rejects_invalid_refreshed_registry_snapshot_before_short_name_use() {
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect_err("invalid registry snapshot should be rejected");
@@ -281,6 +282,7 @@ fn app_reads_default_registry_snapshot_without_registry_url_for_short_name_use()
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect_err("default empty registry should not contain inter");

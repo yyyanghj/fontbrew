@@ -101,6 +101,7 @@ fn local_archive_request_with_formats(
         package_id_override: None,
         format_preference,
         asset_selector: None,
+        selected_families: Vec::new(),
         reinstall,
     }
 }
@@ -146,6 +147,21 @@ fn local_archive_request_with_package_id_override(
         package_id_override: Some(package_id_override),
         format_preference: Vec::new(),
         asset_selector: None,
+        selected_families: Vec::new(),
+        reinstall: false,
+    }
+}
+
+fn local_archive_request_with_selected_families(
+    archive_path: &Path,
+    families: Vec<&str>,
+) -> InstallRequest {
+    InstallRequest {
+        source: InstallSource::LocalPath(archive_path.to_path_buf()),
+        package_id_override: None,
+        format_preference: Vec::new(),
+        asset_selector: None,
+        selected_families: families.into_iter().map(FamilyName::new).collect(),
         reinstall: false,
     }
 }
@@ -615,7 +631,7 @@ fn local_archive_package_id_override_installs_non_normalizable_family_and_record
 }
 
 #[test]
-fn direct_local_archive_rejects_multiple_families_without_boundary() {
+fn direct_local_archive_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -632,7 +648,10 @@ fn direct_local_archive_rejects_multiple_families_without_boundary() {
         .install_plan(local_archive_request(&archive_path, false))
         .expect_err("multi-family local archive should require an explicit boundary");
 
-    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    assert!(matches!(
+        error,
+        FontbrewError::FamilySelectionRequired { .. }
+    ));
     let message = error.to_string();
     assert!(message.contains("multiple font families"));
     assert!(message.contains("Source Code Pro"));
@@ -662,13 +681,61 @@ fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() 
         ))
         .expect_err("override should not define a family boundary");
 
-    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    assert!(matches!(
+        error,
+        FontbrewError::FamilySelectionRequired { .. }
+    ));
     let message = error.to_string();
     assert!(message.contains("multiple font families"));
     assert!(message.contains("Source Code Pro"));
     assert!(message.contains("Inter"));
     assert!(!paths.manifest_path().exists());
     assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn direct_local_archive_selected_family_installs_one_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    let plan = app
+        .install_plan(local_archive_request_with_selected_families(
+            &archive_path,
+            vec!["Inter"],
+        ))
+        .expect("selected family should plan");
+
+    assert_eq!(plan.package_id, package_id("inter"));
+
+    let report = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect("selected family should install");
+
+    assert_eq!(report.package_id, package_id("inter"));
+    assert_eq!(report.families, vec![FamilyName::new("Inter")]);
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    assert!(manifest.get_package(&package_id("inter")).is_some());
+    assert!(manifest
+        .get_package(&package_id("source-code-pro"))
+        .is_none());
+    assert!(!paths
+        .package_store_dir(&package_id("inter"), &PackageVersion::new("local"))
+        .join("files/SourceCodePro-Regular.ttf")
+        .exists());
 }
 
 #[test]
@@ -683,6 +750,7 @@ fn package_id_override_is_rejected_for_non_local_sources() {
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         },
         InstallRequest {
@@ -693,6 +761,7 @@ fn package_id_override_is_rejected_for_non_local_sources() {
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         },
         InstallRequest {
@@ -703,6 +772,7 @@ fn package_id_override_is_rejected_for_non_local_sources() {
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         },
         InstallRequest {
@@ -713,6 +783,7 @@ fn package_id_override_is_rejected_for_non_local_sources() {
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         },
     ] {

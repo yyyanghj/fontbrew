@@ -1516,6 +1516,13 @@ mod tests {
             self.prompted = true;
             Ok(())
         }
+
+        fn select_families(
+            &mut self,
+            _families: &[fontbrew_core::FamilyName],
+        ) -> CliResult<Vec<fontbrew_core::FamilyName>> {
+            unreachable!("self-update does not select font families")
+        }
     }
 
     fn write_script(temp: &TempDir, name: &str, version: &str) -> PathBuf {

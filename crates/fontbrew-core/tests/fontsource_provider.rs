@@ -618,6 +618,7 @@ fn google_install_downloads_ttf_and_records_provider_manifest_source() {
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect("plan Google Fonts install");
@@ -697,6 +698,7 @@ fn explicit_google_install_without_api_key_returns_actionable_error() {
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect_err("missing Google Fonts API key should fail Google install");
@@ -867,6 +869,7 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect("plan Fontsource install");
@@ -984,6 +987,7 @@ fn fontsource_install_plan_reports_progress_before_apply() {
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         },
         &mut progress,

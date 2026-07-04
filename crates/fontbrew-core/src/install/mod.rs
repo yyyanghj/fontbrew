@@ -62,6 +62,7 @@ pub fn install_plan_with_progress(
         source,
         package_id_override,
         format_preference,
+        selected_families,
         reinstall,
         ..
     } = request;
@@ -77,6 +78,7 @@ pub fn install_plan_with_progress(
                 package_id_override,
                 reinstall,
                 format_preference,
+                selected_families,
                 progress,
                 cancellation,
             )
@@ -96,6 +98,24 @@ pub(crate) fn ensure_package_id_override_allowed_for_source(
         return Err(package_id_override_unsupported_source_error());
     }
 
+    if request.package_id_override.is_some() && !request.selected_families.is_empty() {
+        return Err(FontbrewError::Config {
+            message: "--id cannot be combined with --family".to_string(),
+        });
+    }
+
+    if !request.selected_families.is_empty()
+        && !matches!(
+            request.source,
+            InstallSource::LocalPath(_) | InstallSource::GitHubRepo { .. }
+        )
+    {
+        return Err(FontbrewError::Config {
+            message: "--family is only supported for direct GitHub and local archive sources"
+                .to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -111,6 +131,7 @@ pub fn github_repo_install_plan(
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
+    let has_selected_families = !request.selected_families.is_empty();
     let options = RemoteInstallOptions::from_request(request)?;
     let package_id = package_id_from_repo_name(&repo.repo)?;
     let requested_source = ManifestSource::GitHub {
@@ -118,19 +139,26 @@ pub fn github_repo_install_plan(
         repo: repo.repo.clone(),
     };
     let requested_update_source = Some(requested_source.clone());
-    if let Some(plan) = already_installed_plan(
-        paths,
-        &package_id,
-        options.reinstall,
-        &requested_source,
-        requested_update_source.as_ref(),
-    )? {
-        return Ok(plan);
+    if !has_selected_families {
+        if let Some(plan) = already_installed_plan(
+            paths,
+            &package_id,
+            options.reinstall,
+            &requested_source,
+            requested_update_source.as_ref(),
+        )? {
+            return Ok(plan);
+        }
     }
 
     progress.emit(ProgressEvent::ResolvingSource {
         source: repo.label(),
     });
+    let options = if has_selected_families {
+        options
+    } else {
+        options.with_package_id(package_id.clone())
+    };
     let prepared = prepare_github_release_archive(
         paths,
         &repo,
@@ -140,7 +168,7 @@ pub fn github_repo_install_plan(
             owner: repo.owner.clone(),
             repo: repo.repo.clone(),
         },
-        options.with_package_id(package_id),
+        options,
         progress,
         http_client,
         cancellation,
@@ -166,7 +194,9 @@ pub fn registry_recipe_install_plan(
     let repo = recipe.github_repo.clone();
     let package_id = recipe.package_id.clone();
     options.recipe_format_preference = dedupe_formats(recipe.format_preference.clone());
-    options.family_boundary = Some(recipe.family_boundary.clone());
+    options.family_boundary = Some(InstallFamilyBoundary::from_registry(
+        recipe.family_boundary.clone(),
+    ));
     let requested_source = ManifestSource::Registry {
         id: package_id.as_str().to_string(),
     };
@@ -618,12 +648,14 @@ pub fn apply_remove(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn local_archive_install_plan(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
     package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    selected_families: Vec<FamilyName>,
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
@@ -635,6 +667,7 @@ fn local_archive_install_plan(
         package_id_override,
         reinstall,
         format_preference,
+        selected_families,
         progress,
         cancellation,
     )?;
@@ -746,12 +779,14 @@ fn source_conflict_plan(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_local_archive(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
     package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    selected_families: Vec<FamilyName>,
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
@@ -771,7 +806,7 @@ fn prepare_local_archive(
             explicit_format_preference: format_preference,
             recipe_format_preference: Vec::new(),
         },
-        None,
+        InstallFamilyBoundary::from_selected_families(selected_families),
         progress,
         cancellation,
     );
@@ -790,7 +825,7 @@ pub(crate) struct RemoteInstallOptions {
     pub(crate) reinstall: bool,
     pub(crate) explicit_format_preference: Vec<FontFormat>,
     pub(crate) recipe_format_preference: Vec<FontFormat>,
-    pub(crate) family_boundary: Option<RegistryFamilyBoundary>,
+    pub(crate) family_boundary: Option<InstallFamilyBoundary>,
 }
 
 impl RemoteInstallOptions {
@@ -805,7 +840,9 @@ impl RemoteInstallOptions {
             reinstall: request.reinstall,
             explicit_format_preference: dedupe_formats(request.format_preference),
             recipe_format_preference: Vec::new(),
-            family_boundary: None,
+            family_boundary: InstallFamilyBoundary::from_selected_families(
+                request.selected_families,
+            ),
         })
     }
 
@@ -823,6 +860,62 @@ impl RemoteInstallOptions {
             recipe_format_preference: Vec::new(),
             family_boundary: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallFamilyBoundary {
+    expected_families: Vec<FamilyName>,
+    include_families: Vec<FamilyName>,
+    exclude_families: Vec<FamilyName>,
+    allows_extra_archive_families: bool,
+    family_label: &'static str,
+}
+
+impl InstallFamilyBoundary {
+    pub(crate) fn from_registry(boundary: RegistryFamilyBoundary) -> Self {
+        Self {
+            expected_families: boundary.expected_families().to_vec(),
+            include_families: boundary.include_families().to_vec(),
+            exclude_families: boundary.exclude_families().to_vec(),
+            allows_extra_archive_families: boundary.has_explicit_include_families(),
+            family_label: "expected registry recipe",
+        }
+    }
+
+    pub(crate) fn from_selected_families(families: Vec<FamilyName>) -> Option<Self> {
+        let families = dedupe_family_names(families);
+        if families.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            expected_families: families.clone(),
+            include_families: families,
+            exclude_families: Vec::new(),
+            allows_extra_archive_families: true,
+            family_label: "selected",
+        })
+    }
+
+    fn expected_families(&self) -> &[FamilyName] {
+        &self.expected_families
+    }
+
+    fn includes_family(&self, family: &FamilyName) -> bool {
+        family_matches_any(&self.include_families, family)
+    }
+
+    fn excludes_family(&self, family: &FamilyName) -> bool {
+        family_matches_any(&self.exclude_families, family)
+    }
+
+    fn allows_extra_archive_families(&self) -> bool {
+        self.allows_extra_archive_families
+    }
+
+    fn family_label(&self) -> &'static str {
+        self.family_label
     }
 }
 
@@ -1146,7 +1239,7 @@ fn extract_and_parse_archive(
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
-    family_boundary: Option<RegistryFamilyBoundary>,
+    family_boundary: Option<InstallFamilyBoundary>,
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
@@ -1191,7 +1284,7 @@ fn parse_staged_font_files(
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
-    family_boundary: Option<RegistryFamilyBoundary>,
+    family_boundary: Option<InstallFamilyBoundary>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     if staged_fonts.is_empty() {
@@ -1261,11 +1354,8 @@ fn parse_staged_font_files(
         };
     } else if should_reject_unbounded_multiple_families(&source) && archive_families.len() > 1 {
         cleanup_staging(&staging_dir);
-        return Err(FontbrewError::ArchiveRejected {
-            reason: format!(
-                "source contains multiple font families without a registry recipe family boundary: {}",
-                family_list_label(&archive_families)
-            ),
+        return Err(FontbrewError::FamilySelectionRequired {
+            families: archive_families,
         });
     }
 
@@ -1382,12 +1472,12 @@ struct ParsedFontFile {
 }
 
 fn validate_archive_family_boundary(
-    boundary: &RegistryFamilyBoundary,
+    boundary: &InstallFamilyBoundary,
     archive_families: &[FamilyName],
 ) -> Result<()> {
     validate_expected_family_boundary(boundary, archive_families, "archive")?;
 
-    if boundary.has_explicit_include_families() {
+    if boundary.allows_extra_archive_families() {
         return Ok(());
     }
 
@@ -1409,7 +1499,7 @@ fn validate_archive_family_boundary(
 }
 
 fn validate_expected_family_boundary(
-    boundary: &RegistryFamilyBoundary,
+    boundary: &InstallFamilyBoundary,
     families: &[FamilyName],
     source_label: &str,
 ) -> Result<()> {
@@ -1425,7 +1515,8 @@ fn validate_expected_family_boundary(
 
     Err(FontbrewError::ArchiveRejected {
         reason: format!(
-            "{source_label} is missing expected registry recipe font families: {}",
+            "{source_label} is missing {} font families: {}",
+            boundary.family_label(),
             family_list_label(&missing)
         ),
     })
@@ -1433,7 +1524,7 @@ fn validate_expected_family_boundary(
 
 fn filter_parsed_files_by_family_boundary(
     parsed_files: Vec<ParsedFontFile>,
-    boundary: &RegistryFamilyBoundary,
+    boundary: &InstallFamilyBoundary,
 ) -> Result<Vec<ParsedFontFile>> {
     let mut filtered_files = Vec::new();
 
@@ -1451,7 +1542,8 @@ fn filter_parsed_files_by_family_boundary(
         if included_face_count != parsed_file.faces.len() {
             return Err(FontbrewError::ArchiveRejected {
                 reason: format!(
-                    "font file contains both included and excluded registry recipe families; cannot install a family subset from one font binary: {} (included: {}; excluded: {})",
+                    "font file contains both included and excluded {} font families; cannot install a family subset from one font binary: {} (included: {}; excluded: {})",
+                    boundary.family_label(),
                     parsed_file.staging_path.display(),
                     face_family_list(&parsed_file.faces, boundary, true),
                     face_family_list(&parsed_file.faces, boundary, false)
@@ -1480,6 +1572,20 @@ fn family_matches_any(families: &[FamilyName], family: &FamilyName) -> bool {
         .any(|candidate| normalize_family_boundary_name(candidate.as_str()) == normalized)
 }
 
+fn dedupe_family_names(families: Vec<FamilyName>) -> Vec<FamilyName> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+
+    for family in families {
+        let normalized = normalize_family_boundary_name(family.as_str());
+        if seen.insert(normalized) {
+            deduped.push(family);
+        }
+    }
+
+    deduped
+}
+
 fn family_list_label(families: &[FamilyName]) -> String {
     families
         .iter()
@@ -1490,7 +1596,7 @@ fn family_list_label(families: &[FamilyName]) -> String {
 
 fn face_family_list(
     faces: &[FontFaceMetadata],
-    boundary: &RegistryFamilyBoundary,
+    boundary: &InstallFamilyBoundary,
     included: bool,
 ) -> String {
     let mut families = BTreeSet::new();
@@ -2689,7 +2795,7 @@ fn package_not_installed_error(package_id: &PackageId) -> FontbrewError {
 mod tests {
     use super::*;
 
-    fn boundary_from_registry_json() -> RegistryFamilyBoundary {
+    fn boundary_from_registry_json() -> InstallFamilyBoundary {
         let snapshot = crate::registry::RegistrySnapshotStore::parse(
             r#"{
   "schemaVersion": 1,
@@ -2706,10 +2812,12 @@ mod tests {
         )
         .expect("registry snapshot should parse");
 
-        snapshot
+        let registry_boundary = snapshot
             .resolve_short_name("source-code-pro")
             .expect("recipe should resolve")
-            .family_boundary
+            .family_boundary;
+
+        InstallFamilyBoundary::from_registry(registry_boundary)
     }
 
     fn face(family: &str) -> FontFaceMetadata {

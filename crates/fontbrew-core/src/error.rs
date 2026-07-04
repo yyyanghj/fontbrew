@@ -42,6 +42,11 @@ pub enum FontbrewError {
     #[error("archive rejected: {reason}")]
     ArchiveRejected { reason: String },
 
+    #[error(
+        "source contains multiple font families; select one or more families to install: {families:?}"
+    )]
+    FamilySelectionRequired { families: Vec<FamilyName> },
+
     #[error("registry validation failed: {message}")]
     RegistryValidationFailed { message: String },
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -9,14 +10,14 @@ use std::{
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
-    CancellationToken, ConfigGetRequest, ConfigSetRequest, FontFormat, FontbrewApp, InfoRequest,
-    InstallRequest, InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest,
-    UpdateRequest,
+    CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FontFormat, FontbrewApp,
+    FontbrewError, InfoRequest, InstallBatchReport, InstallPlan, InstallReport, InstallRequest,
+    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
     confirm::{ConfirmationOptions, Confirmer, HumanConfirmer, JsonConfirmer},
-    exit::{self, CliResult},
+    exit::{self, CliError, CliResult},
     progress::ProgressAdapter,
     reporter::{human::HumanReporter, json::JsonReporter, Reporter},
     self_update::{self as self_update_command, SelfUpdateRequest},
@@ -103,7 +104,11 @@ struct InstallArgs {
     #[arg(long, help = "Build the install plan without applying changes")]
     dry_run: bool,
 
-    #[arg(long = "id", help = "Package ID override for local archive sources")]
+    #[arg(
+        long = "id",
+        conflicts_with_all = ["families", "all_families"],
+        help = "Package ID override for local archive sources"
+    )]
     package_id: Option<String>,
 
     #[arg(long = "asset", help = "Select a release asset by name or pattern")]
@@ -111,6 +116,21 @@ struct InstallArgs {
 
     #[arg(long = "format", value_enum, help = "Preferred desktop font format")]
     format_preference: Vec<CliFontFormat>,
+
+    #[arg(
+        long = "family",
+        value_name = "NAME",
+        conflicts_with = "all_families",
+        help = "Select a font family from a multi-family source; may be repeated"
+    )]
+    families: Vec<String>,
+
+    #[arg(
+        long = "all-families",
+        conflicts_with = "families",
+        help = "Install every font family discovered in a multi-family source"
+    )]
+    all_families: bool,
 
     #[arg(long, help = "Prefer OTF files")]
     otf: bool,
@@ -307,26 +327,131 @@ fn install(
     confirmer: &mut dyn Confirmer,
     cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
-    let request = InstallRequest {
+    let explicit_families = selected_family_args(&args.families);
+    if !explicit_families.is_empty() {
+        let plans =
+            build_family_install_plans(&args, explicit_families, app, reporter, cancellation)?;
+        let reports = apply_install_plans(&args, plans, app, reporter, confirmer, cancellation)?;
+        return render_install_reports(reporter, reports);
+    }
+
+    let request = install_request_from_args(&args, Vec::new())?;
+    let plan_result = build_install_plan(request, app, reporter, cancellation);
+    let plan = match plan_result {
+        Ok(plan) => plan,
+        Err(CliError::Core(FontbrewError::FamilySelectionRequired { families })) => {
+            let selected_families = if args.all_families {
+                families
+            } else {
+                confirmer.select_families(&families)?
+            };
+            let plans =
+                build_family_install_plans(&args, selected_families, app, reporter, cancellation)?;
+            let reports =
+                apply_install_plans(&args, plans, app, reporter, confirmer, cancellation)?;
+            return render_install_reports(reporter, reports);
+        }
+        Err(error) => return Err(error),
+    };
+
+    let reports = apply_install_plans(&args, vec![plan], app, reporter, confirmer, cancellation)?;
+    render_install_reports(reporter, reports)
+}
+
+fn install_request_from_args(
+    args: &InstallArgs,
+    selected_families: Vec<FamilyName>,
+) -> CliResult<InstallRequest> {
+    Ok(InstallRequest {
         source: install_source_from_arg(&args.source),
         package_id_override: args
             .package_id
             .as_deref()
             .map(PackageId::parse)
             .transpose()?,
-        format_preference: font_format_preference(&args),
-        asset_selector: args.asset_selector,
+        format_preference: font_format_preference(args),
+        asset_selector: args.asset_selector.clone(),
+        selected_families,
         reinstall: args.reinstall,
-    };
-    let plan = {
-        let mut progress = ProgressAdapter::new(reporter);
-        let plan =
-            app.install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)?;
-        progress.finish()?;
-        plan
-    };
+    })
+}
+
+fn selected_family_args(families: &[String]) -> Vec<FamilyName> {
+    let mut seen = BTreeSet::new();
+    let mut selected_families = Vec::new();
+
+    for family in families {
+        let trimmed = family.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = trimmed
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        if seen.insert(normalized) {
+            selected_families.push(FamilyName::new(trimmed.to_string()));
+        }
+    }
+
+    selected_families
+}
+
+fn build_family_install_plans(
+    args: &InstallArgs,
+    selected_families: Vec<FamilyName>,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    cancellation: &dyn CancellationToken,
+) -> CliResult<Vec<InstallPlan>> {
+    let mut plans = Vec::new();
+
+    for family in selected_families {
+        let request = install_request_from_args(args, vec![family])?;
+        match build_install_plan(request, app, reporter, cancellation) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                for plan in plans {
+                    app.discard_install_plan(plan);
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(plans)
+}
+
+fn build_install_plan(
+    request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    cancellation: &dyn CancellationToken,
+) -> CliResult<InstallPlan> {
+    let mut progress = ProgressAdapter::new(reporter);
+    let plan =
+        app.install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)?;
+    progress.finish()?;
+
+    Ok(plan)
+}
+
+fn apply_install_plans(
+    args: &InstallArgs,
+    mut plans: Vec<InstallPlan>,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
+) -> CliResult<Vec<InstallReport>> {
+    let risks = plans
+        .iter()
+        .flat_map(|plan| plan.risks.iter().cloned())
+        .collect::<Vec<_>>();
     let policy = match confirmer.execution_policy(
-        &plan.risks,
+        &risks,
         ConfirmationOptions {
             assume_yes: args.yes,
             dry_run: args.dry_run,
@@ -334,18 +459,45 @@ fn install(
     ) {
         Ok(policy) => policy,
         Err(error) => {
-            app.discard_install_plan(plan);
+            for plan in plans {
+                app.discard_install_plan(plan);
+            }
             return Err(error);
         }
     };
-    let report = {
-        let mut progress = ProgressAdapter::new(reporter);
-        let report = app.apply_install(plan, policy, &mut progress, cancellation)?;
-        progress.finish()?;
-        report
-    };
 
-    reporter.render_install_report(report)
+    plans.reverse();
+    let mut reports = Vec::new();
+    while let Some(plan) = plans.pop() {
+        let result: CliResult<InstallReport> = {
+            let mut progress = ProgressAdapter::new(reporter);
+            let report = app.apply_install(plan, policy.clone(), &mut progress, cancellation)?;
+            progress.finish()?;
+            Ok(report)
+        };
+        match result {
+            Ok(report) => reports.push(report),
+            Err(error) => {
+                for plan in plans {
+                    app.discard_install_plan(plan);
+                }
+                return Err(error);
+            }
+        };
+    }
+
+    Ok(reports)
+}
+
+fn render_install_reports(
+    reporter: &mut dyn Reporter,
+    mut reports: Vec<InstallReport>,
+) -> CliResult<()> {
+    if reports.len() == 1 {
+        return reporter.render_install_report(reports.remove(0));
+    }
+
+    reporter.render_install_batch_report(InstallBatchReport { packages: reports })
 }
 
 fn list(app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
@@ -700,6 +852,8 @@ mod tests {
             package_id: None,
             asset_selector: None,
             format_preference: vec![CliFontFormat::Otf, CliFontFormat::Ttf, CliFontFormat::Otf],
+            families: Vec::new(),
+            all_families: false,
             otf: true,
             ttf: true,
         };
@@ -729,6 +883,8 @@ mod tests {
             package_id: None,
             asset_selector: None,
             format_preference: Vec::new(),
+            families: Vec::new(),
+            all_families: false,
             otf: false,
             ttf: false,
         })

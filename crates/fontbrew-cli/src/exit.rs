@@ -1,6 +1,6 @@
 use std::io;
 
-use fontbrew_core::{FontbrewError, PlanRisk};
+use fontbrew_core::{FamilyName, FontbrewError, PlanRisk};
 
 pub const SUCCESS: u8 = 0;
 pub const FAILURE: u8 = 1;
@@ -14,6 +14,7 @@ pub enum CliError {
     Json(serde_json::Error),
     ApprovalRequired { risks: Vec<PlanRisk> },
     PromptUnavailable { risks: Vec<PlanRisk> },
+    FamilySelectionRequired { families: Vec<FamilyName> },
     SelfUpdateApprovalRequired { message: String },
     SelfUpdatePromptUnavailable { message: String },
     SelfUpdateUnavailable { message: String },
@@ -32,6 +33,7 @@ impl CliError {
             Self::Json(_) => "json",
             Self::ApprovalRequired { .. } => "approval_required",
             Self::PromptUnavailable { .. } => "prompt_unavailable",
+            Self::FamilySelectionRequired { .. } => "family_selection_required",
             Self::SelfUpdateApprovalRequired { .. } => "approval_required",
             Self::SelfUpdatePromptUnavailable { .. } => "prompt_unavailable",
             Self::SelfUpdateUnavailable { .. } => "self_update_unavailable",
@@ -45,6 +47,9 @@ impl CliError {
 
     pub fn message(&self) -> String {
         match self {
+            Self::Core(FontbrewError::FamilySelectionRequired { families }) => {
+                family_selection_message(families)
+            }
             Self::Core(error) => error.to_string(),
             Self::Io(error) => error.to_string(),
             Self::Json(error) => error.to_string(),
@@ -53,6 +58,7 @@ impl CliError {
                 "{}; rerun with --yes or --dry-run, or use an interactive terminal",
                 approval_message(risks)
             ),
+            Self::FamilySelectionRequired { families } => family_selection_message(families),
             Self::SelfUpdateApprovalRequired { message }
             | Self::SelfUpdatePromptUnavailable { message }
             | Self::SelfUpdateUnavailable { message }
@@ -67,6 +73,14 @@ impl CliError {
     pub fn risks(&self) -> Option<&[PlanRisk]> {
         match self {
             Self::ApprovalRequired { risks } | Self::PromptUnavailable { risks } => Some(risks),
+            _ => None,
+        }
+    }
+
+    pub fn families(&self) -> Option<&[FamilyName]> {
+        match self {
+            Self::FamilySelectionRequired { families } => Some(families),
+            Self::Core(FontbrewError::FamilySelectionRequired { families }) => Some(families),
             _ => None,
         }
     }
@@ -113,6 +127,7 @@ fn core_error_kind(error: &FontbrewError) -> &'static str {
         FontbrewError::PackageIdentityMismatch { .. } => "package_identity_mismatch",
         FontbrewError::Cancelled => "cancelled",
         FontbrewError::ArchiveRejected { .. } => "archive_rejected",
+        FontbrewError::FamilySelectionRequired { .. } => "family_selection_required",
         FontbrewError::RegistryValidationFailed { .. } => "registry_validation_failed",
         FontbrewError::InvalidPackageId { .. } => "invalid_package_id",
         FontbrewError::Config { .. } => "config",
@@ -125,4 +140,16 @@ fn core_error_kind(error: &FontbrewError) -> &'static str {
         FontbrewError::FontParse { .. } => "font_parse",
         FontbrewError::NotImplemented { .. } => "not_implemented",
     }
+}
+
+fn family_selection_message(families: &[FamilyName]) -> String {
+    let family_list = families
+        .iter()
+        .map(|family| family.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "source contains multiple font families; select one or more with --family, or install all with --all-families: {family_list}"
+    )
 }

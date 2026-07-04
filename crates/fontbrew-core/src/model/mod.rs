@@ -301,6 +301,8 @@ pub struct InstallRequest {
     pub package_id_override: Option<PackageId>,
     pub format_preference: Vec<FontFormat>,
     pub asset_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_families: Vec<FamilyName>,
     pub reinstall: bool,
 }
 
@@ -522,6 +524,11 @@ pub struct InstallReport {
     pub installed: bool,
     pub already_installed: bool,
     pub activated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallBatchReport {
+    pub packages: Vec<InstallReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

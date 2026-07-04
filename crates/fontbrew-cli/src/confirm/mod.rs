@@ -3,7 +3,8 @@ use std::{
     path::Path,
 };
 
-use fontbrew_core::{ExecutionPolicy, PlanRisk};
+use dialoguer::{console::Term, theme::ColorfulTheme, MultiSelect};
+use fontbrew_core::{ExecutionPolicy, FamilyName, PlanRisk};
 
 use crate::exit::{CliError, CliResult};
 
@@ -26,6 +27,8 @@ pub trait Confirmer {
         target_version: &str,
         assume_yes: bool,
     ) -> CliResult<()>;
+
+    fn select_families(&mut self, families: &[FamilyName]) -> CliResult<Vec<FamilyName>>;
 }
 
 pub struct HumanConfirmer {
@@ -98,6 +101,36 @@ impl Confirmer for HumanConfirmer {
         } else {
             Err(CliError::Cancelled)
         }
+    }
+
+    fn select_families(&mut self, families: &[FamilyName]) -> CliResult<Vec<FamilyName>> {
+        if !self.stdin.is_terminal() {
+            return Err(CliError::FamilySelectionRequired {
+                families: families.to_vec(),
+            });
+        }
+
+        let labels = families
+            .iter()
+            .map(|family| family.as_str().to_string())
+            .collect::<Vec<_>>();
+        let selections = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select font families to install")
+            .items(&labels)
+            .interact_on_opt(&Term::stderr())
+            .map_err(io::Error::other)?;
+
+        let Some(selections) = selections else {
+            return Err(CliError::Cancelled);
+        };
+        if selections.is_empty() {
+            return Err(CliError::Cancelled);
+        }
+
+        Ok(selections
+            .into_iter()
+            .map(|index| families[index].clone())
+            .collect())
     }
 }
 
@@ -189,6 +222,12 @@ impl Confirmer for JsonConfirmer {
                 "approval is required before replacing {} with fontbrew {target_version}; rerun with --yes or --dry-run",
                 executable_path.display()
             ),
+        })
+    }
+
+    fn select_families(&mut self, families: &[FamilyName]) -> CliResult<Vec<FamilyName>> {
+        Err(CliError::FamilySelectionRequired {
+            families: families.to_vec(),
         })
     }
 }

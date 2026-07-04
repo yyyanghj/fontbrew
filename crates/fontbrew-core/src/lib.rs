@@ -107,6 +107,7 @@ mod tests {
             package_id_override: None,
             format_preference: vec![FontFormat::Otf, FontFormat::Ttf],
             asset_selector: Some("*desktop*".to_string()),
+            selected_families: Vec::new(),
             reinstall: true,
         };
 
@@ -126,6 +127,7 @@ mod tests {
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         };
 
@@ -199,6 +201,7 @@ mod tests {
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         };
 

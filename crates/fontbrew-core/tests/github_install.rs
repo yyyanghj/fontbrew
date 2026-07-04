@@ -15,8 +15,8 @@ use fontbrew_core::{
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
     registry::REGISTRY_URL_ENV_VAR,
-    CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InstallRequest, InstallSource,
-    PackageId, ProgressEvent, ProgressSink,
+    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InstallRequest,
+    InstallSource, PackageId, ProgressEvent, ProgressSink,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -323,6 +323,15 @@ fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
 }
 
 fn github_request(owner: &str, repo: &str, asset_selector: Option<&str>) -> InstallRequest {
+    github_request_with_selected_families(owner, repo, asset_selector, Vec::new())
+}
+
+fn github_request_with_selected_families(
+    owner: &str,
+    repo: &str,
+    asset_selector: Option<&str>,
+    families: Vec<&str>,
+) -> InstallRequest {
     InstallRequest {
         source: InstallSource::GitHubRepo {
             owner: owner.to_string(),
@@ -331,6 +340,7 @@ fn github_request(owner: &str, repo: &str, asset_selector: Option<&str>) -> Inst
         package_id_override: None,
         format_preference: Vec::new(),
         asset_selector: asset_selector.map(str::to_string),
+        selected_families: families.into_iter().map(FamilyName::new).collect(),
         reinstall: false,
     }
 }
@@ -341,6 +351,7 @@ fn registry_request(short_name: &str) -> InstallRequest {
         package_id_override: None,
         format_preference: Vec::new(),
         asset_selector: None,
+        selected_families: Vec::new(),
         reinstall: false,
     }
 }
@@ -482,7 +493,7 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
 }
 
 #[test]
-fn direct_github_install_rejects_multiple_families_without_boundary() {
+fn direct_github_install_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let fake_http = Arc::new(FakeHttpClient::default());
@@ -515,13 +526,68 @@ fn direct_github_install_rejects_multiple_families_without_boundary() {
         .install_plan(github_request("adobe", "source-code-pro", None))
         .expect_err("multi-family direct GitHub archive should require a boundary");
 
-    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    assert!(matches!(
+        error,
+        FontbrewError::FamilySelectionRequired { .. }
+    ));
     let message = error.to_string();
     assert!(message.contains("multiple font families"));
     assert!(message.contains("Source Code Pro"));
     assert!(message.contains("Inter"));
     assert!(!paths.manifest_path().exists());
     assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn direct_github_install_selected_family_installs_one_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-code-pro.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let plan = app
+        .install_plan(github_request_with_selected_families(
+            "adobe",
+            "source-code-pro",
+            None,
+            vec!["Inter"],
+        ))
+        .expect("selected family should plan");
+
+    assert_eq!(plan.package_id, package_id("inter"));
+
+    let report = apply_plan(&app, plan);
+
+    assert_eq!(report.package_id, package_id("inter"));
+    assert_eq!(report.families, vec![FamilyName::new("Inter")]);
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    assert!(manifest.get_package(&package_id("inter")).is_some());
+    assert!(manifest
+        .get_package(&package_id("source-code-pro"))
+        .is_none());
 }
 
 #[test]

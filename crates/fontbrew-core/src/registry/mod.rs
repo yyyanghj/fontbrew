@@ -497,14 +497,6 @@ impl RegistryFamilyBoundary {
         &self.exclude_families
     }
 
-    pub(crate) fn includes_family(&self, family: &FamilyName) -> bool {
-        family_matches_any(&self.include_families, family)
-    }
-
-    pub(crate) fn excludes_family(&self, family: &FamilyName) -> bool {
-        family_matches_any(&self.exclude_families, family)
-    }
-
     pub(crate) fn has_explicit_include_families(&self) -> bool {
         self.has_explicit_include_families
     }

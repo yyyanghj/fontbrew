@@ -245,6 +245,108 @@ fn install_local_archive_with_package_id_override() {
 }
 
 #[test]
+fn install_local_archive_with_family_selection_installs_selected_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .args(["--family", "Inter"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed inter"))
+        .stderr(predicate::str::is_empty());
+
+    fontbrew(&home)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("inter")
+                .and(predicate::str::contains("Inter"))
+                .and(predicate::str::contains("source-code-pro").not()),
+        )
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn install_local_archive_with_all_families_installs_each_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .arg("--all-families")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Installed inter")
+                .and(predicate::str::contains("Installed source-code-pro")),
+        )
+        .stderr(predicate::str::is_empty());
+
+    fontbrew(&home)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("inter")
+                .and(predicate::str::contains("source-code-pro"))
+                .and(predicate::str::contains("Inter"))
+                .and(predicate::str::contains("Source Code Pro")),
+        )
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn json_install_reports_family_selection_required_for_multi_family_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    let output = fontbrew(&home)
+        .args(["--json", "install"])
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("family_selection_required"))
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["error"]["kind"], "family_selection_required");
+    assert_eq!(json["error"]["families"][0], "Inter");
+    assert_eq!(json["error"]["families"][1], "Source Code Pro");
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
 fn install_rejects_invalid_package_id_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");

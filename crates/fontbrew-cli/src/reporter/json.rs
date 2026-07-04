@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    ConfigReport, InfoReport, InstallReport, ListReport, OutdatedReport, ProgressEvent,
-    RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport, UpdateReport,
+    ConfigReport, InfoReport, InstallBatchReport, InstallReport, ListReport, OutdatedReport,
+    ProgressEvent, RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
+    UpdateReport,
 };
 use serde::Serialize;
 
@@ -52,6 +53,10 @@ impl JsonReporter {
 
 impl Reporter for JsonReporter {
     fn render_install_report(&mut self, report: InstallReport) -> CliResult<()> {
+        self.render_report("install", &report)
+    }
+
+    fn render_install_batch_report(&mut self, report: InstallBatchReport) -> CliResult<()> {
         self.render_report("install", &report)
     }
 
@@ -106,6 +111,7 @@ impl Reporter for JsonReporter {
                 kind: error.kind(),
                 message: error.message(),
                 risks: error.risks(),
+                families: error.families(),
             },
         };
 
@@ -150,6 +156,8 @@ struct ErrorBody<'a> {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     risks: Option<&'a [fontbrew_core::PlanRisk]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    families: Option<&'a [fontbrew_core::FamilyName]>,
 }
 
 #[cfg(test)]

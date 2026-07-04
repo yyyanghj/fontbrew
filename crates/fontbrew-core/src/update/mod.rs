@@ -238,7 +238,12 @@ fn prepare_update_package_inner(
     let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());
     if let Some(recipe) = &registry_recipe {
         options.recipe_format_preference = recipe.format_preference.clone();
-        options.family_boundary = Some(recipe.family_boundary.clone());
+        options.family_boundary = Some(install::InstallFamilyBoundary::from_registry(
+            recipe.family_boundary.clone(),
+        ));
+    } else {
+        options.family_boundary =
+            install::InstallFamilyBoundary::from_selected_families(record.families.clone());
     }
     let mut prepared = install::prepare_resolved_github_release_archive(
         paths,
@@ -742,6 +747,11 @@ fn remove_package_store(paths: &FontbrewPaths, package_store_dir: &std::path::Pa
 fn prepare_failure_reason(error: &FontbrewError) -> String {
     match error {
         FontbrewError::NoUpdateSource { .. } => "no GitHub update source".to_string(),
+        FontbrewError::ArchiveRejected { reason }
+            if reason.contains("missing selected font families") =>
+        {
+            format!("identity mismatch: {reason}")
+        }
         other => other.to_string(),
     }
 }

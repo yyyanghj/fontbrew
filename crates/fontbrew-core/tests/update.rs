@@ -367,6 +367,7 @@ fn install_github_source_code_pro_with_entries(
             package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
+            selected_families: Vec::new(),
             reinstall: false,
         })
         .expect("plan GitHub install");
@@ -712,6 +713,60 @@ fn update_prepare_reuses_registry_asset_selection_for_registry_packages() {
     assert_eq!(plan.prepared.len(), 1);
     assert!(plan.failed.is_empty());
     assert_eq!(plan.prepared[0].target_version.as_str(), "v2.0.0");
+}
+
+#[test]
+fn direct_github_update_reuses_manifest_family_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_manifest(
+        &paths,
+        vec![manifest_record(
+            "source-code-pro",
+            "v1.0.0",
+            "Source Code Pro",
+            ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+            Some(ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            }),
+        )],
+    );
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            "https://downloads.example/source-code-pro.zip",
+        ),
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(vec![package_id("source-code-pro")], Some(1)),
+            &mut progress,
+            &NeverCancelled,
+        )
+        .expect("direct GitHub update should reuse manifest family boundary");
+
+    assert_eq!(plan.prepared.len(), 1);
+    assert!(plan.failed.is_empty());
+    assert_eq!(plan.prepared[0].package_id, package_id("source-code-pro"));
+    assert_eq!(plan.prepared[0].target_version.as_str(), "v2.0.0");
+    assert!(staging_entries(&paths).len() <= 1);
 }
 
 #[test]
