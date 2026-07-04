@@ -1,4 +1,5 @@
 use crate::error::{FontbrewError, Result};
+use crate::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubRepo {
@@ -28,6 +29,23 @@ impl GitHubRepo {
 
     pub fn label(&self) -> String {
         format!("{}/{}", self.owner, self.repo)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSource {
+    pub provider: ProviderKind,
+    pub id: String,
+}
+
+impl ProviderSource {
+    pub fn parse_prefixed(input: impl AsRef<str>) -> Option<Self> {
+        let input = input.as_ref();
+
+        input.strip_prefix("fontsource:").map(|id| Self {
+            provider: ProviderKind::Fontsource,
+            id: id.to_string(),
+        })
     }
 }
 
@@ -102,7 +120,7 @@ fn invalid_github_repo<T>(input: &str, reason: &str) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sources::GitHubRepo;
+    use crate::sources::{GitHubRepo, ProviderSource};
 
     #[test]
     fn github_repo_parse_accepts_owner_repo_syntax() {
@@ -132,5 +150,14 @@ mod tests {
                 "{input:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn provider_source_parse_accepts_fontsource_prefix() {
+        let source = ProviderSource::parse_prefixed("fontsource:abel")
+            .expect("fontsource source should parse");
+
+        assert_eq!(source.provider, crate::ProviderKind::Fontsource);
+        assert_eq!(source.id, "abel");
     }
 }

@@ -490,6 +490,10 @@ pub(crate) enum PreparedInstallSource {
         github_owner: String,
         github_repo: String,
     },
+    Provider {
+        provider: ProviderKind,
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

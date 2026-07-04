@@ -8,9 +8,10 @@ use std::{
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
-    sources::GitHubRepo, CancellationToken, ConfigGetRequest, ConfigSetRequest, FontFormat,
-    FontbrewApp, InfoRequest, InstallRequest, InstallSource, OutdatedRequest, PackageId,
-    RemoveRequest, SearchRequest, UpdateRequest,
+    sources::{GitHubRepo, ProviderSource},
+    CancellationToken, ConfigGetRequest, ConfigSetRequest, FontFormat, FontbrewApp, InfoRequest,
+    InstallRequest, InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest,
+    UpdateRequest,
 };
 
 use crate::{
@@ -460,6 +461,11 @@ fn install_source_from_arg(source: &str) -> InstallSource {
 
     if path.exists() || looks_like_explicit_local_path(source) {
         InstallSource::LocalPath(path)
+    } else if let Some(provider_source) = ProviderSource::parse_prefixed(source) {
+        InstallSource::Provider {
+            provider: provider_source.provider,
+            id: provider_source.id,
+        }
     } else if let Ok(repo) = GitHubRepo::parse(source) {
         InstallSource::GitHubRepo {
             owner: repo.owner,
@@ -559,6 +565,19 @@ mod tests {
             InstallSource::GitHubRepo {
                 owner: "adobe".to_string(),
                 repo: "source-code-pro".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_source_parses_fontsource_prefix_as_provider_source() {
+        let source = install_source_from_arg("fontsource:abel");
+
+        assert_eq!(
+            source,
+            InstallSource::Provider {
+                provider: fontbrew_core::ProviderKind::Fontsource,
+                id: "abel".to_string(),
             }
         );
     }

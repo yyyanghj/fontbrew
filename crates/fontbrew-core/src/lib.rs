@@ -13,6 +13,7 @@ mod install;
 pub mod manifest;
 pub mod model;
 pub mod platform;
+mod providers;
 pub mod registry;
 pub mod sources;
 pub mod tasks;

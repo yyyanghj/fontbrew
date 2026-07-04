@@ -10,7 +10,7 @@ use crate::{
     activation::{
         deactivate, ActivationArtifact, ActivationPlan, ActivationPlanner, ActivationRequest,
     },
-    archives::{ArchiveExtractionOptions, ZipArchiveExtractor},
+    archives::{ArchiveExtractionOptions, ExtractedFontFile, ZipArchiveExtractor},
     config::{dedupe_formats, font_format_label, FontbrewConfig},
     error::{FontbrewError, Result},
     fetch::HttpClient,
@@ -29,12 +29,16 @@ use crate::{
         RemoveReport, RemoveRequest,
     },
     platform::FontbrewPaths,
+    providers::{self, FontsourceProvider, FontsourceResolvedPackage},
     registry::{RegistryAssetSelection, RegistryPackageRecipe},
     sources::GitHubRepo,
-    FamilyName, PackageId, PackageVersion, PlanRisk,
+    FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
 
 const LOCAL_ARCHIVE_VERSION: &str = "local";
+const MAX_PROVIDER_FONT_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PROVIDER_TOTAL_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PROVIDER_FONT_FILES: usize = 256;
 const ACTIVE_STAGING_MARKER: &str = ".fontbrew-active";
 const ACTIVE_STAGING_LEASE_SECS: u64 = 7 * 24 * 60 * 60;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -157,6 +161,55 @@ pub fn registry_recipe_install_plan(
         http_client,
         cancellation,
     )?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
+
+    install_plan_from_prepared(paths, prepared)
+}
+
+pub fn fontsource_install_plan(
+    paths: &FontbrewPaths,
+    provider_id: String,
+    request: InstallRequest,
+    http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
+) -> Result<InstallPlan> {
+    ensure_not_cancelled(cancellation)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
+    let offline = request.offline;
+    let options = RemoteInstallOptions::from_request(request);
+    let package_id = PackageId::parse(&provider_id)?;
+    let requested_source = ManifestSource::Provider {
+        provider: ProviderKind::Fontsource,
+        id: provider_id.clone(),
+    };
+    if let Some(plan) = already_installed_plan(
+        paths,
+        &package_id,
+        options.reinstall,
+        &requested_source,
+        None,
+    )? {
+        return Ok(plan);
+    }
+
+    if options.asset_selector.is_some() {
+        return Err(FontbrewError::Config {
+            message: "--asset is not supported for Fontsource provider sources".to_string(),
+        });
+    }
+
+    if offline {
+        return Err(FontbrewError::Config {
+            message: "Fontsource installs require network because font binaries are not cached"
+                .to_string(),
+        });
+    }
+
+    let resolved =
+        FontsourceProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
+    let prepared = prepare_fontsource_package(paths, resolved, options, http_client, cancellation)?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
@@ -714,6 +767,108 @@ fn prepare_github_release_archive(
     result
 }
 
+fn prepare_fontsource_package(
+    paths: &FontbrewPaths,
+    resolved: FontsourceResolvedPackage,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation)?;
+    let result = download_and_parse_fontsource_fonts(
+        paths,
+        resolved,
+        options,
+        http_client,
+        staging_cleanup.path().to_path_buf(),
+        cancellation,
+    );
+
+    if result.is_ok() {
+        staging_cleanup.disarm();
+    }
+
+    result
+}
+
+fn download_and_parse_fontsource_fonts(
+    paths: &FontbrewPaths,
+    resolved: FontsourceResolvedPackage,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+    staging_dir: PathBuf,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
+    fs::create_dir_all(&staging_dir)?;
+
+    if resolved.assets.len() > MAX_PROVIDER_FONT_FILES {
+        return Err(FontbrewError::ArchiveRejected {
+            reason: format!(
+                "provider package {} exceeds font file count limit",
+                resolved.provider_id
+            ),
+        });
+    }
+
+    let mut total_downloaded = 0_u64;
+    let mut staged_fonts = Vec::with_capacity(resolved.assets.len());
+    for asset in &resolved.assets {
+        ensure_not_cancelled(cancellation)?;
+        let destination = staging_dir.join(&asset.file_name);
+        ensure_path_inside(&staging_dir, &destination)?;
+        let downloaded = http_client.download_to_file(
+            providers::fontsource_asset_request(&asset.url),
+            &destination,
+            MAX_PROVIDER_FONT_DOWNLOAD_BYTES,
+            cancellation,
+        )?;
+        total_downloaded = total_downloaded.checked_add(downloaded).ok_or_else(|| {
+            FontbrewError::ArchiveRejected {
+                reason: format!(
+                    "provider package {} download size overflowed",
+                    resolved.provider_id
+                ),
+            }
+        })?;
+        if total_downloaded > MAX_PROVIDER_TOTAL_DOWNLOAD_BYTES {
+            return Err(FontbrewError::ArchiveRejected {
+                reason: format!(
+                    "provider package {} exceeds total download size limit",
+                    resolved.provider_id
+                ),
+            });
+        }
+
+        staged_fonts.push(ExtractedFontFile {
+            path: destination,
+            format: reader_format_from_font_format(asset.format),
+        });
+    }
+
+    parse_staged_font_files(
+        paths,
+        staged_fonts,
+        staging_dir,
+        resolved.version,
+        PreparedInstallSource::Provider {
+            provider: ProviderKind::Fontsource,
+            id: resolved.provider_id,
+        },
+        Some(resolved.package_id),
+        options.reinstall,
+        ArchiveFormatPreference {
+            explicit_format_preference: options.explicit_format_preference,
+            recipe_format_preference: options.recipe_format_preference,
+        },
+        cancellation,
+    )
+}
+
 fn download_and_parse_github_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
@@ -831,20 +986,44 @@ fn extract_and_parse_archive(
         .extract(&archive_path, &staging_dir)?;
     ensure_not_cancelled(cancellation)?;
 
-    if extracted_fonts.is_empty() {
+    parse_staged_font_files(
+        paths,
+        extracted_fonts,
+        staging_dir,
+        version,
+        source,
+        package_id_hint,
+        reinstall,
+        archive_format_preference,
+        cancellation,
+    )
+}
+
+fn parse_staged_font_files(
+    paths: &FontbrewPaths,
+    staged_fonts: Vec<ExtractedFontFile>,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    package_id_hint: Option<PackageId>,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    if staged_fonts.is_empty() {
         cleanup_staging(&staging_dir);
         return Err(FontbrewError::ArchiveRejected {
-            reason: "archive contains no desktop font files".to_string(),
+            reason: "source contains no desktop font files".to_string(),
         });
     }
 
     let mut family_names = BTreeSet::new();
     let reader = TtfParserMetadataReader::default();
-    let mut parsed_files = Vec::with_capacity(extracted_fonts.len());
+    let mut parsed_files = Vec::with_capacity(staged_fonts.len());
 
-    for extracted_font in extracted_fonts {
+    for staged_font in staged_fonts {
         ensure_not_cancelled(cancellation)?;
-        let faces = match reader.read_file(&extracted_font.path) {
+        let faces = match reader.read_file(&staged_font.path) {
             Ok(faces) => faces,
             Err(error) => {
                 cleanup_staging(&staging_dir);
@@ -857,7 +1036,7 @@ fn extract_and_parse_archive(
             return Err(FontbrewError::FontParse {
                 message: format!(
                     "font file has no readable faces: {}",
-                    extracted_font.path.display()
+                    staged_font.path.display()
                 ),
             });
         }
@@ -867,9 +1046,9 @@ fn extract_and_parse_archive(
         }
 
         parsed_files.push(ParsedFontFile {
-            staging_path: extracted_font.path,
+            staging_path: staged_font.path,
             faces,
-            format: font_format_from_reader_format(extracted_font.format),
+            format: font_format_from_reader_format(staged_font.format),
         });
     }
 
@@ -1352,6 +1531,15 @@ fn font_format_from_reader_format(format: FontFileFormat) -> FontFormat {
     }
 }
 
+fn reader_format_from_font_format(format: FontFormat) -> FontFileFormat {
+    match format {
+        FontFormat::Ttf => FontFileFormat::Ttf,
+        FontFormat::Otf => FontFileFormat::Otf,
+        FontFormat::Ttc => FontFileFormat::Ttc,
+        FontFormat::Otc => FontFileFormat::Otc,
+    }
+}
+
 fn manifest_font_format(format: &FontFormat) -> ManifestFontFileFormat {
     match format {
         FontFormat::Ttf => ManifestFontFileFormat::Ttf,
@@ -1528,6 +1716,10 @@ fn manifest_source_from_prepared(source: &PreparedInstallSource) -> ManifestSour
             repo: repo.clone(),
         },
         PreparedInstallSource::Registry { id, .. } => ManifestSource::Registry { id: id.clone() },
+        PreparedInstallSource::Provider { provider, id } => ManifestSource::Provider {
+            provider: provider.clone(),
+            id: id.clone(),
+        },
     }
 }
 
@@ -1546,6 +1738,7 @@ fn manifest_update_source_from_prepared(source: &PreparedInstallSource) -> Optio
             owner: github_owner.clone(),
             repo: github_repo.clone(),
         }),
+        PreparedInstallSource::Provider { .. } => None,
     }
 }
 
@@ -1664,7 +1857,14 @@ fn source_label(source: &ManifestSource) -> String {
     match source {
         ManifestSource::Registry { id } => format!("registry:{id}"),
         ManifestSource::GitHub { owner, repo } => format!("github:{owner}/{repo}"),
-        ManifestSource::Provider { provider, id } => format!("provider:{provider:?}:{id}"),
+        ManifestSource::Provider {
+            provider: ProviderKind::Fontsource,
+            id,
+        } => format!("fontsource:{id}"),
+        ManifestSource::Provider {
+            provider: ProviderKind::Google,
+            id,
+        } => format!("google:{id}"),
         ManifestSource::LocalArchive { path } => format!("local archive:{}", path.display()),
     }
 }

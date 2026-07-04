@@ -13,6 +13,7 @@ use crate::model::{
     SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
+use crate::providers::{FontsourceProvider, ProviderSearchRequest};
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
 use crate::update;
 
@@ -84,7 +85,20 @@ impl FontbrewApp {
                     cancellation,
                 )
             }
-            crate::InstallSource::Provider { .. } => not_implemented("install_plan"),
+            crate::InstallSource::Provider {
+                provider: crate::ProviderKind::Fontsource,
+                id,
+            } => install::fontsource_install_plan(
+                &paths,
+                id,
+                request,
+                self.http_client()?.as_ref(),
+                cancellation,
+            ),
+            crate::InstallSource::Provider {
+                provider: crate::ProviderKind::Google,
+                ..
+            } => not_implemented("install_plan"),
         }
     }
 
@@ -176,8 +190,9 @@ impl FontbrewApp {
             self.registry_update()?;
         }
 
-        let results = RegistrySnapshotStore::new(self.paths()?)
-            .search(&request.query, request.limit)?
+        let paths = self.paths()?;
+        let mut results = RegistrySnapshotStore::new(paths.clone())
+            .search(&request.query, None)?
             .into_iter()
             .map(|recipe| crate::SearchResult {
                 package_id: recipe.package_id.clone(),
@@ -186,7 +201,24 @@ impl FontbrewApp {
                 version: None,
                 families: recipe.families,
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        let remaining_limit = request
+            .limit
+            .map(|limit| limit.saturating_sub(results.len()));
+        if remaining_limit != Some(0) {
+            let fontsource_results = FontsourceProvider::new(&paths, self.http_client()?.as_ref())
+                .search(ProviderSearchRequest {
+                    query: &request.query,
+                    limit: remaining_limit,
+                    offline: request.offline,
+                })?;
+            results.extend(fontsource_results);
+        }
+
+        if let Some(limit) = request.limit {
+            results.truncate(limit);
+        }
 
         Ok(SearchReport { results })
     }
