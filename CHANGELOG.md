@@ -2,6 +2,11 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.6 - 2026-07-05
+
+- Fixed `fontbrew list` human output so packages with many recorded families
+  stay aligned by showing a concise family summary.
+
 ## 0.0.5 - 2026-07-05
 
 - Reduced supported source kinds to Fontsource, GitHub Releases, and local
