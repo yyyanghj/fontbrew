@@ -81,46 +81,74 @@ impl Reporter for HumanReporter {
             return Ok(());
         }
 
-        for package in report.packages {
-            let status = if package.activated {
-                "active"
-            } else {
-                "inactive"
-            };
-            writeln!(
-                stdout,
-                "{}\t{}\t{}\t{status}",
-                package.package_id.as_str(),
-                package.version.as_str(),
-                families_label(&package.families)
-            )?;
-        }
+        let rows = report
+            .packages
+            .into_iter()
+            .map(|package| {
+                [
+                    package.package_id.as_str().to_string(),
+                    package.version.as_str().to_string(),
+                    families_label(&package.families),
+                    if package.activated {
+                        "active".to_string()
+                    } else {
+                        "inactive".to_string()
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
 
-        Ok(())
+        write_table(
+            &mut stdout,
+            ["PACKAGE ID", "VERSION", "FAMILIES", "STATUS"],
+            rows,
+        )
     }
 
     fn render_info_report(&mut self, report: InfoReport) -> CliResult<()> {
+        let verbose = self.verbose;
         let mut stdout = self.stdout.lock();
         let package = report.package;
-        let update_source = package.update_source.as_deref().unwrap_or("none");
-        let activated = if package.activated { "yes" } else { "no" };
-        let managed = if package.managed { "yes" } else { "no" };
-        let update_available = update_available_label(package.update_available);
+        let families_heading = if package.families.len() == 1 {
+            "Family"
+        } else {
+            "Families"
+        };
 
         writeln!(stdout, "Package: {}", package.package_id.as_str())?;
         writeln!(stdout, "Version: {}", package.version.as_str())?;
-        writeln!(stdout, "Families: {}", families_label(&package.families))?;
+        writeln!(
+            stdout,
+            "{families_heading}: {}",
+            families_label(&package.families)
+        )?;
+        writeln!(
+            stdout,
+            "Status: {}",
+            package_status_label(package.activated, package.managed)
+        )?;
         writeln!(stdout, "Source: {}", package.source)?;
-        writeln!(stdout, "Update source: {update_source}")?;
-        writeln!(stdout, "Activated: {activated}")?;
-        writeln!(stdout, "Managed: {managed}")?;
-        writeln!(stdout, "Update available: {update_available}")?;
-        write_font_files(&mut stdout, "Installed files:", &package.font_files)?;
-        write_activation_artifacts(
+        writeln!(
+            stdout,
+            "Updates: {}",
+            update_status_label(package.update_source.as_deref(), package.update_available)
+        )?;
+        writeln!(stdout)?;
+        write_font_status_table(
             &mut stdout,
-            "Activation artifacts:",
+            &package.font_files,
             &package.activation_artifacts,
         )?;
+
+        if verbose {
+            writeln!(stdout)?;
+            write_font_files(&mut stdout, "Installed files:", &package.font_files)?;
+            write_activation_artifacts(
+                &mut stdout,
+                "Activation artifacts:",
+                &package.activation_artifacts,
+            )?;
+        }
 
         Ok(())
     }
@@ -159,40 +187,21 @@ impl Reporter for HumanReporter {
         let rows = report
             .results
             .into_iter()
-            .map(|result| SearchResultRow {
-                package_id: result.package_id.as_str().to_string(),
-                name: result.display_name,
-                families: families_label(&result.families),
-                source: result.source,
+            .map(|result| {
+                [
+                    result.package_id.as_str().to_string(),
+                    result.display_name,
+                    families_label(&result.families),
+                    result.source,
+                ]
             })
             .collect::<Vec<_>>();
-        let widths = search_result_widths(&rows);
 
-        writeln!(
-            stdout,
-            "{:<package_id_width$}  {:<name_width$}  {:<families_width$}  SOURCE",
-            "PACKAGE ID",
-            "NAME",
-            "FAMILIES",
-            package_id_width = widths.package_id,
-            name_width = widths.name,
-            families_width = widths.families,
-        )?;
-        for row in rows {
-            writeln!(
-                stdout,
-                "{:<package_id_width$}  {:<name_width$}  {:<families_width$}  {}",
-                row.package_id,
-                row.name,
-                row.families,
-                row.source,
-                package_id_width = widths.package_id,
-                name_width = widths.name,
-                families_width = widths.families,
-            )?;
-        }
-
-        Ok(())
+        write_table(
+            &mut stdout,
+            ["PACKAGE ID", "NAME", "FAMILIES", "SOURCE"],
+            rows,
+        )
     }
 
     fn render_outdated_report(&mut self, report: OutdatedReport) -> CliResult<()> {
@@ -203,26 +212,35 @@ impl Reporter for HumanReporter {
             return Ok(());
         }
 
-        for package in report.packages {
-            writeln!(
-                stdout,
-                "{}\t{} -> {}",
-                package.package_id.as_str(),
-                package.current_version.as_str(),
-                package.latest_version.as_str()
-            )?;
-        }
+        let mut rows = report
+            .packages
+            .into_iter()
+            .map(|package| {
+                [
+                    package.package_id.as_str().to_string(),
+                    package.current_version.as_str().to_string(),
+                    package.latest_version.as_str().to_string(),
+                    "outdated".to_string(),
+                    "-".to_string(),
+                ]
+            })
+            .collect::<Vec<_>>();
 
-        for package in report.not_updatable {
-            writeln!(
-                stdout,
-                "{}\tnot updatable: {}",
-                package.package_id.as_str(),
-                package.reason
-            )?;
-        }
+        rows.extend(report.not_updatable.into_iter().map(|package| {
+            [
+                package.package_id.as_str().to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                "not updatable".to_string(),
+                package.reason,
+            ]
+        }));
 
-        Ok(())
+        write_table(
+            &mut stdout,
+            ["PACKAGE ID", "CURRENT", "LATEST", "STATUS", "REASON"],
+            rows,
+        )
     }
 
     fn render_update_report(&mut self, report: UpdateReport) -> CliResult<()> {
@@ -252,13 +270,19 @@ impl Reporter for HumanReporter {
             )?;
         }
 
-        for package in report.skipped {
-            writeln!(
-                stdout,
-                "{}\tnot prepared: {}",
-                package.package_id.as_str(),
-                package.reason
-            )?;
+        if !report.skipped.is_empty() {
+            let rows = report
+                .skipped
+                .into_iter()
+                .map(|package| {
+                    [
+                        package.package_id.as_str().to_string(),
+                        "not prepared".to_string(),
+                        package.reason,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            write_table(&mut stdout, ["PACKAGE ID", "STATUS", "REASON"], rows)?;
         }
 
         Ok(())
@@ -428,33 +452,59 @@ impl Reporter for HumanReporter {
     }
 }
 
-struct SearchResultRow {
-    package_id: String,
-    name: String,
-    families: String,
-    source: String,
+fn write_table<const COLUMN_COUNT: usize>(
+    stdout: &mut impl Write,
+    headers: [&str; COLUMN_COUNT],
+    rows: Vec<[String; COLUMN_COUNT]>,
+) -> CliResult<()> {
+    let widths = table_widths(&headers, &rows);
+
+    write_table_row(stdout, &headers, &widths)?;
+    for row in rows {
+        write_table_row(stdout, &row, &widths)?;
+    }
+
+    Ok(())
 }
 
-struct SearchResultWidths {
-    package_id: usize,
-    name: usize,
-    families: usize,
-}
-
-fn search_result_widths(rows: &[SearchResultRow]) -> SearchResultWidths {
-    let mut widths = SearchResultWidths {
-        package_id: "PACKAGE ID".len(),
-        name: "NAME".len(),
-        families: "FAMILIES".len(),
-    };
+fn table_widths<const COLUMN_COUNT: usize>(
+    headers: &[&str; COLUMN_COUNT],
+    rows: &[[String; COLUMN_COUNT]],
+) -> [usize; COLUMN_COUNT] {
+    let mut widths = headers.map(str::len);
 
     for row in rows {
-        widths.package_id = widths.package_id.max(row.package_id.len());
-        widths.name = widths.name.max(row.name.len());
-        widths.families = widths.families.max(row.families.len());
+        for (index, column) in row.iter().enumerate() {
+            widths[index] = widths[index].max(column.len());
+        }
     }
 
     widths
+}
+
+fn write_table_row<T, const COLUMN_COUNT: usize>(
+    stdout: &mut impl Write,
+    columns: &[T; COLUMN_COUNT],
+    widths: &[usize; COLUMN_COUNT],
+) -> CliResult<()>
+where
+    T: AsRef<str>,
+{
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            write!(stdout, "  ")?;
+        }
+
+        let column = column.as_ref();
+        if index + 1 == COLUMN_COUNT {
+            write!(stdout, "{column}")?;
+        } else {
+            write!(stdout, "{column:<width$}", width = widths[index])?;
+        }
+    }
+    writeln!(stdout)?;
+
+    Ok(())
 }
 
 fn families_label(families: &[FamilyName]) -> String {
@@ -469,11 +519,107 @@ fn families_label(families: &[FamilyName]) -> String {
         .join(", ")
 }
 
-fn update_available_label(update_available: Option<bool>) -> &'static str {
-    match update_available {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "unknown",
+fn package_status_label(activated: bool, managed: bool) -> String {
+    let status = if activated { "active" } else { "inactive" };
+    if managed {
+        status.to_string()
+    } else {
+        format!("{status}, unmanaged")
+    }
+}
+
+fn update_status_label(update_source: Option<&str>, update_available: Option<bool>) -> String {
+    match (update_available, update_source) {
+        (Some(true), Some(source)) => format!("available ({source})"),
+        (Some(true), None) => "available".to_string(),
+        (Some(false), Some(source)) => format!("up to date ({source})"),
+        (Some(false), None) => "up to date".to_string(),
+        (None, Some(source)) => format!("not checked ({source})"),
+        (None, None) => "not configured".to_string(),
+    }
+}
+
+struct FontStatusRow {
+    name: String,
+    weight: u16,
+    is_italic: bool,
+    is_activated: bool,
+}
+
+fn write_font_status_table(
+    stdout: &mut impl Write,
+    font_files: &[ManagedFontFile],
+    activation_artifacts: &[ManagedActivationArtifact],
+) -> CliResult<()> {
+    writeln!(stdout, "Fonts:")?;
+    if font_files.is_empty() {
+        writeln!(stdout, "- none")?;
+        return Ok(());
+    }
+
+    let mut rows = font_files
+        .iter()
+        .map(|font_file| FontStatusRow {
+            name: font_file_name(font_file),
+            weight: font_file.weight,
+            is_italic: is_italic_style(&font_file.style),
+            is_activated: font_file_is_activated(font_file, activation_artifacts),
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| {
+        left.weight
+            .cmp(&right.weight)
+            .then(left.is_italic.cmp(&right.is_italic))
+            .then(left.name.cmp(&right.name))
+    });
+
+    let table_rows = rows
+        .into_iter()
+        .map(|row| {
+            [
+                row.name,
+                row.weight.to_string(),
+                yes_no_label(row.is_italic).to_string(),
+                "yes".to_string(),
+                yes_no_label(row.is_activated).to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    write_table(
+        stdout,
+        ["NAME", "WEIGHT", "ITALIC", "INSTALLED", "ACTIVATED"],
+        table_rows,
+    )
+}
+
+fn font_file_name(font_file: &ManagedFontFile) -> String {
+    font_file
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| font_file.path.display().to_string())
+}
+
+fn is_italic_style(style: &str) -> bool {
+    style.to_ascii_lowercase().contains("italic")
+}
+
+fn font_file_is_activated(
+    font_file: &ManagedFontFile,
+    activation_artifacts: &[ManagedActivationArtifact],
+) -> bool {
+    activation_artifacts
+        .iter()
+        .any(|artifact| artifact.source_path == font_file.path)
+}
+
+fn yes_no_label(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
     }
 }
 

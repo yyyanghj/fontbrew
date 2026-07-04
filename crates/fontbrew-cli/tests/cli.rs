@@ -158,7 +158,11 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("source-code-pro")
+            predicate::str::contains("PACKAGE ID")
+                .and(predicate::str::contains("VERSION"))
+                .and(predicate::str::contains("FAMILIES"))
+                .and(predicate::str::contains("STATUS"))
+                .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("Source Code Pro")),
         )
         .stderr(predicate::str::is_empty());
@@ -170,12 +174,20 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
         .stdout(
             predicate::str::contains("Package: source-code-pro")
                 .and(predicate::str::contains("Version: local"))
-                .and(predicate::str::contains("Managed: yes"))
-                .and(predicate::str::contains("Update available: unknown"))
-                .and(predicate::str::contains("Installed files:"))
+                .and(predicate::str::contains("Family: Source Code Pro"))
+                .and(predicate::str::contains("Status: active"))
+                .and(predicate::str::contains("Updates: not configured"))
+                .and(predicate::str::contains("Fonts:"))
+                .and(predicate::str::contains("NAME"))
+                .and(predicate::str::contains("WEIGHT"))
+                .and(predicate::str::contains("ITALIC"))
+                .and(predicate::str::contains("INSTALLED"))
+                .and(predicate::str::contains("ACTIVATED"))
                 .and(predicate::str::contains("SourceCodePro-Regular.ttf"))
-                .and(predicate::str::contains("Activation artifacts:"))
-                .and(predicate::str::contains("Source Code Pro")),
+                .and(predicate::str::contains("400"))
+                .and(predicate::str::contains("yes"))
+                .and(predicate::str::contains("Installed files:").not())
+                .and(predicate::str::contains("Activation artifacts:").not()),
         )
         .stderr(predicate::str::is_empty());
 
@@ -1140,7 +1152,10 @@ fn human_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("source-code-pro")
+            predicate::str::contains("PACKAGE ID")
+                .and(predicate::str::contains("STATUS"))
+                .and(predicate::str::contains("REASON"))
+                .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("not updatable")),
         )
         .stderr(predicate::str::is_empty());
@@ -1209,6 +1224,9 @@ fn human_update_dry_run_reports_skipped_package_on_stdout_only() {
         .success()
         .stdout(
             predicate::str::contains("No updates prepared.")
+                .and(predicate::str::contains("PACKAGE ID"))
+                .and(predicate::str::contains("STATUS"))
+                .and(predicate::str::contains("REASON"))
                 .and(predicate::str::contains("source-code-pro"))
                 .and(predicate::str::contains("not prepared")),
         )
