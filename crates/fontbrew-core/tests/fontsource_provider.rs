@@ -22,6 +22,17 @@ impl ProgressSink for NoProgress {
     fn emit(&mut self, _event: ProgressEvent) {}
 }
 
+#[derive(Default)]
+struct RecordingProgress {
+    events: Vec<ProgressEvent>,
+}
+
+impl ProgressSink for RecordingProgress {
+    fn emit(&mut self, event: ProgressEvent) {
+        self.events.push(event);
+    }
+}
+
 struct NeverCancelled;
 
 impl CancellationToken for NeverCancelled {
@@ -925,4 +936,80 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
                 .next()
                 .is_none()
     );
+}
+
+#[test]
+fn fontsource_install_plan_reports_progress_before_apply() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &fontsource_detail_url("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/source-code-pro.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    let font_bytes = fixture_font_bytes("SourceCodePro-Regular.ttf");
+    fake_http.with_download_bytes(
+        "https://cdn.example/source-code-pro.ttf",
+        font_bytes.clone(),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
+    let mut progress = RecordingProgress::default();
+
+    app.install_plan_with_progress_and_cancellation(
+        InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        },
+        &mut progress,
+        &NeverCancelled,
+    )
+    .expect("plan Fontsource install");
+
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ResolvingSource { source } if source == "fontsource:source-code-pro"
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DownloadStarted { package_id, bytes: None }
+            if package_id.as_str() == "source-code-pro"
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DownloadProgress {
+            package_id,
+            downloaded,
+            total: None,
+        } if package_id.as_str() == "source-code-pro" && *downloaded == font_bytes.len() as u64
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+    )));
 }

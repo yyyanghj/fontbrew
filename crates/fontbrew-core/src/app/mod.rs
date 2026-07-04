@@ -8,7 +8,7 @@ use crate::install;
 use crate::model::{
     ensure_not_cancelled, CancellationToken, ConfigGetRequest, ConfigReport, ConfigSetRequest,
     ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport, InstallRequest,
-    ListReport, NoCancellation, OutdatedReport, OutdatedRequest, ProgressSink,
+    ListReport, NoCancellation, NoProgress, OutdatedReport, OutdatedRequest, ProgressSink,
     RegistryStatusReport, RegistryUpdateReport, RemovePlan, RemoveReport, RemoveRequest,
     SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
 };
@@ -61,12 +61,22 @@ impl FontbrewApp {
         request: InstallRequest,
         cancellation: &dyn CancellationToken,
     ) -> Result<InstallPlan> {
+        let mut progress = NoProgress;
+        self.install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)
+    }
+
+    pub fn install_plan_with_progress_and_cancellation(
+        &self,
+        request: InstallRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<InstallPlan> {
         ensure_not_cancelled(cancellation)?;
         let paths = self.paths()?;
         install::ensure_package_id_override_allowed_for_source(&request)?;
         match request.source.clone() {
             crate::InstallSource::LocalPath(_) => {
-                install::install_plan(&paths, request, cancellation)
+                install::install_plan_with_progress(&paths, request, progress, cancellation)
             }
             crate::InstallSource::RegistryName(short_name) => {
                 self.refresh_registry_snapshot(&paths)?;
@@ -78,6 +88,7 @@ impl FontbrewApp {
                     &paths,
                     recipe,
                     request,
+                    progress,
                     self.http_client()?.as_ref(),
                     cancellation,
                 )
@@ -88,6 +99,7 @@ impl FontbrewApp {
                     &paths,
                     github_repo,
                     request,
+                    progress,
                     self.http_client()?.as_ref(),
                     cancellation,
                 )
@@ -99,6 +111,7 @@ impl FontbrewApp {
                 &paths,
                 id,
                 request,
+                progress,
                 self.http_client()?.as_ref(),
                 cancellation,
             ),
@@ -109,6 +122,7 @@ impl FontbrewApp {
                 &paths,
                 id,
                 request,
+                progress,
                 self.http_client()?.as_ref(),
                 cancellation,
             ),

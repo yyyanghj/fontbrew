@@ -24,9 +24,10 @@ use crate::{
     model::{
         ensure_not_cancelled, CancellationToken, ExecutionPolicy, FontFormat, InfoReport,
         InfoRequest, InstallPlan, InstallReport, InstallRequest, InstallSource, ListPackage,
-        ListReport, ManagedActivationArtifact, ManagedFontFile, PackageInfo, PlannedChange,
-        PreparedFontFace, PreparedFontFile, PreparedInstallPackage, PreparedInstallSource,
-        ProgressEvent, ProgressSink, RemovePlan, RemoveReport, RemoveRequest,
+        ListReport, ManagedActivationArtifact, ManagedFontFile, NoProgress, PackageInfo,
+        PlannedChange, PreparedFontFace, PreparedFontFile, PreparedInstallPackage,
+        PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan, RemoveReport,
+        RemoveRequest,
     },
     platform::FontbrewPaths,
     providers::{self, FontsourceProvider, GoogleProvider, ResolvedProviderPackage},
@@ -46,9 +47,10 @@ const ACTIVE_STAGING_MARKER: &str = ".fontbrew-active";
 const ACTIVE_STAGING_LEASE_SECS: u64 = 7 * 24 * 60 * 60;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn install_plan(
+pub fn install_plan_with_progress(
     paths: &FontbrewPaths,
     request: InstallRequest,
+    progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
     ensure_not_cancelled(cancellation)?;
@@ -65,14 +67,20 @@ pub fn install_plan(
     } = request;
 
     match source {
-        InstallSource::LocalPath(path) => local_archive_install_plan(
-            paths,
-            path,
-            package_id_override,
-            reinstall,
-            format_preference,
-            cancellation,
-        ),
+        InstallSource::LocalPath(path) => {
+            progress.emit(ProgressEvent::ResolvingSource {
+                source: path.display().to_string(),
+            });
+            local_archive_install_plan(
+                paths,
+                path,
+                package_id_override,
+                reinstall,
+                format_preference,
+                progress,
+                cancellation,
+            )
+        }
         _ => Err(FontbrewError::NotImplemented {
             operation: "install_source",
         }),
@@ -95,6 +103,7 @@ pub fn github_repo_install_plan(
     paths: &FontbrewPaths,
     repo: GitHubRepo,
     request: InstallRequest,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
@@ -119,6 +128,9 @@ pub fn github_repo_install_plan(
         return Ok(plan);
     }
 
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: repo.label(),
+    });
     let prepared = prepare_github_release_archive(
         paths,
         &repo,
@@ -129,6 +141,7 @@ pub fn github_repo_install_plan(
             repo: repo.repo.clone(),
         },
         options.with_package_id(package_id),
+        progress,
         http_client,
         cancellation,
     )?;
@@ -141,6 +154,7 @@ pub fn registry_recipe_install_plan(
     paths: &FontbrewPaths,
     recipe: RegistryPackageRecipe,
     request: InstallRequest,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
@@ -170,6 +184,9 @@ pub fn registry_recipe_install_plan(
         return Ok(plan);
     }
 
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: format!("registry:{}", package_id.as_str()),
+    });
     let prepared = prepare_github_release_archive(
         paths,
         &repo,
@@ -181,6 +198,7 @@ pub fn registry_recipe_install_plan(
             github_repo: repo.repo.clone(),
         },
         options.with_package_id(package_id),
+        progress,
         http_client,
         cancellation,
     )?;
@@ -193,6 +211,7 @@ pub fn fontsource_install_plan(
     paths: &FontbrewPaths,
     provider_id: String,
     request: InstallRequest,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
@@ -222,9 +241,19 @@ pub fn fontsource_install_plan(
         });
     }
 
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: format!("fontsource:{provider_id}"),
+    });
     let resolved =
         FontsourceProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
-    let prepared = prepare_provider_package(paths, resolved, options, http_client, cancellation)?;
+    let prepared = prepare_provider_package(
+        paths,
+        resolved,
+        options,
+        progress,
+        http_client,
+        cancellation,
+    )?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
@@ -234,6 +263,7 @@ pub fn google_install_plan(
     paths: &FontbrewPaths,
     provider_id: String,
     request: InstallRequest,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
@@ -263,8 +293,18 @@ pub fn google_install_plan(
         });
     }
 
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: format!("google:{provider_id}"),
+    });
     let resolved = GoogleProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
-    let prepared = prepare_provider_package(paths, resolved, options, http_client, cancellation)?;
+    let prepared = prepare_provider_package(
+        paths,
+        resolved,
+        options,
+        progress,
+        http_client,
+        cancellation,
+    )?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
@@ -584,6 +624,7 @@ fn local_archive_install_plan(
     package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
     let archive_path = resolve_local_archive_path(&archive_path)?;
@@ -594,6 +635,7 @@ fn local_archive_install_plan(
         package_id_override,
         reinstall,
         format_preference,
+        progress,
         cancellation,
     )?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
@@ -710,6 +752,7 @@ fn prepare_local_archive(
     package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_not_cancelled(cancellation)?;
@@ -729,6 +772,7 @@ fn prepare_local_archive(
             recipe_format_preference: Vec::new(),
         },
         None,
+        progress,
         cancellation,
     );
 
@@ -832,6 +876,7 @@ fn prepare_github_release_archive(
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
@@ -846,6 +891,7 @@ fn prepare_github_release_archive(
         fallback_package_id,
         source,
         options,
+        progress,
         http_client,
         staging_cleanup.path().to_path_buf(),
         cancellation,
@@ -862,6 +908,7 @@ fn prepare_provider_package(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
@@ -873,6 +920,7 @@ fn prepare_provider_package(
         paths,
         resolved,
         options,
+        progress,
         http_client,
         staging_cleanup.path().to_path_buf(),
         cancellation,
@@ -889,6 +937,7 @@ fn download_and_parse_provider_fonts(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
     cancellation: &dyn CancellationToken,
@@ -908,6 +957,10 @@ fn download_and_parse_provider_fonts(
 
     let mut total_downloaded = 0_u64;
     let mut staged_fonts = Vec::with_capacity(resolved.assets.len());
+    progress.emit(ProgressEvent::DownloadStarted {
+        package_id: resolved.package_id.clone(),
+        bytes: None,
+    });
     for asset in &resolved.assets {
         ensure_not_cancelled(cancellation)?;
         let destination = staging_dir.join(&asset.file_name);
@@ -935,12 +988,20 @@ fn download_and_parse_provider_fonts(
             });
         }
 
+        progress.emit(ProgressEvent::DownloadProgress {
+            package_id: resolved.package_id.clone(),
+            downloaded: total_downloaded,
+            total: None,
+        });
         staged_fonts.push(ExtractedFontFile {
             path: destination,
             format: reader_format_from_font_format(asset.format),
         });
     }
 
+    progress.emit(ProgressEvent::ParsingFonts {
+        package_id: resolved.package_id.clone(),
+    });
     parse_staged_font_files(
         paths,
         staged_fonts,
@@ -969,6 +1030,7 @@ fn download_and_parse_github_archive(
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
     cancellation: &dyn CancellationToken,
@@ -990,6 +1052,7 @@ fn download_and_parse_github_archive(
         asset,
         source,
         options,
+        progress,
         http_client,
         staging_dir,
         cancellation,
@@ -1004,6 +1067,7 @@ pub(crate) fn prepare_resolved_github_release_archive(
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
+    let mut progress = NoProgress;
     ensure_not_cancelled(cancellation)?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
@@ -1013,6 +1077,7 @@ pub(crate) fn prepare_resolved_github_release_archive(
         asset,
         source,
         options,
+        &mut progress,
         http_client,
         staging_cleanup.path().to_path_buf(),
         cancellation,
@@ -1025,11 +1090,13 @@ pub(crate) fn prepare_resolved_github_release_archive(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn download_and_parse_resolved_github_archive(
     paths: &FontbrewPaths,
     asset: github::ResolvedGitHubAsset,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
     cancellation: &dyn CancellationToken,
@@ -1037,6 +1104,12 @@ fn download_and_parse_resolved_github_archive(
     ensure_not_cancelled(cancellation)?;
     fs::create_dir_all(&staging_dir)?;
     let archive_path = staging_dir.join("download.zip");
+    if let Some(package_id) = &options.package_id {
+        progress.emit(ProgressEvent::DownloadStarted {
+            package_id: package_id.clone(),
+            bytes: None,
+        });
+    }
     github::download_release_asset_to_file(
         http_client,
         &asset.download_url,
@@ -1058,6 +1131,7 @@ fn download_and_parse_resolved_github_archive(
             recipe_format_preference: options.recipe_format_preference,
         },
         options.family_boundary,
+        progress,
         cancellation,
     )
 }
@@ -1073,15 +1147,26 @@ fn extract_and_parse_archive(
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<RegistryFamilyBoundary>,
+    progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
     ensure_not_cancelled(cancellation)?;
 
+    if let Some(package_id) = &package_id_hint {
+        progress.emit(ProgressEvent::ExtractingArchive {
+            package_id: package_id.clone(),
+        });
+    }
     let extracted_fonts = ZipArchiveExtractor::new(ArchiveExtractionOptions::default())
         .extract(&archive_path, &staging_dir)?;
     ensure_not_cancelled(cancellation)?;
 
+    if let Some(package_id) = &package_id_hint {
+        progress.emit(ProgressEvent::ParsingFonts {
+            package_id: package_id.clone(),
+        });
+    }
     parse_staged_font_files(
         paths,
         extracted_fonts,

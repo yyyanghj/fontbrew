@@ -296,7 +296,13 @@ fn install(
         asset_selector: args.asset_selector,
         reinstall: args.reinstall,
     };
-    let plan = app.install_plan_with_cancellation(request, cancellation)?;
+    let plan = {
+        let mut progress = ProgressAdapter::new(reporter);
+        let plan =
+            app.install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)?;
+        progress.finish()?;
+        plan
+    };
     let policy = match confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {

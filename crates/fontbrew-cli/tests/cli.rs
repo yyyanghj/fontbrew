@@ -195,6 +195,25 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
 }
 
 #[test]
+fn verbose_install_reports_planning_and_apply_progress_on_stderr() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["-v", "install"])
+        .arg(&archive_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed source-code-pro"))
+        .stderr(
+            predicate::str::contains("Resolving")
+                .and(predicate::str::contains("Finished source-code-pro")),
+        );
+}
+
+#[test]
 fn install_local_archive_with_package_id_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -876,7 +895,7 @@ fn human_search_reports_registry_result_fields_on_stdout_only() {
     let registry_path = temp.path().join("registry.json");
     write_search_registry_snapshot(&registry_path);
 
-    fontbrew(&home)
+    let output = fontbrew(&home)
         .env(
             REGISTRY_URL_ENV_VAR,
             format!("file://{}", registry_path.display()),
@@ -884,10 +903,20 @@ fn human_search_reports_registry_result_fields_on_stdout_only() {
         .args(["search", "code", "--limit", "1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "source-code-pro\tSource Code Pro\tSource Code Pro\tregistry:source-code-pro",
-        ))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+
+    assert!(stdout.lines().next().is_some_and(|line| {
+        line.contains("PACKAGE ID")
+            && line.contains("NAME")
+            && line.contains("FAMILIES")
+            && line.contains("SOURCE")
+    }));
+    assert!(stdout.contains("source-code-pro"));
+    assert!(stdout.contains("Source Code Pro"));
+    assert!(stdout.contains("registry:source-code-pro"));
 }
 
 #[test]

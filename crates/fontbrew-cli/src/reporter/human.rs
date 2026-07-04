@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use fontbrew_core::{
     config::ActivationStrategy, ConfigReport, ConfigValue, FamilyName, FontFormat, InfoReport,
@@ -17,6 +17,7 @@ pub struct HumanReporter {
     stderr: io::Stderr,
     quiet: bool,
     verbose: bool,
+    show_progress: bool,
 }
 
 impl HumanReporter {
@@ -26,6 +27,7 @@ impl HumanReporter {
             stderr: io::stderr(),
             quiet,
             verbose,
+            show_progress: verbose || io::stderr().is_terminal(),
         }
     }
 }
@@ -148,14 +150,39 @@ impl Reporter for HumanReporter {
             return Ok(());
         }
 
-        for result in report.results {
+        let rows = report
+            .results
+            .into_iter()
+            .map(|result| SearchResultRow {
+                package_id: result.package_id.as_str().to_string(),
+                name: result.display_name,
+                families: families_label(&result.families),
+                source: result.source,
+            })
+            .collect::<Vec<_>>();
+        let widths = search_result_widths(&rows);
+
+        writeln!(
+            stdout,
+            "{:<package_id_width$}  {:<name_width$}  {:<families_width$}  SOURCE",
+            "PACKAGE ID",
+            "NAME",
+            "FAMILIES",
+            package_id_width = widths.package_id,
+            name_width = widths.name,
+            families_width = widths.families,
+        )?;
+        for row in rows {
             writeln!(
                 stdout,
-                "{}\t{}\t{}\t{}",
-                result.package_id.as_str(),
-                result.display_name,
-                families_label(&result.families),
-                result.source
+                "{:<package_id_width$}  {:<name_width$}  {:<families_width$}  {}",
+                row.package_id,
+                row.name,
+                row.families,
+                row.source,
+                package_id_width = widths.package_id,
+                name_width = widths.name,
+                families_width = widths.families,
             )?;
         }
 
@@ -318,7 +345,7 @@ impl Reporter for HumanReporter {
     }
 
     fn progress(&mut self, event: &ProgressEvent) -> CliResult<()> {
-        if self.quiet || !self.verbose {
+        if self.quiet || !self.show_progress {
             return Ok(());
         }
 
@@ -334,18 +361,24 @@ impl Reporter for HumanReporter {
                 package_id,
                 downloaded,
                 total,
-            } => match total {
-                Some(total) => writeln!(
-                    stderr,
-                    "Downloading {}: {downloaded}/{total} bytes",
-                    package_id.as_str()
-                )?,
-                None => writeln!(
-                    stderr,
-                    "Downloading {}: {downloaded} bytes",
-                    package_id.as_str()
-                )?,
-            },
+            } => {
+                if !self.verbose {
+                    return Ok(());
+                }
+
+                match total {
+                    Some(total) => writeln!(
+                        stderr,
+                        "Downloading {}: {downloaded}/{total} bytes",
+                        package_id.as_str()
+                    )?,
+                    None => writeln!(
+                        stderr,
+                        "Downloading {}: {downloaded} bytes",
+                        package_id.as_str()
+                    )?,
+                }
+            }
             ProgressEvent::ExtractingArchive { package_id } => {
                 writeln!(stderr, "Extracting {}", package_id.as_str())?;
             }
@@ -365,6 +398,35 @@ impl Reporter for HumanReporter {
 
         Ok(())
     }
+}
+
+struct SearchResultRow {
+    package_id: String,
+    name: String,
+    families: String,
+    source: String,
+}
+
+struct SearchResultWidths {
+    package_id: usize,
+    name: usize,
+    families: usize,
+}
+
+fn search_result_widths(rows: &[SearchResultRow]) -> SearchResultWidths {
+    let mut widths = SearchResultWidths {
+        package_id: "PACKAGE ID".len(),
+        name: "NAME".len(),
+        families: "FAMILIES".len(),
+    };
+
+    for row in rows {
+        widths.package_id = widths.package_id.max(row.package_id.len());
+        widths.name = widths.name.max(row.name.len());
+        widths.families = widths.families.max(row.families.len());
+    }
+
+    widths
 }
 
 fn families_label(families: &[FamilyName]) -> String {

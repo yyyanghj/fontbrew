@@ -423,6 +423,13 @@ pub trait ProgressSink {
     fn emit(&mut self, event: ProgressEvent);
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoProgress;
+
+impl ProgressSink for NoProgress {
+    fn emit(&mut self, _event: ProgressEvent) {}
+}
+
 pub trait CancellationToken: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
