@@ -1709,17 +1709,6 @@ fn select_preferred_format_files(
         return Ok(parsed_files);
     }
 
-    if formats_have_different_coverage(&coverage_by_format) {
-        return Err(FontbrewError::Conflict {
-            package_id: package_id.clone(),
-            message: format!(
-                "format coverage differs across available desktop formats for {}; refusing to choose a preferred subset ({})",
-                package_id.as_str(),
-                format_coverage_summary(&coverage_by_format)
-            ),
-        });
-    }
-
     let Some(selected_format) = format_selection
         .preference
         .iter()
@@ -1780,29 +1769,6 @@ fn face_coverage(face: &FontFaceMetadata) -> FaceCoverage {
         style: face_style(face),
         weight: face.weight.unwrap_or(400),
     }
-}
-
-fn formats_have_different_coverage(
-    coverage_by_format: &BTreeMap<FontFormat, BTreeSet<FaceCoverage>>,
-) -> bool {
-    let mut coverage_sets = coverage_by_format.values();
-    let Some(first) = coverage_sets.next() else {
-        return false;
-    };
-
-    coverage_sets.any(|coverage| coverage != first)
-}
-
-fn format_coverage_summary(
-    coverage_by_format: &BTreeMap<FontFormat, BTreeSet<FaceCoverage>>,
-) -> String {
-    coverage_by_format
-        .iter()
-        .map(|(format, coverage)| {
-            format!("{}: {} face(s)", font_format_label(format), coverage.len())
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn format_list_label<'a>(formats: impl IntoIterator<Item = &'a FontFormat>) -> String {

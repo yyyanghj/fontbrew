@@ -3,7 +3,11 @@ use std::{
     path::Path,
 };
 
-use dialoguer::{console::Term, theme::ColorfulTheme, MultiSelect};
+use dialoguer::{
+    console::{style, Style, Term},
+    theme::ColorfulTheme,
+    MultiSelect,
+};
 use fontbrew_core::{ExecutionPolicy, FamilyName, PlanRisk};
 
 use crate::exit::{CliError, CliResult};
@@ -114,7 +118,8 @@ impl Confirmer for HumanConfirmer {
             .iter()
             .map(|family| family.as_str().to_string())
             .collect::<Vec<_>>();
-        let selections = MultiSelect::with_theme(&ColorfulTheme::default())
+        let theme = family_selection_theme();
+        let selections = MultiSelect::with_theme(&theme)
             .with_prompt("Select font families to install")
             .items(&labels)
             .interact_on_opt(&Term::stderr())
@@ -131,6 +136,16 @@ impl Confirmer for HumanConfirmer {
             .into_iter()
             .map(|index| families[index].clone())
             .collect())
+    }
+}
+
+fn family_selection_theme() -> ColorfulTheme {
+    ColorfulTheme {
+        checked_item_prefix: style("[x]".to_string()).for_stderr().green().bold(),
+        unchecked_item_prefix: style("[ ]".to_string()).for_stderr().black().bright(),
+        active_item_style: Style::new().for_stderr().cyan().bold(),
+        values_style: Style::new().for_stderr().green().bold(),
+        ..ColorfulTheme::default()
     }
 }
 

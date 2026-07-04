@@ -317,6 +317,36 @@ fn install_local_archive_with_all_families_installs_each_package() {
 }
 
 #[test]
+fn install_local_archive_with_all_families_reports_source_resolution_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    let output = fontbrew(&home)
+        .args(["-v", "install"])
+        .arg(&archive_path)
+        .arg("--all-families")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = stderr_text(&output);
+
+    assert_eq!(
+        stderr.matches("Resolving ").count(),
+        1,
+        "stderr should not repeat source resolution progress:\n{stderr}"
+    );
+}
+
+#[test]
 fn json_install_reports_family_selection_required_for_multi_family_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");

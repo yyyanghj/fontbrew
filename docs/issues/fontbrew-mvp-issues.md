@@ -302,7 +302,7 @@ Implement `config get/set`, global format preference, `--format`, `--otf`, and `
 - [ ] Unknown config keys fail clearly.
 - [ ] Install uses global format preference by default.
 - [ ] CLI format flags override config for one install.
-- [ ] Non-equivalent format coverage requires explicit selection.
+- [ ] Install applies format preference even when available desktop formats have different coverage.
 
 ## Issue 17: Add cancellation and staging cleanup hardening
 

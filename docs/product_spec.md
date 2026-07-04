@@ -360,7 +360,7 @@ MVP 不 activation：
 
 如果 archive 同时包含 desktop font 和 webfont，Fontbrew 只使用 desktop font。
 
-### 9.10 format preference 可以配置，但不能掩盖不同 coverage
+### 9.10 format preference 可以配置并决定 desktop format 取舍
 
 默认 format preference：
 
@@ -377,7 +377,7 @@ fontbrew install inter --otf
 fontbrew install inter --ttf
 ```
 
-如果不同 format 的 family/style/weight coverage 不等价，Fontbrew 不能只按 preference 静默选择，必须要求显式选择。
+如果不同 format 的 family/style/weight coverage 不等价，Fontbrew 仍按 preference 选择一个 desktop format。上游字体包本身的覆盖差异不是 Fontbrew 需要修复的冲突；用户需要另一个 format 时可以通过全局配置或 install flags 显式覆盖。
 
 ### 9.11 conflict 需要用户明确同意，且不能 adopt
 

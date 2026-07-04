@@ -972,7 +972,7 @@ format_preference = ["ttf", "otf"]
 }
 
 #[test]
-fn local_archive_install_rejects_implicit_format_coverage_mismatch() {
+fn local_archive_install_uses_default_format_preference_when_coverage_differs() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -986,13 +986,26 @@ fn local_archive_install_rejects_implicit_format_coverage_mismatch() {
         ],
     );
 
-    let error = app
+    let plan = app
         .install_plan(local_archive_request(&archive_path, false))
-        .expect_err("format coverage mismatch should fail conservatively");
+        .expect("format coverage mismatch should still use default preference");
+    let mut progress = NoProgress;
+    let cancellation = NeverCancelled;
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut progress,
+        &cancellation,
+    )
+    .expect("install default preferred format");
 
-    assert!(matches!(error, FontbrewError::Conflict { .. }));
-    assert!(format!("{error}").contains("format coverage differs"));
-    assert!(!paths.manifest_path().exists());
+    let package_dir = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("local"),
+    );
+    assert!(package_dir.join("files/SourceCodePro-Regular.otf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Regular.ttf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Bold.ttf").exists());
 }
 
 #[test]

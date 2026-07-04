@@ -1,4 +1,7 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    collections::BTreeSet,
+    io::{self, IsTerminal, Write},
+};
 
 use fontbrew_core::{
     config::ActivationStrategy, ConfigReport, ConfigValue, FamilyName, FontFormat, InfoReport,
@@ -19,6 +22,7 @@ pub struct HumanReporter {
     quiet: bool,
     verbose: bool,
     show_progress: bool,
+    resolved_sources: BTreeSet<String>,
 }
 
 impl HumanReporter {
@@ -29,6 +33,7 @@ impl HumanReporter {
             quiet,
             verbose,
             show_progress: verbose || io::stderr().is_terminal(),
+            resolved_sources: BTreeSet::new(),
         }
     }
 }
@@ -361,6 +366,9 @@ impl Reporter for HumanReporter {
         let mut stderr = self.stderr.lock();
         match event {
             ProgressEvent::ResolvingSource { source } => {
+                if !self.resolved_sources.insert(source.clone()) {
+                    return Ok(());
+                }
                 writeln!(stderr, "Resolving {source}")?;
             }
             ProgressEvent::DownloadStarted { package_id, .. } => {
