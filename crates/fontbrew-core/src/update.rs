@@ -76,7 +76,7 @@ fn latest_update_version(
     if let Some(provider_id) = fontsource_provider_id(record) {
         return Ok(Some(
             FontsourceProvider::new(paths, http_client)
-                .resolve_install_package(provider_id)?
+                .resolve_update_package(provider_id)?
                 .version,
         ));
     }
@@ -299,7 +299,7 @@ fn prepare_fontsource_update_package_inner(
 ) -> Result<Option<PreparedUpdatePackage>> {
     ensure_not_cancelled(cancellation)?;
     let resolved =
-        FontsourceProvider::new(paths, http_client).resolve_install_package(provider_id)?;
+        FontsourceProvider::new(paths, http_client).resolve_update_package(provider_id)?;
     ensure_not_cancelled(cancellation)?;
     match compare_versions(&record.version, &resolved.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),

@@ -2,6 +2,11 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## Unreleased
+
+- Reduced supported source kinds to Fontsource, GitHub Releases, and local archives.
+- Changed unprefixed install IDs such as `fontbrew install inter` to resolve as exact Fontsource IDs.
+
 ## 0.0.4 - 2026-07-05
 
 - Changed `fontbrew info` human output to show a concise package summary and a per-font status table with weight, italic, installed, and activated state.
@@ -26,7 +31,7 @@ All notable changes to Fontbrew will be documented in this file.
 Initial public release.
 
 - Added the `fontbrew` macOS CLI for installing, listing, inspecting, updating, and removing managed fonts.
-- Added install support for local archives, registry entries, GitHub Releases, Fontsource, and Google Fonts.
+- Added install support for local archives, GitHub Releases, and Fontsource.
 - Added human-readable and JSON output modes.
 - Added GitHub Actions CI and automated GitHub Release publishing.
 - Added one-line installer, MIT license, and release archives for Apple Silicon and Intel Macs.

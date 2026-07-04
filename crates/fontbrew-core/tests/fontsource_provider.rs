@@ -815,6 +815,80 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
 }
 
 #[test]
+fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let install_http = Arc::new(FakeHttpClient::default());
+    install_http.with_text(
+        &fontsource_detail_url("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v1",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/source-code-pro-v1.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    install_http.with_download_bytes(
+        "https://cdn.example/source-code-pro-v1.ttf",
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), install_http);
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .expect("plan initial Fontsource install");
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut NoProgress,
+        &NeverCancelled,
+    )
+    .expect("apply initial Fontsource install");
+
+    let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+    set_file_modified_time(
+        &fontsource_detail_snapshot_path(&paths, "source-code-pro"),
+        stale_time,
+    );
+
+    let update_http = Arc::new(FakeHttpClient::default());
+    update_http.fail_gets_with_transport_error();
+    let app = FontbrewApp::with_paths_and_http_client(paths, update_http);
+
+    let error = app
+        .outdated(OutdatedRequest {
+            package_ids: vec![package_id("source-code-pro")],
+        })
+        .expect_err("stale Fontsource metadata should not hide refresh failure");
+
+    assert!(error.to_string().contains("simulated transport failure"));
+}
+
+#[test]
 fn fontsource_install_plan_reports_progress_before_apply() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);

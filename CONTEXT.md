@@ -9,31 +9,15 @@ A user-facing managed font package that can be installed, updated, listed, and r
 _Avoid_: Font, repository, archive
 
 **Source**:
-The upstream location or provider that Fontbrew can resolve into one or more packages, such as a registry entry, GitHub repository, Google Fonts family, Fontsource package, or local archive.
+The upstream location or provider that Fontbrew can resolve into one or more packages, such as a Fontsource package, GitHub repository, or local archive.
 _Avoid_: Package, repository when the provider is not necessarily GitHub
 
-**Recipe**:
-A curated description of how a source resolves into packages. A recipe can refine package boundaries when family-name grouping alone would split or merge fonts in a way users would not expect.
-_Avoid_: Manifest, package
-
-**Registry**:
-Fontbrew's first-party curated recipe index. The registry provides stable package names and install recipes for well-known fonts, and is updated through a remote source stored locally as a registry snapshot by the CLI.
-_Avoid_: Search provider, static built-in table
-
-**Registry Snapshot**:
-Fontbrew's local copy of the remote first-party registry used for short-name installs, registry search, and limited offline behavior.
-_Avoid_: Download cache, manifest, managed store
-
 **Provider Metadata Snapshot**:
-Fontbrew's local copy of third-party provider metadata used to reduce repeated API calls during search and outdated checks. It is metadata only and does not include downloaded font archives.
+Fontbrew's local copy of Fontsource metadata used to reduce repeated API calls during search and install. It is metadata only and does not include downloaded font files.
 _Avoid_: Download cache, managed store
 
-**Search Provider**:
-A third-party font catalog or API that Fontbrew can query for discovery, such as Google Fonts or Fontsource. Search providers can return candidates that are not part of the first-party registry.
-_Avoid_: Registry
-
 **Search Result**:
-An installable package candidate returned by the registry or an approved search provider. Search results must resolve to an explicit install source; Fontbrew does not return arbitrary GitHub repository matches as search results.
+An installable package candidate returned by Fontsource search. Search results must resolve to an explicit install source; Fontbrew does not return arbitrary GitHub repository matches as search results.
 _Avoid_: GitHub search result, discovery result that cannot be installed
 
 **Font File**:
@@ -81,19 +65,19 @@ The local record of managed packages that are actually installed on this machine
 _Avoid_: Lockfile, desired state, project manifest
 
 **Config**:
-The local user preference file that controls Fontbrew behavior such as format preference, activation strategy, and registry refresh behavior. Config is separate from the manifest because it records preferences rather than installed package facts.
+The local user preference file that controls Fontbrew behavior such as format preference, activation strategy, metadata TTL, and update concurrency. Config is separate from the manifest because it records preferences rather than installed package facts.
 _Avoid_: Manifest, lockfile
 
 **Update Source**:
-A source that can be checked later for newer package versions. Local archives are managed after installation but are not update sources unless the user or a recipe binds them to an upstream provider.
+A source that can be checked later for newer package versions. Fontsource and GitHub packages have update sources. Local archives are managed after installation but are not update sources.
 _Avoid_: Source
 
 **Update Plan**:
 The list of managed packages Fontbrew intends to change during an update operation, including current versions, target versions, and packages that cannot be updated. The update plan is shown to the user before changes are applied.
-_Avoid_: Registry update
+_Avoid_: Install plan
 
 **Package Version**:
-The version Fontbrew uses to decide whether a managed package is outdated. Package versions come from the source's release identity, provider API, or recipe, not from font file metadata by default.
+The version Fontbrew uses to decide whether a managed package is outdated. Package versions come from the source's release identity or Fontsource metadata, not from font file metadata by default.
 _Avoid_: Font metadata version
 
 **Release**:
@@ -109,7 +93,7 @@ A condition where installing or activating a package may overlap with an existin
 _Avoid_: Duplicate, overwrite
 
 **Package Identity**:
-The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Registry package IDs are primary; expected family names and recipe rules are used to validate that the resolved files still match the package.
+The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Fontsource package IDs and selected family names are used to validate that the resolved files still match the package.
 _Avoid_: Filename, version
 
 **Remove**:

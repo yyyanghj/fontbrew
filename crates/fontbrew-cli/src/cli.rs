@@ -612,7 +612,7 @@ fn run_self_update(
 fn install_source_from_arg(source: &str) -> InstallSource {
     let path = PathBuf::from(source);
 
-    if path.exists() || looks_like_explicit_local_path(source) {
+    if looks_like_explicit_local_path(source) {
         InstallSource::LocalPath(path)
     } else if let Some(provider_source) = ProviderSource::parse_prefixed(source) {
         InstallSource::Provider {
@@ -797,6 +797,19 @@ mod tests {
             InstallSource::Provider {
                 provider: fontbrew_core::ProviderKind::Fontsource,
                 id: "source-sans-3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_source_keeps_bare_names_as_exact_fontsource_ids() {
+        let source = install_source_from_arg("inter");
+
+        assert_eq!(
+            source,
+            InstallSource::Provider {
+                provider: fontbrew_core::ProviderKind::Fontsource,
+                id: "inter".to_string(),
             }
         );
     }

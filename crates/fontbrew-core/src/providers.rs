@@ -90,6 +90,7 @@ impl<'a> FontsourceProvider<'a> {
                 &snapshot_store,
                 &record.id,
                 metadata_ttl,
+                true,
             )?;
 
             let Some(result) = search_result_from_detail(&detail)? else {
@@ -105,11 +106,31 @@ impl<'a> FontsourceProvider<'a> {
         &self,
         provider_id: &str,
     ) -> Result<FontsourceResolvedPackage> {
+        self.resolve_package(provider_id, true)
+    }
+
+    pub(crate) fn resolve_update_package(
+        &self,
+        provider_id: &str,
+    ) -> Result<FontsourceResolvedPackage> {
+        self.resolve_package(provider_id, false)
+    }
+
+    fn resolve_package(
+        &self,
+        provider_id: &str,
+        allow_stale_on_error: bool,
+    ) -> Result<FontsourceResolvedPackage> {
         let package_id = PackageId::parse(provider_id)?;
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
         let metadata_ttl = provider_metadata_ttl(self.paths)?;
-        let detail =
-            fetch_fontsource_detail(self.http_client, &snapshot_store, provider_id, metadata_ttl)?;
+        let detail = fetch_fontsource_detail(
+            self.http_client,
+            &snapshot_store,
+            provider_id,
+            metadata_ttl,
+            allow_stale_on_error,
+        )?;
 
         if detail.id != provider_id {
             return Err(FontbrewError::ArchiveRejected {
@@ -260,6 +281,7 @@ fn fetch_fontsource_detail(
     snapshot_store: &FontsourceSnapshotStore<'_>,
     provider_id: &str,
     metadata_ttl: Duration,
+    allow_stale_on_error: bool,
 ) -> Result<FontsourceDetailRecord> {
     if let Some(body) = snapshot_store.read_fresh_detail(provider_id, metadata_ttl)? {
         if let Ok(detail) = parse_fontsource_detail(&body, provider_id) {
@@ -275,13 +297,19 @@ fn fetch_fontsource_detail(
     }) {
         Ok(response) => response,
         Err(error) => {
-            return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+            if allow_stale_on_error {
+                return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+            }
+            return Err(error);
         }
     };
     let body = match successful_response_body(response.status, response.body, &url) {
         Ok(body) => body,
         Err(error) => {
-            return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+            if allow_stale_on_error {
+                return fontsource_cached_detail_or_error(snapshot_store, provider_id, error);
+            }
+            return Err(error);
         }
     };
     let detail = parse_fontsource_detail(&body, provider_id)?;
