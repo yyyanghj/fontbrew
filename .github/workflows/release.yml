@@ -63,7 +63,7 @@ jobs:
 
           mkdir -p "${staging_dir}"
           cp "target/${{ matrix.target }}/release/fontbrew" "${staging_dir}/fontbrew"
-          cp README.md LICENSE "${staging_dir}/"
+          cp README.md CHANGELOG.md LICENSE "${staging_dir}/"
 
           tar -czf "dist/${asset_name}.tar.gz" -C dist "${asset_name}"
           (
