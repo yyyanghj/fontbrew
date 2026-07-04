@@ -289,7 +289,7 @@ Fontbrew Registry 是小而可靠的第一方 recipe index，负责稳定 short 
 
 ### 9.4 Registry v1 是单个 JSON 文件
 
-Fontbrew Registry v1 使用一个远程 `registry.json` 文件作为 curated recipe source。CLI 将它保存为本地 registry snapshot。
+Fontbrew Registry v1 使用一个远程 `registry.json` 文件作为 curated recipe source。CLI 将它保存为本地 registry snapshot。MVP 不假设默认官方 registry 域名；首次读 registry 时，如果本地 snapshot 不存在，CLI 会先写入内置的空 registry snapshot。只有配置了 registry URL 时才刷新远程 registry。
 
 选择单 JSON 是为了让 MVP 的 registry update、schema validation、本地 snapshot 管理和 registry search 保持简单。广泛字体发现不靠扩张第一方 registry，而靠 approved providers。
 

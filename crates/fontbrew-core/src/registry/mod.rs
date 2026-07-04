@@ -22,6 +22,7 @@ use crate::{
 
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
 const SUPPORTED_REQUIRED_BEHAVIORS: &[&str] = &["github", "asset-globs"];
+const DEFAULT_REGISTRY_SNAPSHOT: &str = include_str!("default_registry.json");
 
 pub const REGISTRY_URL_ENV_VAR: &str = "FONTBREW_REGISTRY_URL";
 
@@ -39,20 +40,25 @@ impl RegistrySnapshotStore {
         RegistrySnapshotV1::parse(content)
     }
 
-    pub fn read_snapshot(&self) -> Result<RegistrySnapshotV1> {
+    pub fn ensure_snapshot_exists(&self) -> Result<()> {
         let path = self.paths.registry_snapshot_path();
-        let content = fs::read_to_string(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return FontbrewError::RegistryValidationFailed {
-                    message: format!(
-                        "registry snapshot not found at {}; run `fontbrew registry update`",
-                        path.display()
-                    ),
-                };
-            }
+        if path.exists() {
+            return Ok(());
+        }
 
-            FontbrewError::Io(error)
-        })?;
+        let _lock = GlobalFileLock::try_exclusive(&write_lock_path(&self.paths))?;
+        if path.exists() {
+            return Ok(());
+        }
+
+        let snapshot = RegistrySnapshotV1::parse(DEFAULT_REGISTRY_SNAPSHOT)?;
+        self.write_snapshot(&snapshot)
+    }
+
+    pub fn read_snapshot(&self) -> Result<RegistrySnapshotV1> {
+        self.ensure_snapshot_exists()?;
+        let path = self.paths.registry_snapshot_path();
+        let content = fs::read_to_string(&path).map_err(FontbrewError::from)?;
 
         RegistrySnapshotV1::parse(&content)
     }
@@ -83,18 +89,6 @@ impl RegistrySnapshotStore {
 
     pub fn status(&self) -> Result<RegistryStatusReport> {
         let snapshot_path = self.paths.registry_snapshot_path();
-
-        if !snapshot_path.exists() {
-            return Ok(RegistryStatusReport {
-                available: false,
-                snapshot_path,
-                schema_version: None,
-                registry_updated_at: None,
-                snapshot_modified_at: None,
-                package_count: 0,
-            });
-        }
-
         let snapshot = self.read_snapshot()?;
         let modified_at = fs::metadata(&snapshot_path)
             .and_then(|metadata| metadata.modified())

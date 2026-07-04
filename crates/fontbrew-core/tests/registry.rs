@@ -138,6 +138,23 @@ fn registry_snapshot_reads_writes_and_resolves_short_names() {
 }
 
 #[test]
+fn registry_snapshot_reads_default_empty_snapshot_when_missing() {
+    let (_temp, paths) = paths();
+    let store = RegistrySnapshotStore::new(paths.clone());
+
+    assert!(!paths.registry_snapshot_path().exists());
+
+    let snapshot = store
+        .read_snapshot()
+        .expect("missing registry snapshot should be seeded from default");
+
+    assert_eq!(snapshot.schema_version, 1);
+    assert_eq!(snapshot.updated_at, "1970-01-01T00:00:00Z");
+    assert!(snapshot.packages.is_empty());
+    assert!(paths.registry_snapshot_path().exists());
+}
+
+#[test]
 fn registry_update_fetches_metadata_with_fake_client_without_caching_fonts() {
     let (_temp, paths) = paths();
     let store = RegistrySnapshotStore::new(paths.clone());
@@ -163,11 +180,19 @@ fn registry_update_fetches_metadata_with_fake_client_without_caching_fonts() {
 #[test]
 fn registry_status_reports_snapshot_schema_version_when_available() {
     let (_temp, paths) = paths();
-    let store = RegistrySnapshotStore::new(paths);
+    let store = RegistrySnapshotStore::new(paths.clone());
 
-    let missing = store.status().expect("missing status should report");
-    assert!(!missing.available);
-    assert_eq!(missing.schema_version, None);
+    let default_status = store
+        .status()
+        .expect("missing snapshot should be seeded before status");
+    assert!(default_status.available);
+    assert_eq!(default_status.schema_version, Some(1));
+    assert_eq!(
+        default_status.registry_updated_at.as_deref(),
+        Some("1970-01-01T00:00:00Z")
+    );
+    assert_eq!(default_status.package_count, 0);
+    assert!(paths.registry_snapshot_path().exists());
 
     let snapshot =
         RegistrySnapshotStore::parse(&valid_registry_json()).expect("valid registry should parse");
@@ -235,6 +260,37 @@ fn app_rejects_invalid_refreshed_registry_snapshot_before_short_name_use() {
         error,
         FontbrewError::RegistryValidationFailed { .. }
     ));
+
+    match original {
+        Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),
+        None => std::env::remove_var(REGISTRY_URL_ENV_VAR),
+    }
+}
+
+#[test]
+fn app_reads_default_registry_snapshot_without_registry_url_for_short_name_use() {
+    let (_temp, paths) = paths();
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
+    std::env::remove_var(REGISTRY_URL_ENV_VAR);
+    let app = FontbrewApp::with_paths(paths.clone());
+
+    let error = app
+        .install_plan(InstallRequest {
+            source: InstallSource::RegistryName("inter".to_string()),
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        })
+        .expect_err("default empty registry should not contain inter");
+
+    assert!(matches!(
+        error,
+        FontbrewError::RegistryValidationFailed { .. }
+    ));
+    assert!(error.to_string().contains("registry package not found"));
+    assert!(paths.registry_snapshot_path().exists());
 
     match original {
         Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),

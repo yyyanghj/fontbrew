@@ -584,7 +584,7 @@ If multiple installable assets exist and neither recipe nor user selector resolv
 
 ## 20. Registry Trust
 
-MVP does not assume an official registry domain. Registry refresh uses an explicit environment variable:
+MVP does not assume an official registry domain. The binary includes an empty default registry snapshot, which is seeded into the normal local snapshot path before registry reads when the file is missing. Registry refresh uses an explicit environment variable:
 
 ```text
 FONTBREW_REGISTRY_URL

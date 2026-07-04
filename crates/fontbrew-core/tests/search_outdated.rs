@@ -255,7 +255,7 @@ fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
 
     let report = app
         .search(SearchRequest {
@@ -322,7 +322,7 @@ fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
 
     let report = app
         .search(SearchRequest {
@@ -338,6 +338,7 @@ fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
         fake_http.requested_urls(),
         vec![fontsource_list_url("Inter"), fontsource_detail_url("inter")]
     );
+    assert!(paths.registry_snapshot_path().exists());
 }
 
 #[test]
@@ -386,7 +387,7 @@ fn unprefixed_search_uses_provider_fallback_when_registry_refresh_fails_without_
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
 
     let report = app
         .search(SearchRequest {
@@ -406,6 +407,7 @@ fn unprefixed_search_uses_provider_fallback_when_registry_refresh_fails_without_
             fontsource_detail_url("inter"),
         ]
     );
+    assert!(paths.registry_snapshot_path().exists());
 }
 
 #[test]

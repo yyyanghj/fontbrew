@@ -765,7 +765,7 @@ fn registry_update_uses_env_url_and_writes_metadata_only() {
 }
 
 #[test]
-fn registry_status_reports_missing_and_present_snapshots() {
+fn registry_status_seeds_default_snapshot_and_reports_updated_snapshot() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
     let registry_path = temp.path().join("registry.json");
@@ -774,22 +774,29 @@ fn registry_status_reports_missing_and_present_snapshots() {
         .args(["registry", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Registry snapshot: missing"))
-        .stdout(predicate::str::contains("Schema version").not())
+        .stdout(predicate::str::contains("Registry snapshot: available"))
+        .stdout(predicate::str::contains("Schema version: 1"))
+        .stdout(predicate::str::contains("Packages: 0"))
         .stderr(predicate::str::is_empty());
+    assert!(home.join(".local/share/fontbrew/registry.json").exists());
 
-    let missing_output = fontbrew(&home)
+    let default_output = fontbrew(&home)
         .args(["--json", "registry", "status"])
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
         .get_output()
         .clone();
-    let missing_json = stdout_json(&missing_output);
+    let default_json = stdout_json(&default_output);
 
-    assert_eq!(missing_json["command"], "registry_status");
-    assert_eq!(missing_json["report"]["available"], false);
-    assert!(missing_json["report"]["schemaVersion"].is_null());
+    assert_eq!(default_json["command"], "registry_status");
+    assert_eq!(default_json["report"]["available"], true);
+    assert_eq!(default_json["report"]["schemaVersion"], 1);
+    assert_eq!(default_json["report"]["package_count"], 0);
+    assert_eq!(
+        default_json["report"]["registry_updated_at"],
+        "1970-01-01T00:00:00Z"
+    );
 
     write_registry_snapshot(&registry_path);
     fontbrew(&home)

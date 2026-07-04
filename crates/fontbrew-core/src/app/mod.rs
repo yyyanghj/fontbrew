@@ -69,12 +69,8 @@ impl FontbrewApp {
                 install::install_plan(&paths, request, cancellation)
             }
             crate::InstallSource::RegistryName(short_name) => {
-                let refreshed_registry = self.refresh_registry_snapshot(&paths)?;
+                self.refresh_registry_snapshot(&paths)?;
                 ensure_not_cancelled(cancellation)?;
-                if !refreshed_registry && !paths.registry_snapshot_path().exists() {
-                    return Err(registry_url_not_configured_error());
-                }
-
                 let recipe =
                     RegistrySnapshotStore::new(paths.clone()).resolve_short_name(&short_name)?;
                 ensure_not_cancelled(cancellation)?;
@@ -278,10 +274,12 @@ impl FontbrewApp {
         Ok(Arc::new(ReqwestHttpClient::try_new()?))
     }
 
-    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<bool> {
+    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<()> {
         let store = RegistrySnapshotStore::new(paths.clone());
+        store.ensure_snapshot_exists()?;
+
         let Some(registry_url) = registry_url_from_env() else {
-            return Ok(false);
+            return Ok(());
         };
 
         if let Some(http_client) = &self.http_client {
@@ -289,12 +287,12 @@ impl FontbrewApp {
                 http_client: http_client.as_ref(),
             };
             store.update_from_client(&client, &registry_url)?;
-            return Ok(true);
+            return Ok(());
         }
 
         let client = ReqwestRegistryHttpClient::default();
         store.update_from_client(&client, &registry_url)?;
-        Ok(true)
+        Ok(())
     }
 
     fn search_registry_snapshot(
@@ -303,16 +301,9 @@ impl FontbrewApp {
         request: &SearchRequest,
     ) -> Result<Vec<crate::SearchResult>> {
         match self.refresh_registry_snapshot(paths) {
-            Ok(_) => {}
-            Err(FontbrewError::Network { .. }) if !paths.registry_snapshot_path().exists() => {
-                return Ok(Vec::new());
-            }
+            Ok(()) => {}
             Err(FontbrewError::Network { .. }) => {}
             Err(error) => return Err(error),
-        }
-
-        if !paths.registry_snapshot_path().exists() {
-            return Ok(Vec::new());
         }
 
         Ok(RegistrySnapshotStore::new(paths.clone())

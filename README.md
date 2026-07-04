@@ -93,7 +93,7 @@ Google Fonts requires `GOOGLE_FONTS_API_KEY` in the environment for `google:<id>
 
 GitHub API requests can use `GITHUB_TOKEN` from the environment when available. The token is not persisted.
 
-For registry development and tests, `FONTBREW_REGISTRY_URL` sets the registry URL for the current process. It can be an HTTP(S) URL or a `file://` path, and it is not persisted.
+Fontbrew ships an empty default registry snapshot. If `FONTBREW_REGISTRY_URL` is not set, commands read the local snapshot without refreshing it. When `FONTBREW_REGISTRY_URL` is set, `registry update` and registry-backed commands download and validate that JSON into the same local snapshot path. The value can be an HTTP(S) URL or a `file://` path, and it is not persisted.
 
 ## Filesystem Layout
 
