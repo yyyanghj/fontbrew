@@ -141,10 +141,29 @@ fn run_with_http_client(
     confirmer: &mut dyn Confirmer,
     cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
+    let target = current_target()?;
+
+    run_with_http_client_for_target(
+        request,
+        http_client,
+        reporter,
+        confirmer,
+        cancellation,
+        target,
+    )
+}
+
+fn run_with_http_client_for_target(
+    request: SelfUpdateRequest,
+    http_client: &dyn HttpClient,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
+    target: &str,
+) -> CliResult<()> {
     ensure_not_cancelled(cancellation)?;
     let _lock = GlobalFileLock::try_exclusive(&request.lock_path)?;
 
-    let target = current_target()?;
     let install_method = detect_install_method(&request.current_executable, home_dir().as_deref())?;
     reporter.self_update_progress("Checking latest fontbrew release...")?;
     let release = resolve_latest_release(http_client, &request.repo, target)?;
@@ -1356,7 +1375,7 @@ mod tests {
         let mut reporter = TestReporter::default();
         let mut confirmer = TestConfirmer::default();
 
-        run_with_http_client(
+        run_with_http_client_for_target(
             SelfUpdateRequest {
                 dry_run: true,
                 assume_yes: false,
@@ -1370,6 +1389,7 @@ mod tests {
             &mut reporter,
             &mut confirmer,
             &NeverCancelled,
+            "aarch64-apple-darwin",
         )
         .expect("dry-run self-update");
 
@@ -1391,7 +1411,7 @@ mod tests {
         let mut reporter = TestReporter::default();
         let mut confirmer = TestConfirmer::default();
 
-        run_with_http_client(
+        run_with_http_client_for_target(
             SelfUpdateRequest {
                 dry_run: false,
                 assume_yes: false,
@@ -1405,6 +1425,7 @@ mod tests {
             &mut reporter,
             &mut confirmer,
             &NeverCancelled,
+            "aarch64-apple-darwin",
         )
         .expect("up-to-date self-update");
 
