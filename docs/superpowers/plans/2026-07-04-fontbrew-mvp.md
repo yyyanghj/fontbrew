@@ -528,7 +528,7 @@ tests/
 
 **Files:**
 - Modify: `README.md` if added during implementation
-- Modify: `spec.md` only if behavior changed and user approves
+- Modify: `docs/product_spec.md` only if behavior changed and user approves
 - Modify: `docs/implementation-design.md` only if implementation diverged intentionally
 - Modify: `fixtures/fonts/README.md`
 
@@ -546,7 +546,7 @@ tests/
 
 - All automated tests pass.
 - Human and JSON CLI behavior matches the documented stream rules.
-- The MVP trust test from `spec.md` can be answered from CLI output and manifest state.
+- The MVP trust test from `docs/product_spec.md` can be answered from CLI output and manifest state.
 
 ## Coverage Checklist
 

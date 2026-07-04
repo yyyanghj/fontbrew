@@ -1,6 +1,6 @@
 # Fontbrew MVP Issue Backlog
 
-This is a draft issue backlog derived from [`../implementation-design.md`](../implementation-design.md) and [`../../spec.md`](../../spec.md). It is not yet published to an issue tracker.
+This is a draft issue backlog derived from [`../implementation-design.md`](../implementation-design.md) and [`../product_spec.md`](../product_spec.md). It is not yet published to an issue tracker.
 
 The issues are ordered as vertical slices where possible. Early prefactoring/spike issues are included first because they reduce implementation risk for later slices.
 

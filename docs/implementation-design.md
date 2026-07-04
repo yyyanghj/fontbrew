@@ -4,7 +4,7 @@
 
 This document turns the MVP product spec into a Rust implementation design. It is concerned with module boundaries, crate layout, dependency choices, safety invariants, testing strategy, and implementation phases.
 
-The product behavior source of truth remains [`../spec.md`](../spec.md). This document describes how the MVP should be built.
+The product behavior source of truth is [`product_spec.md`](product_spec.md). This document describes how the MVP should be built.
 
 ## 2. Architecture Summary
 
