@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    ConfigReport, ConfigValue, FamilyName, InfoReport, InstallReport, ListReport, OutdatedReport,
+    config::ActivationStrategy, ConfigReport, ConfigValue, FamilyName, FontFormat, InfoReport,
+    InstallReport, ListReport, ManagedActivationArtifact, ManagedFontFile, OutdatedReport,
     ProgressEvent, RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
     UpdateReport,
 };
@@ -95,6 +96,8 @@ impl Reporter for HumanReporter {
         let package = report.package;
         let update_source = package.update_source.as_deref().unwrap_or("none");
         let activated = if package.activated { "yes" } else { "no" };
+        let managed = if package.managed { "yes" } else { "no" };
+        let update_available = update_available_label(package.update_available);
 
         writeln!(stdout, "Package: {}", package.package_id.as_str())?;
         writeln!(stdout, "Version: {}", package.version.as_str())?;
@@ -102,6 +105,14 @@ impl Reporter for HumanReporter {
         writeln!(stdout, "Source: {}", package.source)?;
         writeln!(stdout, "Update source: {update_source}")?;
         writeln!(stdout, "Activated: {activated}")?;
+        writeln!(stdout, "Managed: {managed}")?;
+        writeln!(stdout, "Update available: {update_available}")?;
+        write_font_files(&mut stdout, "Installed files:", &package.font_files)?;
+        write_activation_artifacts(
+            &mut stdout,
+            "Activation artifacts:",
+            &package.activation_artifacts,
+        )?;
 
         Ok(())
     }
@@ -111,6 +122,12 @@ impl Reporter for HumanReporter {
 
         if report.planned {
             writeln!(stdout, "Planned removal {}.", report.package_id.as_str())?;
+            write_font_files(&mut stdout, "Will remove font files:", &report.font_files)?;
+            write_activation_artifacts(
+                &mut stdout,
+                "Will remove activation artifacts:",
+                &report.activation_artifacts,
+            )?;
             return Ok(());
         }
 
@@ -357,6 +374,80 @@ fn families_label(families: &[FamilyName]) -> String {
         .map(FamilyName::as_str)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn update_available_label(update_available: Option<bool>) -> &'static str {
+    match update_available {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+fn write_font_files(
+    stdout: &mut impl Write,
+    heading: &str,
+    font_files: &[ManagedFontFile],
+) -> CliResult<()> {
+    writeln!(stdout, "{heading}")?;
+    if font_files.is_empty() {
+        writeln!(stdout, "- none")?;
+        return Ok(());
+    }
+
+    for font_file in font_files {
+        writeln!(
+            stdout,
+            "- {} ({}, {}, weight {}, {})",
+            font_file.path.display(),
+            font_file.family.as_str(),
+            font_file.style,
+            font_file.weight,
+            font_format_label(font_file.format)
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_activation_artifacts(
+    stdout: &mut impl Write,
+    heading: &str,
+    artifacts: &[ManagedActivationArtifact],
+) -> CliResult<()> {
+    writeln!(stdout, "{heading}")?;
+    if artifacts.is_empty() {
+        writeln!(stdout, "- none")?;
+        return Ok(());
+    }
+
+    for artifact in artifacts {
+        writeln!(
+            stdout,
+            "- {} -> {} ({})",
+            artifact.path.display(),
+            artifact.source_path.display(),
+            activation_strategy_label(artifact.strategy)
+        )?;
+    }
+
+    Ok(())
+}
+
+fn font_format_label(format: FontFormat) -> &'static str {
+    match format {
+        FontFormat::Otf => "otf",
+        FontFormat::Ttf => "ttf",
+        FontFormat::Ttc => "ttc",
+        FontFormat::Otc => "otc",
+    }
+}
+
+fn activation_strategy_label(strategy: ActivationStrategy) -> &'static str {
+    match strategy {
+        ActivationStrategy::Symlink => "symlink",
+        ActivationStrategy::Copy => "copy",
+    }
 }
 
 fn config_value_label(value: &ConfigValue) -> String {

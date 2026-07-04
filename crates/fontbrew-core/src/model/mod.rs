@@ -526,6 +526,8 @@ pub struct RemovePlan {
     pub package_id: PackageId,
     pub changes: Vec<PlannedChange>,
     pub risks: Vec<PlanRisk>,
+    pub font_files: Vec<ManagedFontFile>,
+    pub activation_artifacts: Vec<ManagedActivationArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +535,8 @@ pub struct RemoveReport {
     pub package_id: PackageId,
     pub removed: bool,
     pub planned: bool,
+    pub font_files: Vec<ManagedFontFile>,
+    pub activation_artifacts: Vec<ManagedActivationArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,11 +560,31 @@ pub struct PackageInfo {
     pub source: String,
     pub activated: bool,
     pub update_source: Option<String>,
+    pub managed: bool,
+    pub update_available: Option<bool>,
+    pub font_files: Vec<ManagedFontFile>,
+    pub activation_artifacts: Vec<ManagedActivationArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfoReport {
     pub package: PackageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedFontFile {
+    pub path: PathBuf,
+    pub family: FamilyName,
+    pub style: String,
+    pub weight: u16,
+    pub format: FontFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedActivationArtifact {
+    pub path: PathBuf,
+    pub source_path: PathBuf,
+    pub strategy: ActivationStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

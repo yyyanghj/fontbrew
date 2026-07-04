@@ -847,6 +847,8 @@ fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory(
                 package_id: package_id("source-code-pro"),
                 changes: Vec::new(),
                 risks: Vec::new(),
+                font_files: Vec::new(),
+                activation_artifacts: Vec::new(),
             },
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,

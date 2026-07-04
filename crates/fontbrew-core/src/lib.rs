@@ -146,6 +146,10 @@ mod tests {
                 source: "registry:jetbrains-mono".to_string(),
                 activated: true,
                 update_source: Some("github:JetBrains/JetBrainsMono".to_string()),
+                managed: true,
+                update_available: None,
+                font_files: Vec::new(),
+                activation_artifacts: Vec::new(),
             },
         };
 
@@ -154,6 +158,10 @@ mod tests {
         assert_eq!(json["package"]["package_id"], "jetbrains-mono");
         assert_eq!(json["package"]["families"][0], "JetBrains Mono");
         assert_eq!(json["package"]["activated"], true);
+        assert_eq!(json["package"]["managed"], true);
+        assert_eq!(json["package"]["update_available"], serde_json::Value::Null);
+        assert!(json["package"]["font_files"].is_array());
+        assert!(json["package"]["activation_artifacts"].is_array());
     }
 
     #[test]

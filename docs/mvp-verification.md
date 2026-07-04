@@ -6,7 +6,7 @@ This note records the final Task 20 verification pass for the Fontbrew MVP.
 
 ## Automated Verification
 
-Run from `/Users/yhj/Developer/projects/yyyanghj/fontbrew`:
+Run from the repository root:
 
 ```bash
 cargo fmt --all
@@ -24,23 +24,26 @@ The test suite uses temp directories or injected paths for filesystem behavior. 
 
 ## CLI Smoke Test
 
-Smoke test root:
+Smoke test variables:
 
 ```text
-/var/folders/xh/gvfmyldx403f4fl4wjgmbbjw0000gn/T/tmp.NT1gzbQq09
+SMOKE_ROOT=$TMPDIR/fontbrew-smoke
+HOME_DIR=$SMOKE_ROOT/home
+REGISTRY=$SMOKE_ROOT/registry.json
+ARCHIVE=$SMOKE_ROOT/source-code-pro.zip
 ```
 
 The smoke test used:
 
 ```text
-HOME=/var/folders/xh/gvfmyldx403f4fl4wjgmbbjw0000gn/T/tmp.NT1gzbQq09/home
-FONTBREW_REGISTRY_URL=file:///var/folders/xh/gvfmyldx403f4fl4wjgmbbjw0000gn/T/tmp.NT1gzbQq09/registry.json
+HOME=$HOME_DIR
+FONTBREW_REGISTRY_URL=file://$REGISTRY
 ```
 
 The local archive fixture was built from committed Source Code Pro fixture fonts:
 
 ```text
-/var/folders/xh/gvfmyldx403f4fl4wjgmbbjw0000gn/T/tmp.NT1gzbQq09/source-code-pro.zip
+$ARCHIVE
 ```
 
 Commands verified:
@@ -52,10 +55,12 @@ HOME="$HOME_DIR" target/debug/fontbrew info source-code-pro
 HOME="$HOME_DIR" target/debug/fontbrew remove source-code-pro
 FONTBREW_REGISTRY_URL="file://$REGISTRY" HOME="$HOME_DIR" target/debug/fontbrew registry update
 HOME="$HOME_DIR" target/debug/fontbrew search inter --offline
+HOME="$HOME_DIR" target/debug/fontbrew --quiet install inter
 HOME="$HOME_DIR" target/debug/fontbrew --quiet install --format ttf inter
 HOME="$HOME_DIR" target/debug/fontbrew info inter
 HOME="$HOME_DIR" target/debug/fontbrew outdated --offline inter
 HOME="$HOME_DIR" target/debug/fontbrew update --dry-run inter
+HOME="$HOME_DIR" target/debug/fontbrew remove --dry-run inter
 ```
 
 Observed results:
@@ -68,9 +73,10 @@ Observed results:
 - `search inter --offline` returned `inter` as an installable registry result.
 - `install inter` without a format override refused to choose because Inter's OTF, TTF, and TTC coverage differs.
 - `install --format ttf inter` installed Inter from GitHub release `v4.1`.
-- `info inter` reported source `registry:inter`, update source `github:rsms/inter`, and activated `yes`.
+- `info inter` reported source `registry:inter`, update source `github:rsms/inter`, activation state, managed state, update availability as `unknown`, installed files, and activation artifacts.
 - `outdated --offline inter` reported that offline mode cannot check GitHub releases.
 - `update --dry-run inter` completed with `No updates prepared.`
+- `remove --dry-run` reports the managed font files and activation artifacts that would be removed without mutating the package.
 
 The smoke HOME contained only expected Fontbrew data and activation artifacts under the injected temp HOME:
 
@@ -111,9 +117,10 @@ what version they are, whether they can be updated, and what will be removed?
 For the smoke-installed Inter package:
 
 - `fontbrew list` showed the managed package ID, version, families, and active state.
-- `fontbrew info inter` showed source, update source, version, families, and activation state.
+- `fontbrew info inter` showed source, update source, version, families, activation state, managed state, update availability, installed files, and activation artifacts.
 - `fontbrew outdated --offline inter` explained why update status could not be checked without network access.
 - `fontbrew update --dry-run inter` reported the update plan without applying changes.
+- `fontbrew remove --dry-run inter` reported the managed font files and activation artifacts that would be removed without applying changes.
 - Manifest-backed remove/update behavior is covered by automated CLI and core tests using injected paths.
 
 ## Reference Docs

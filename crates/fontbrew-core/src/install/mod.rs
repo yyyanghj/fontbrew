@@ -24,9 +24,9 @@ use crate::{
     model::{
         ensure_not_cancelled, CancellationToken, ExecutionPolicy, FontFormat, InfoReport,
         InfoRequest, InstallPlan, InstallReport, InstallRequest, InstallSource, ListPackage,
-        ListReport, PackageInfo, PlannedChange, PreparedFontFace, PreparedFontFile,
-        PreparedInstallPackage, PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan,
-        RemoveReport, RemoveRequest,
+        ListReport, ManagedActivationArtifact, ManagedFontFile, PackageInfo, PlannedChange,
+        PreparedFontFace, PreparedFontFile, PreparedInstallPackage, PreparedInstallSource,
+        ProgressEvent, ProgressSink, RemovePlan, RemoveReport, RemoveRequest,
     },
     platform::FontbrewPaths,
     providers::{self, FontsourceProvider, GoogleProvider, ResolvedProviderPackage},
@@ -454,6 +454,10 @@ pub fn package_info(paths: &FontbrewPaths, request: InfoRequest) -> Result<InfoR
             source: source_label(&record.source),
             activated: record.active_version.is_some(),
             update_source: record.update_source.as_ref().map(source_label),
+            managed: true,
+            update_available: None,
+            font_files: managed_font_files_from_record(record),
+            activation_artifacts: managed_activation_artifacts_from_record(record),
         },
     })
 }
@@ -470,26 +474,30 @@ pub fn remove_plan_with_cancellation(
     ensure_not_cancelled(cancellation)?;
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     ensure_not_cancelled(cancellation)?;
-    let changes = manifest
+    let (changes, font_files, activation_artifacts) = manifest
         .get_package(&request.package_id)
         .map(|record| {
-            vec![
-                PlannedChange {
-                    package_id: request.package_id.clone(),
-                    description: "deactivate managed font artifacts".to_string(),
-                },
-                PlannedChange {
-                    package_id: request.package_id.clone(),
-                    description: format!(
-                        "remove managed package files for version {}",
-                        record.version.as_str()
-                    ),
-                },
-                PlannedChange {
-                    package_id: request.package_id.clone(),
-                    description: "remove package from manifest".to_string(),
-                },
-            ]
+            (
+                vec![
+                    PlannedChange {
+                        package_id: request.package_id.clone(),
+                        description: "deactivate managed font artifacts".to_string(),
+                    },
+                    PlannedChange {
+                        package_id: request.package_id.clone(),
+                        description: format!(
+                            "remove managed package files for version {}",
+                            record.version.as_str()
+                        ),
+                    },
+                    PlannedChange {
+                        package_id: request.package_id.clone(),
+                        description: "remove package from manifest".to_string(),
+                    },
+                ],
+                managed_font_files_from_record(record),
+                managed_activation_artifacts_from_record(record),
+            )
         })
         .unwrap_or_default();
 
@@ -497,6 +505,8 @@ pub fn remove_plan_with_cancellation(
         package_id: request.package_id,
         changes,
         risks: Vec::new(),
+        font_files,
+        activation_artifacts,
     })
 }
 
@@ -516,6 +526,8 @@ pub fn apply_remove(
             package_id: plan.package_id,
             removed: false,
             planned,
+            font_files: plan.font_files,
+            activation_artifacts: plan.activation_artifacts,
         });
     }
 
@@ -527,8 +539,12 @@ pub fn apply_remove(
             package_id: plan.package_id,
             removed: false,
             planned: false,
+            font_files: Vec::new(),
+            activation_artifacts: Vec::new(),
         });
     };
+    let report_font_files = managed_font_files_from_record(&record);
+    let report_activation_artifacts = managed_activation_artifacts_from_record(&record);
 
     let activation_artifacts = activation_artifacts_from_record(&record);
     ensure_not_cancelled(cancellation)?;
@@ -550,6 +566,8 @@ pub fn apply_remove(
         package_id: record.package_id,
         removed: true,
         planned: false,
+        font_files: report_font_files,
+        activation_artifacts: report_activation_artifacts,
     })
 }
 
@@ -1601,6 +1619,15 @@ fn manifest_font_format(format: &FontFormat) -> ManifestFontFileFormat {
     }
 }
 
+fn font_format_from_manifest_format(format: ManifestFontFileFormat) -> FontFormat {
+    match format {
+        ManifestFontFileFormat::Ttf => FontFormat::Ttf,
+        ManifestFontFileFormat::Otf => FontFormat::Otf,
+        ManifestFontFileFormat::Ttc => FontFormat::Ttc,
+        ManifestFontFileFormat::Otc => FontFormat::Otc,
+    }
+}
+
 fn prepared_package_id(prepared: &PreparedInstallPackage) -> PackageId {
     prepared.package_id.clone()
 }
@@ -1822,6 +1849,34 @@ pub(crate) fn activation_artifacts_from_record(
         .iter()
         .map(|artifact| ActivationArtifact {
             package_id: record.package_id.clone(),
+            path: artifact.path.clone(),
+            source_path: artifact.source_path.clone(),
+            strategy: artifact.strategy,
+        })
+        .collect()
+}
+
+fn managed_font_files_from_record(record: &ManifestPackageRecord) -> Vec<ManagedFontFile> {
+    record
+        .font_files
+        .iter()
+        .map(|font_file| ManagedFontFile {
+            path: font_file.path.clone(),
+            family: font_file.family.clone(),
+            style: font_file.style.clone(),
+            weight: font_file.weight,
+            format: font_format_from_manifest_format(font_file.format),
+        })
+        .collect()
+}
+
+fn managed_activation_artifacts_from_record(
+    record: &ManifestPackageRecord,
+) -> Vec<ManagedActivationArtifact> {
+    record
+        .activation_artifacts
+        .iter()
+        .map(|artifact| ManagedActivationArtifact {
             path: artifact.path.clone(),
             source_path: artifact.source_path.clone(),
             strategy: artifact.strategy,

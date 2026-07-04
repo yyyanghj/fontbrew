@@ -51,7 +51,7 @@ Refresh the registry snapshot and install a registry package:
 ```bash
 fontbrew registry update
 fontbrew search inter --offline
-fontbrew install inter
+fontbrew install inter --format ttf
 ```
 
 Install from explicit sources:
@@ -62,7 +62,7 @@ fontbrew install fontsource:inter
 GOOGLE_FONTS_API_KEY=... fontbrew install google:roboto
 ```
 
-When a source publishes multiple desktop formats with different family/style coverage, Fontbrew refuses to guess. Use `--format otf`, `--format ttf`, `--otf`, or `--ttf` to select the intended desktop format.
+When a source publishes multiple desktop formats with different family/style coverage, Fontbrew refuses to guess. Use `--format otf`, `--format ttf`, `--otf`, or `--ttf` to select the intended desktop format. For example, the Inter GitHub release requires an explicit format in the current registry recipe.
 
 Check and prepare updates:
 

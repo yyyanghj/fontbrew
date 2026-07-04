@@ -170,6 +170,11 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
         .stdout(
             predicate::str::contains("Package: source-code-pro")
                 .and(predicate::str::contains("Version: local"))
+                .and(predicate::str::contains("Managed: yes"))
+                .and(predicate::str::contains("Update available: unknown"))
+                .and(predicate::str::contains("Installed files:"))
+                .and(predicate::str::contains("SourceCodePro-Regular.ttf"))
+                .and(predicate::str::contains("Activation artifacts:"))
                 .and(predicate::str::contains("Source Code Pro")),
         )
         .stderr(predicate::str::is_empty());
@@ -249,6 +254,35 @@ fn json_install_and_list_write_parseable_stdout_only() {
         "source-code-pro"
     );
     assert!(stderr_text(&list_output).is_empty());
+
+    let info_output = fontbrew(&home)
+        .args(["--json", "info", "source-code-pro"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let info_json = stdout_json(&info_output);
+
+    assert_eq!(info_json["schemaVersion"], 1);
+    assert_eq!(info_json["command"], "info");
+    assert_eq!(info_json["report"]["package"]["managed"], true);
+    assert!(info_json["report"]["package"]["font_files"]
+        .as_array()
+        .expect("font_files should be an array")
+        .iter()
+        .any(|font_file| font_file["path"]
+            .as_str()
+            .expect("font file path should be a string")
+            .contains("SourceCodePro-Regular.ttf")));
+    assert!(info_json["report"]["package"]["activation_artifacts"]
+        .as_array()
+        .expect("activation_artifacts should be an array")
+        .iter()
+        .any(|artifact| artifact["path"]
+            .as_str()
+            .expect("activation artifact path should be a string")
+            .contains("SourceCodePro-Regular.ttf")));
 }
 
 #[test]
@@ -487,7 +521,14 @@ fn remove_dry_run_reports_planned_removal_without_mutating_package() {
         .args(["remove", "--dry-run", "source-code-pro"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Planned removal source-code-pro"))
+        .stdout(
+            predicate::str::contains("Planned removal source-code-pro")
+                .and(predicate::str::contains("Will remove font files:"))
+                .and(predicate::str::contains("SourceCodePro-Regular.ttf"))
+                .and(predicate::str::contains(
+                    "Will remove activation artifacts:",
+                )),
+        )
         .stdout(predicate::str::contains("is not installed").not())
         .stderr(predicate::str::is_empty());
 
@@ -512,6 +553,22 @@ fn remove_dry_run_reports_planned_removal_without_mutating_package() {
     assert_eq!(json["report"]["package_id"], "source-code-pro");
     assert_eq!(json["report"]["removed"], false);
     assert_eq!(json["report"]["planned"], true);
+    assert!(json["report"]["font_files"]
+        .as_array()
+        .expect("font_files should be an array")
+        .iter()
+        .any(|font_file| font_file["path"]
+            .as_str()
+            .expect("font file path should be a string")
+            .contains("SourceCodePro-Regular.ttf")));
+    assert!(json["report"]["activation_artifacts"]
+        .as_array()
+        .expect("activation_artifacts should be an array")
+        .iter()
+        .any(|artifact| artifact["path"]
+            .as_str()
+            .expect("activation artifact path should be a string")
+            .contains("SourceCodePro-Regular.ttf")));
 }
 
 #[test]
