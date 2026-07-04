@@ -3,7 +3,10 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use fontbrew_core::{
@@ -43,6 +46,8 @@ struct FakeDownloadRoute {
     status: u16,
     content_length: Option<u64>,
     body: Vec<u8>,
+    cancel_after_chunks: Option<usize>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl FakeHttpClient {
@@ -68,6 +73,27 @@ impl FakeHttpClient {
                 status,
                 content_length,
                 body,
+                cancel_after_chunks: None,
+                cancel_flag: None,
+            },
+        );
+    }
+
+    fn with_cancelling_download_bytes(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        cancel_after_chunks: usize,
+        cancel_flag: Arc<AtomicBool>,
+    ) {
+        self.download_routes.lock().expect("routes lock").insert(
+            url.to_string(),
+            FakeDownloadRoute {
+                status: 200,
+                content_length: Some(body.len() as u64),
+                body,
+                cancel_after_chunks: Some(cancel_after_chunks),
+                cancel_flag: Some(cancel_flag),
             },
         );
     }
@@ -130,6 +156,7 @@ impl HttpClient for FakeHttpClient {
         request: HttpRequest,
         destination: &Path,
         max_bytes: u64,
+        cancellation: &dyn CancellationToken,
     ) -> fontbrew_core::Result<u64> {
         self.requests
             .lock()
@@ -169,7 +196,12 @@ impl HttpClient for FakeHttpClient {
         }
         let mut file = File::create(destination).expect("create download destination");
         let mut written = 0_u64;
-        for chunk in route.body.chunks(7) {
+        for (chunk_index, chunk) in route.body.chunks(7).enumerate() {
+            if cancellation.is_cancelled() {
+                let _ = fs::remove_file(destination);
+                return Err(FontbrewError::Cancelled);
+            }
+
             let next = written + chunk.len() as u64;
             if next > max_bytes {
                 let _ = fs::remove_file(destination);
@@ -183,6 +215,11 @@ impl HttpClient for FakeHttpClient {
 
             file.write_all(chunk).expect("write fake download chunk");
             written = next;
+            if route.cancel_after_chunks == Some(chunk_index + 1) {
+                if let Some(cancel_flag) = &route.cancel_flag {
+                    cancel_flag.store(true, Ordering::SeqCst);
+                }
+            }
         }
 
         self.download_targets
@@ -190,6 +227,28 @@ impl HttpClient for FakeHttpClient {
             .expect("download targets lock")
             .push(destination.to_path_buf());
         Ok(written)
+    }
+}
+
+struct AtomicCancellation {
+    flag: Arc<AtomicBool>,
+}
+
+impl CancellationToken for AtomicCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
+struct CancelWhenInstallStagingExists {
+    paths: FontbrewPaths,
+}
+
+impl CancellationToken for CancelWhenInstallStagingExists {
+    fn is_cancelled(&self) -> bool {
+        staging_entries(&self.paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-"))
     }
 }
 
@@ -209,6 +268,25 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
         temp.path().join("config"),
         temp.path().join("home"),
     )
+}
+
+fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
+    if !paths.staging_dir().exists() {
+        return Vec::new();
+    }
+
+    let mut entries = fs::read_dir(paths.staging_dir())
+        .expect("read staging root")
+        .map(|entry| {
+            entry
+                .expect("read staging entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
 }
 
 fn github_request(owner: &str, repo: &str, asset_selector: Option<&str>) -> InstallRequest {
@@ -369,6 +447,81 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
             owner: "adobe".to_string(),
             repo: "source-code-pro".to_string(),
         })
+    );
+}
+
+#[test]
+fn github_install_plan_cancellation_after_staging_creation_cleans_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let error = app
+        .install_plan_with_cancellation(
+            github_request("adobe", "source-code-pro", None),
+            &CancelWhenInstallStagingExists {
+                paths: paths.clone(),
+            },
+        )
+        .expect_err("cancellation after staging creation should fail");
+
+    assert!(matches!(error, FontbrewError::Cancelled));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn github_install_plan_cleans_staging_when_download_is_cancelled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-code-pro.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    fake_http.with_cancelling_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        1,
+        cancel_flag.clone(),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let cancellation = AtomicCancellation { flag: cancel_flag };
+
+    let error = app
+        .install_plan_with_cancellation(
+            github_request("adobe", "source-code-pro", None),
+            &cancellation,
+        )
+        .expect_err("cancelled download should fail planning");
+
+    assert!(matches!(error, FontbrewError::Cancelled));
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![
+            github_releases_url("adobe", "source-code-pro"),
+            "https://downloads.example/source-code-pro.zip".to_string(),
+        ]
+    );
+    assert!(
+        !paths.staging_dir().exists()
+            || fs::read_dir(paths.staging_dir())
+                .expect("read staging root")
+                .next()
+                .is_none()
     );
 }
 

@@ -6,11 +6,11 @@ use crate::fetch::{HttpClient, ReqwestHttpClient};
 use crate::fs::GlobalFileLock;
 use crate::install;
 use crate::model::{
-    CancellationToken, ConfigGetRequest, ConfigReport, ConfigSetRequest, ExecutionPolicy,
-    InfoReport, InfoRequest, InstallPlan, InstallReport, InstallRequest, ListReport,
-    OutdatedReport, OutdatedRequest, ProgressSink, RegistryStatusReport, RegistryUpdateReport,
-    RemovePlan, RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
-    UpdateRequest,
+    ensure_not_cancelled, CancellationToken, ConfigGetRequest, ConfigReport, ConfigSetRequest,
+    ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport, InstallRequest,
+    ListReport, NoCancellation, OutdatedReport, OutdatedRequest, ProgressSink,
+    RegistryStatusReport, RegistryUpdateReport, RemovePlan, RemoveReport, RemoveRequest,
+    SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
@@ -48,25 +48,40 @@ impl FontbrewApp {
     }
 
     pub fn install_plan(&self, request: InstallRequest) -> Result<InstallPlan> {
+        self.install_plan_with_cancellation(request, &NoCancellation)
+    }
+
+    pub fn install_plan_with_cancellation(
+        &self,
+        request: InstallRequest,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<InstallPlan> {
+        ensure_not_cancelled(cancellation)?;
+        let paths = self.paths()?;
         match request.source.clone() {
-            crate::InstallSource::LocalPath(_) => install::install_plan(&self.paths()?, request),
+            crate::InstallSource::LocalPath(_) => {
+                install::install_plan(&paths, request, cancellation)
+            }
             crate::InstallSource::RegistryName(short_name) => {
                 let recipe =
-                    RegistrySnapshotStore::new(self.paths()?).resolve_short_name(&short_name)?;
+                    RegistrySnapshotStore::new(paths.clone()).resolve_short_name(&short_name)?;
+                ensure_not_cancelled(cancellation)?;
                 install::registry_recipe_install_plan(
-                    &self.paths()?,
+                    &paths,
                     recipe,
                     request,
                     self.http_client()?.as_ref(),
+                    cancellation,
                 )
             }
             crate::InstallSource::GitHubRepo { owner, repo } => {
                 let github_repo = crate::sources::GitHubRepo::parse(format!("{owner}/{repo}"))?;
                 install::github_repo_install_plan(
-                    &self.paths()?,
+                    &paths,
                     github_repo,
                     request,
                     self.http_client()?.as_ref(),
+                    cancellation,
                 )
             }
             crate::InstallSource::Provider { .. } => not_implemented("install_plan"),
@@ -97,6 +112,14 @@ impl FontbrewApp {
 
     pub fn remove_plan(&self, request: RemoveRequest) -> Result<RemovePlan> {
         install::remove_plan(&self.paths()?, request)
+    }
+
+    pub fn remove_plan_with_cancellation(
+        &self,
+        request: RemoveRequest,
+        cancellation: &dyn CancellationToken,
+    ) -> Result<RemovePlan> {
+        install::remove_plan_with_cancellation(&self.paths()?, request, cancellation)
     }
 
     pub fn apply_remove(
@@ -136,6 +159,10 @@ impl FontbrewApp {
         cancellation: &dyn CancellationToken,
     ) -> Result<UpdateReport> {
         update::apply_update(&self.paths()?, plan, policy, progress, cancellation)
+    }
+
+    pub fn discard_update_plan(&self, plan: UpdatePlan) {
+        update::discard_update_plan(plan);
     }
 
     pub fn search(&self, request: SearchRequest) -> Result<SearchReport> {

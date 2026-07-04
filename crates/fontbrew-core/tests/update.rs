@@ -16,7 +16,8 @@ use fontbrew_core::{
     platform::FontbrewPaths,
     registry::{RegistrySnapshotStore, RegistrySnapshotV1},
     tasks, CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, InstallRequest,
-    InstallSource, PackageId, PackageVersion, ProgressEvent, ProgressSink, UpdateRequest,
+    InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent, ProgressSink, UpdatePlan,
+    UpdateRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -31,6 +32,18 @@ struct NeverCancelled;
 impl CancellationToken for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct CancelWhenInstallStagingExists {
+    paths: FontbrewPaths,
+}
+
+impl CancellationToken for CancelWhenInstallStagingExists {
+    fn is_cancelled(&self) -> bool {
+        staging_entries(&self.paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-"))
     }
 }
 
@@ -90,6 +103,7 @@ impl HttpClient for FakeHttpClient {
         request: HttpRequest,
         destination: &Path,
         _max_bytes: u64,
+        _cancellation: &dyn CancellationToken,
     ) -> fontbrew_core::Result<u64> {
         self.requests
             .lock()
@@ -212,6 +226,53 @@ fn update_request(package_ids: Vec<PackageId>, jobs: Option<usize>) -> UpdateReq
         jobs,
         offline: false,
     }
+}
+
+fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
+    if !paths.staging_dir().exists() {
+        return Vec::new();
+    }
+
+    let mut entries = fs::read_dir(paths.staging_dir())
+        .expect("read staging root")
+        .map(|entry| {
+            entry
+                .expect("read staging entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (FontbrewApp, UpdatePlan) {
+    install_github_source_code_pro(paths, "v1.0.0");
+    let update_http = Arc::new(FakeHttpClient::default());
+    update_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            "https://downloads.example/source-code-pro-v2.zip",
+        ),
+    );
+    update_http.with_download_bytes(
+        "https://downloads.example/source-code-pro-v2.zip",
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(vec![package_id("source-code-pro")], Some(1)),
+            &mut progress,
+            &NeverCancelled,
+        )
+        .expect("plan update");
+
+    (app, plan)
 }
 
 fn manifest_record(
@@ -360,6 +421,120 @@ fn task_runner_respects_bounded_limit_without_tokio() {
         move |_| probe.enter_release_request()
     });
     assert_eq!(parallel_probe.max_active(), 2);
+}
+
+#[test]
+fn update_apply_policy_failure_cleans_prepared_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let (app, mut plan) = prepare_source_code_pro_update(&paths);
+    assert!(
+        staging_entries(&paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-")),
+        "update planning should create staging"
+    );
+    plan.risks.push(PlanRisk::Conflict {
+        package_id: package_id("source-code-pro"),
+        description: "forced update risk for policy cleanup test".to_string(),
+    });
+
+    let error = app
+        .apply_update(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("safe policy should reject risky update");
+
+    assert!(matches!(
+        error,
+        fontbrew_core::FontbrewError::ExecutionPolicyRequired { .. }
+    ));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn discard_update_plan_cleans_prepared_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let (app, plan) = prepare_source_code_pro_update(&paths);
+    assert!(
+        staging_entries(&paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-")),
+        "update planning should create staging"
+    );
+
+    app.discard_update_plan(plan);
+
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn update_apply_manifest_read_failure_cleans_prepared_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let (app, plan) = prepare_source_code_pro_update(&paths);
+    assert!(
+        staging_entries(&paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-")),
+        "update planning should create staging"
+    );
+    fs::write(paths.manifest_path(), b"{not valid json").expect("corrupt manifest");
+
+    let error = app
+        .apply_update(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect_err("manifest read should fail");
+
+    assert!(matches!(
+        error,
+        fontbrew_core::FontbrewError::Manifest { .. }
+    ));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn update_plan_cancellation_after_resolved_github_staging_creation_cleans_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    install_github_source_code_pro(&paths, "v1.0.0");
+    assert!(staging_entries(&paths).is_empty());
+
+    let update_http = Arc::new(FakeHttpClient::default());
+    update_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            "https://downloads.example/source-code-pro-v2.zip",
+        ),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
+    let mut progress = NoProgress;
+
+    let plan = app
+        .update_plan(
+            update_request(vec![package_id("source-code-pro")], Some(1)),
+            &mut progress,
+            &CancelWhenInstallStagingExists {
+                paths: paths.clone(),
+            },
+        )
+        .expect("update plan should record per-package cancellation failure");
+
+    assert!(plan.prepared.is_empty());
+    assert_eq!(plan.failed.len(), 1);
+    assert_eq!(plan.failed[0].package_id, package_id("source-code-pro"));
+    assert!(plan.failed[0].reason.contains("operation cancelled"));
+    assert!(staging_entries(&paths).is_empty());
 }
 
 #[test]

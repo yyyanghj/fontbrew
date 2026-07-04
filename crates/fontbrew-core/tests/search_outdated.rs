@@ -10,8 +10,8 @@ use fontbrew_core::{
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
     registry::{RegistrySnapshotStore, RegistrySnapshotV1},
-    FamilyName, FontbrewApp, FontbrewError, OutdatedRequest, PackageId, PackageVersion,
-    SearchRequest,
+    CancellationToken, FamilyName, FontbrewApp, FontbrewError, OutdatedRequest, PackageId,
+    PackageVersion, SearchRequest,
 };
 
 #[derive(Default)]
@@ -60,6 +60,7 @@ impl HttpClient for FakeHttpClient {
         request: HttpRequest,
         _destination: &Path,
         _max_bytes: u64,
+        _cancellation: &dyn CancellationToken,
     ) -> fontbrew_core::Result<u64> {
         panic!(
             "outdated should not download GitHub release assets: {}",

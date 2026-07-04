@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::{
     error::{FontbrewError, Result},
     fetch::{HttpClient, HttpHeader, HttpRequest},
-    model::{PackageId, PackageVersion},
+    model::{CancellationToken, PackageId, PackageVersion},
     registry::RegistryAssetSelection,
     sources::GitHubRepo,
 };
@@ -50,6 +50,7 @@ pub(crate) fn download_release_asset_to_file(
     http_client: &dyn HttpClient,
     url: &str,
     destination: &Path,
+    cancellation: &dyn CancellationToken,
 ) -> Result<u64> {
     http_client.download_to_file(
         HttpRequest {
@@ -58,6 +59,7 @@ pub(crate) fn download_release_asset_to_file(
         },
         destination,
         MAX_RELEASE_ASSET_DOWNLOAD_BYTES,
+        cancellation,
     )
 }
 

@@ -36,6 +36,9 @@ pub enum FontbrewError {
         found: FamilyName,
     },
 
+    #[error("operation cancelled")]
+    Cancelled,
+
     #[error("archive rejected: {reason}")]
     ArchiveRejected { reason: String },
 

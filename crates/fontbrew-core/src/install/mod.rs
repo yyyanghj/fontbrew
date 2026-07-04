@@ -22,11 +22,11 @@ use crate::{
         ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
     },
     model::{
-        CancellationToken, ExecutionPolicy, FontFormat, InfoReport, InfoRequest, InstallPlan,
-        InstallReport, InstallRequest, InstallSource, ListPackage, ListReport, PackageInfo,
-        PlannedChange, PreparedFontFace, PreparedFontFile, PreparedInstallPackage,
-        PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan, RemoveReport,
-        RemoveRequest,
+        ensure_not_cancelled, CancellationToken, ExecutionPolicy, FontFormat, InfoReport,
+        InfoRequest, InstallPlan, InstallReport, InstallRequest, InstallSource, ListPackage,
+        ListReport, PackageInfo, PlannedChange, PreparedFontFace, PreparedFontFile,
+        PreparedInstallPackage, PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan,
+        RemoveReport, RemoveRequest,
     },
     platform::FontbrewPaths,
     registry::{RegistryAssetSelection, RegistryPackageRecipe},
@@ -35,9 +35,19 @@ use crate::{
 };
 
 const LOCAL_ARCHIVE_VERSION: &str = "local";
+const ACTIVE_STAGING_MARKER: &str = ".fontbrew-active";
+const ACTIVE_STAGING_LEASE_SECS: u64 = 7 * 24 * 60 * 60;
 static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn install_plan(paths: &FontbrewPaths, request: InstallRequest) -> Result<InstallPlan> {
+pub fn install_plan(
+    paths: &FontbrewPaths,
+    request: InstallRequest,
+    cancellation: &dyn CancellationToken,
+) -> Result<InstallPlan> {
+    ensure_not_cancelled(cancellation)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
     let InstallRequest {
         source,
         format_preference,
@@ -47,7 +57,7 @@ pub fn install_plan(paths: &FontbrewPaths, request: InstallRequest) -> Result<In
 
     match source {
         InstallSource::LocalPath(path) => {
-            local_archive_install_plan(paths, path, reinstall, format_preference)
+            local_archive_install_plan(paths, path, reinstall, format_preference, cancellation)
         }
         _ => Err(FontbrewError::NotImplemented {
             operation: "install_source",
@@ -60,7 +70,12 @@ pub fn github_repo_install_plan(
     repo: GitHubRepo,
     request: InstallRequest,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
+    ensure_not_cancelled(cancellation)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
     let options = RemoteInstallOptions::from_request(request);
     let package_id = package_id_from_repo_name(&repo.repo)?;
     let requested_source = ManifestSource::GitHub {
@@ -89,7 +104,9 @@ pub fn github_repo_install_plan(
         },
         options.with_package_id(package_id),
         http_client,
+        cancellation,
     )?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
 }
@@ -99,7 +116,12 @@ pub fn registry_recipe_install_plan(
     recipe: RegistryPackageRecipe,
     request: InstallRequest,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
+    ensure_not_cancelled(cancellation)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
     let mut options = RemoteInstallOptions::from_request(request);
     let repo = recipe.github_repo.clone();
     let package_id = recipe.package_id.clone();
@@ -133,7 +155,9 @@ pub fn registry_recipe_install_plan(
         },
         options.with_package_id(package_id),
         http_client,
+        cancellation,
     )?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
 }
@@ -177,8 +201,13 @@ pub fn apply_install(
     plan: InstallPlan,
     policy: ExecutionPolicy,
     progress: &mut dyn ProgressSink,
-    _cancellation: &dyn CancellationToken,
+    cancellation: &dyn CancellationToken,
 ) -> Result<InstallReport> {
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_install_plan_staging(&plan);
+        return Err(error);
+    }
+
     if matches!(policy, ExecutionPolicy::DryRun) {
         return dry_run_install_report(plan);
     }
@@ -213,6 +242,10 @@ pub fn apply_install(
             return Err(error);
         }
     };
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_install_plan_staging(&plan);
+        return Err(error);
+    }
 
     if plan.already_installed {
         let record = manifest
@@ -231,6 +264,10 @@ pub fn apply_install(
     };
 
     let mut current_risks = planned_risks;
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
     match current_install_risks(paths, &manifest, &prepared) {
         Ok(risks) => current_risks.extend(risks),
         Err(error) => {
@@ -269,7 +306,14 @@ pub fn apply_install(
         }
     }
 
-    let result = apply_prepared_install(paths, &mut manifest, &prepared, policy, progress);
+    let result = apply_prepared_install(
+        paths,
+        &mut manifest,
+        &prepared,
+        policy,
+        progress,
+        cancellation,
+    );
     cleanup_staging(&prepared.staging_dir);
 
     result
@@ -314,7 +358,17 @@ pub fn package_info(paths: &FontbrewPaths, request: InfoRequest) -> Result<InfoR
 }
 
 pub fn remove_plan(paths: &FontbrewPaths, request: RemoveRequest) -> Result<RemovePlan> {
+    remove_plan_with_cancellation(paths, request, &crate::model::NoCancellation)
+}
+
+pub fn remove_plan_with_cancellation(
+    paths: &FontbrewPaths,
+    request: RemoveRequest,
+    cancellation: &dyn CancellationToken,
+) -> Result<RemovePlan> {
+    ensure_not_cancelled(cancellation)?;
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    ensure_not_cancelled(cancellation)?;
     let changes = manifest
         .get_package(&request.package_id)
         .map(|record| {
@@ -350,8 +404,9 @@ pub fn apply_remove(
     plan: RemovePlan,
     policy: ExecutionPolicy,
     progress: &mut dyn ProgressSink,
-    _cancellation: &dyn CancellationToken,
+    cancellation: &dyn CancellationToken,
 ) -> Result<RemoveReport> {
+    ensure_not_cancelled(cancellation)?;
     require_policy_for_risks(&plan.risks, &policy)?;
 
     if matches!(policy, ExecutionPolicy::DryRun) {
@@ -365,6 +420,7 @@ pub fn apply_remove(
 
     let _lock = GlobalFileLock::try_exclusive(&write_lock_path(paths))?;
     let mut manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    ensure_not_cancelled(cancellation)?;
     let Some(record) = manifest.get_package(&plan.package_id).cloned() else {
         return Ok(RemoveReport {
             package_id: plan.package_id,
@@ -374,6 +430,7 @@ pub fn apply_remove(
     };
 
     let activation_artifacts = activation_artifacts_from_record(&record);
+    ensure_not_cancelled(cancellation)?;
     deactivate(&paths.activation_dir(), &activation_artifacts)?;
 
     let package_store_dir = paths.package_store_dir(&record.package_id, &record.version);
@@ -400,9 +457,18 @@ fn local_archive_install_plan(
     archive_path: PathBuf,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
     let archive_path = resolve_local_archive_path(&archive_path)?;
-    let prepared = prepare_local_archive(paths, archive_path, reinstall, format_preference)?;
+    ensure_not_cancelled(cancellation)?;
+    let prepared = prepare_local_archive(
+        paths,
+        archive_path,
+        reinstall,
+        format_preference,
+        cancellation,
+    )?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
     install_plan_from_prepared(paths, prepared)
 }
 
@@ -478,6 +544,18 @@ fn install_plan_from_prepared(
     })
 }
 
+fn ensure_not_cancelled_after_prepare(
+    cancellation: &dyn CancellationToken,
+    prepared: &PreparedInstallPackage,
+) -> Result<()> {
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
 fn source_conflict_plan(
     package_id: PackageId,
     target_version: PackageVersion,
@@ -503,12 +581,16 @@ fn prepare_local_archive(
     archive_path: PathBuf,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
-    let staging_dir = new_staging_dir(paths)?;
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation)?;
     let result = extract_and_parse_archive(
         paths,
         archive_path.clone(),
-        staging_dir.clone(),
+        staging_cleanup.path().to_path_buf(),
         PackageVersion::new(LOCAL_ARCHIVE_VERSION),
         PreparedInstallSource::LocalArchive { path: archive_path },
         None,
@@ -517,10 +599,11 @@ fn prepare_local_archive(
             explicit_format_preference: format_preference,
             recipe_format_preference: Vec::new(),
         },
+        cancellation,
     );
 
-    if result.is_err() {
-        cleanup_staging(&staging_dir);
+    if result.is_ok() {
+        staging_cleanup.disarm();
     }
 
     result
@@ -568,6 +651,36 @@ struct ArchiveFormatPreference {
     recipe_format_preference: Vec<FontFormat>,
 }
 
+struct StagingCleanupGuard {
+    path: PathBuf,
+    cleanup_on_drop: bool,
+}
+
+impl StagingCleanupGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cleanup_on_drop: true,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+}
+
+impl Drop for StagingCleanupGuard {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            cleanup_staging(&self.path);
+        }
+    }
+}
+
 fn prepare_github_release_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
@@ -576,8 +689,12 @@ fn prepare_github_release_archive(
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
-    let staging_dir = new_staging_dir(paths)?;
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation)?;
     let result = download_and_parse_github_archive(
         paths,
         repo,
@@ -586,11 +703,12 @@ fn prepare_github_release_archive(
         source,
         options,
         http_client,
-        staging_dir.clone(),
+        staging_cleanup.path().to_path_buf(),
+        cancellation,
     );
 
-    if result.is_err() {
-        cleanup_staging(&staging_dir);
+    if result.is_ok() {
+        staging_cleanup.disarm();
     }
 
     result
@@ -605,8 +723,10 @@ fn download_and_parse_github_archive(
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
 
     let asset = github::resolve_release_asset(
         http_client,
@@ -615,6 +735,7 @@ fn download_and_parse_github_archive(
         options.asset_selector.as_deref(),
         &fallback_package_id,
     )?;
+    ensure_not_cancelled(cancellation)?;
 
     download_and_parse_resolved_github_archive(
         paths,
@@ -623,6 +744,7 @@ fn download_and_parse_github_archive(
         options,
         http_client,
         staging_dir,
+        cancellation,
     )
 }
 
@@ -632,19 +754,24 @@ pub(crate) fn prepare_resolved_github_release_archive(
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
-    let staging_dir = new_staging_dir(paths)?;
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation)?;
     let result = download_and_parse_resolved_github_archive(
         paths,
         asset,
         source,
         options,
         http_client,
-        staging_dir.clone(),
+        staging_cleanup.path().to_path_buf(),
+        cancellation,
     );
 
-    if result.is_err() {
-        cleanup_staging(&staging_dir);
+    if result.is_ok() {
+        staging_cleanup.disarm();
     }
 
     result
@@ -657,10 +784,18 @@ fn download_and_parse_resolved_github_archive(
     options: RemoteInstallOptions,
     http_client: &dyn HttpClient,
     staging_dir: PathBuf,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
+    ensure_not_cancelled(cancellation)?;
     fs::create_dir_all(&staging_dir)?;
     let archive_path = staging_dir.join("download.zip");
-    github::download_release_asset_to_file(http_client, &asset.download_url, &archive_path)?;
+    github::download_release_asset_to_file(
+        http_client,
+        &asset.download_url,
+        &archive_path,
+        cancellation,
+    )?;
+    ensure_not_cancelled(cancellation)?;
 
     extract_and_parse_archive(
         paths,
@@ -674,6 +809,7 @@ fn download_and_parse_resolved_github_archive(
             explicit_format_preference: options.explicit_format_preference,
             recipe_format_preference: options.recipe_format_preference,
         },
+        cancellation,
     )
 }
 
@@ -686,11 +822,14 @@ fn extract_and_parse_archive(
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
+    cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
 
     let extracted_fonts = ZipArchiveExtractor::new(ArchiveExtractionOptions::default())
         .extract(&archive_path, &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
 
     if extracted_fonts.is_empty() {
         cleanup_staging(&staging_dir);
@@ -704,6 +843,7 @@ fn extract_and_parse_archive(
     let mut parsed_files = Vec::with_capacity(extracted_fonts.len());
 
     for extracted_font in extracted_fonts {
+        ensure_not_cancelled(cancellation)?;
         let faces = match reader.read_file(&extracted_font.path) {
             Ok(faces) => faces,
             Err(error) => {
@@ -744,6 +884,7 @@ fn extract_and_parse_archive(
         Some(package_id) => package_id,
         None => PackageId::normalize(package_family)?,
     };
+    ensure_not_cancelled(cancellation)?;
     let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
         Ok(config) => config,
         Err(error) => {
@@ -772,6 +913,7 @@ fn extract_and_parse_archive(
     let mut activation_sources = Vec::with_capacity(parsed_files.len());
 
     for parsed_file in parsed_files {
+        ensure_not_cancelled(cancellation)?;
         let relative_path = parsed_file
             .staging_path
             .strip_prefix(&staging_dir)
@@ -1080,8 +1222,11 @@ fn apply_prepared_install(
     prepared: &PreparedInstallPackage,
     policy: ExecutionPolicy,
     progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
 ) -> Result<InstallReport> {
+    ensure_not_cancelled(cancellation)?;
     reject_unmanaged_package_store(paths, prepared)?;
+    ensure_not_cancelled(cancellation)?;
 
     let backup_dir = if prepared.reinstall && prepared.package_store_dir.exists() {
         Some(backup_existing_package_store(paths, prepared)?)
@@ -1089,6 +1234,10 @@ fn apply_prepared_install(
         None
     };
 
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        rollback_package_store(&prepared.package_store_dir, backup_dir.as_deref());
+        return Err(error);
+    }
     if let Err(error) = copy_prepared_files(paths, prepared) {
         rollback_package_store(&prepared.package_store_dir, backup_dir.as_deref());
         return Err(error);
@@ -1109,6 +1258,15 @@ fn apply_prepared_install(
                 return Err(error);
             }
         };
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        rollback_install(
+            paths,
+            &[],
+            &prepared.package_store_dir,
+            backup_dir.as_deref(),
+        );
+        return Err(error);
+    }
     let activation_artifacts = match activation_plan.apply(policy) {
         Ok(artifacts) => artifacts,
         Err(error) => {
@@ -1127,6 +1285,17 @@ fn apply_prepared_install(
     };
     let manifest_record = manifest_record_from_prepared(prepared, activation_artifacts.clone())?;
 
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        let rollback_artifacts =
+            rollback_activation_artifacts(&activation_artifacts, &preexisting_activation_paths);
+        rollback_install(
+            paths,
+            &rollback_artifacts,
+            &prepared.package_store_dir,
+            backup_dir.as_deref(),
+        );
+        return Err(error);
+    }
     manifest.insert_package(manifest_record.clone())?;
     if let Err(error) = ManifestStore::write(&paths.manifest_path(), manifest) {
         let rollback_artifacts =
@@ -1783,6 +1952,83 @@ fn new_staging_dir(paths: &FontbrewPaths) -> Result<PathBuf> {
     Ok(paths
         .staging_dir()
         .join(format!("install-{}", operation_suffix()?)))
+}
+
+fn create_active_staging_dir(paths: &FontbrewPaths) -> Result<PathBuf> {
+    let staging_dir = new_staging_dir(paths)?;
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    fs::create_dir_all(&staging_dir)?;
+    fs::write(
+        staging_dir.join(ACTIVE_STAGING_MARKER),
+        format!("created_unix_seconds={}\n", current_unix_seconds()?),
+    )?;
+    Ok(staging_dir)
+}
+
+pub(crate) fn cleanup_stale_install_staging(paths: &FontbrewPaths) -> Result<()> {
+    let staging_root = paths.staging_dir();
+    if !staging_root.exists() {
+        return Ok(());
+    }
+
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_root)?;
+    let now_seconds = current_unix_seconds()?;
+    for entry in fs::read_dir(&staging_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("install-") {
+            continue;
+        }
+
+        let path = entry.path();
+        ensure_path_inside(&staging_root, &path)?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            fs::remove_file(path)?;
+        } else if file_type.is_dir() {
+            if has_live_active_staging_marker(&path, now_seconds)? {
+                continue;
+            }
+            ensure_existing_path_does_not_cross_symlink(&staging_root, &path)?;
+            fs::remove_dir_all(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn has_live_active_staging_marker(path: &Path, now_seconds: u64) -> Result<bool> {
+    let marker_path = path.join(ACTIVE_STAGING_MARKER);
+    match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+
+    let content = fs::read_to_string(marker_path)?;
+    let Some(created_seconds) = content
+        .trim()
+        .strip_prefix("created_unix_seconds=")
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(false);
+    };
+
+    Ok(now_seconds.saturating_sub(created_seconds) <= ACTIVE_STAGING_LEASE_SECS)
+}
+
+fn current_unix_seconds() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| FontbrewError::PathResolution {
+            message: format!("system clock is before unix epoch: {error}"),
+        })?
+        .as_secs())
 }
 
 fn operation_suffix() -> Result<String> {

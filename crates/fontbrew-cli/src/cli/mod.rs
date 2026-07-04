@@ -1,4 +1,10 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
@@ -65,6 +71,15 @@ enum Command {
     Config(ConfigArgs),
     /// Manage the local first-party registry snapshot.
     Registry(RegistryArgs),
+}
+
+impl Command {
+    fn consumes_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Command::Install(_) | Command::Remove(_) | Command::Update(_)
+        )
+    }
 }
 
 #[derive(Debug, Args)]
@@ -201,17 +216,33 @@ enum CliFontFormat {
 
 pub fn run(cli: Cli) -> u8 {
     let app = FontbrewApp::new();
+    let cancellation = CliCancellation::new();
+    if cli.command.consumes_cancellation() {
+        let _ = cancellation.install_ctrlc_handler();
+    }
 
     if cli.json {
         let mut reporter = JsonReporter::new();
         let mut confirmer = JsonConfirmer::new();
-        return run_with_reporter(cli.command, &app, &mut reporter, &mut confirmer);
+        return run_with_reporter(
+            cli.command,
+            &app,
+            &mut reporter,
+            &mut confirmer,
+            &cancellation,
+        );
     }
 
     let mut reporter = HumanReporter::new(cli.quiet, cli.verbose > 0);
     let mut confirmer = HumanConfirmer::new();
 
-    run_with_reporter(cli.command, &app, &mut reporter, &mut confirmer)
+    run_with_reporter(
+        cli.command,
+        &app,
+        &mut reporter,
+        &mut confirmer,
+        &cancellation,
+    )
 }
 
 fn run_with_reporter(
@@ -219,8 +250,9 @@ fn run_with_reporter(
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
 ) -> u8 {
-    match execute(command, app, reporter, confirmer) {
+    match execute(command, app, reporter, confirmer, cancellation) {
         Ok(()) => exit::SUCCESS,
         Err(error) => {
             let exit_code = error.exit_code();
@@ -235,15 +267,16 @@ fn execute(
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
     match command {
-        Command::Install(args) => install(args, app, reporter, confirmer),
+        Command::Install(args) => install(args, app, reporter, confirmer, cancellation),
         Command::List => list(app, reporter),
         Command::Info(args) => info(args, app, reporter),
-        Command::Remove(args) => remove(args, app, reporter, confirmer),
+        Command::Remove(args) => remove(args, app, reporter, confirmer, cancellation),
         Command::Search(args) => search(args, app, reporter),
         Command::Outdated(args) => outdated(args, app, reporter),
-        Command::Update(args) => update(args, app, reporter, confirmer),
+        Command::Update(args) => update(args, app, reporter, confirmer, cancellation),
         Command::Config(args) => config(args, app, reporter),
         Command::Registry(args) => registry(args, app, reporter),
     }
@@ -254,6 +287,7 @@ fn install(
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
     let request = InstallRequest {
         source: install_source_from_arg(&args.source),
@@ -263,7 +297,7 @@ fn install(
         refresh: args.refresh,
         offline: args.offline,
     };
-    let plan = app.install_plan(request)?;
+    let plan = app.install_plan_with_cancellation(request, cancellation)?;
     let policy = match confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {
@@ -279,7 +313,7 @@ fn install(
     };
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
-        let report = app.apply_install(plan, policy, &mut progress, &NeverCancelled)?;
+        let report = app.apply_install(plan, policy, &mut progress, cancellation)?;
         progress.finish()?;
         report
     };
@@ -305,9 +339,10 @@ fn remove(
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
-    let plan = app.remove_plan(RemoveRequest { package_id })?;
+    let plan = app.remove_plan_with_cancellation(RemoveRequest { package_id }, cancellation)?;
     let policy = confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {
@@ -317,7 +352,7 @@ fn remove(
     )?;
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
-        let report = app.apply_remove(plan, policy, &mut progress, &NeverCancelled)?;
+        let report = app.apply_remove(plan, policy, &mut progress, cancellation)?;
         progress.finish()?;
         report
     };
@@ -355,6 +390,7 @@ fn update(
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
     let package_ids = args
         .package_ids
@@ -368,15 +404,21 @@ fn update(
     };
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
-        let plan = app.update_plan(request, &mut progress, &NeverCancelled)?;
-        let policy = confirmer.execution_policy(
+        let plan = app.update_plan(request, &mut progress, cancellation)?;
+        let policy = match confirmer.execution_policy(
             &plan.risks,
             ConfirmationOptions {
                 assume_yes: args.yes,
                 dry_run: args.dry_run,
             },
-        )?;
-        let report = app.apply_update(plan, policy, &mut progress, &NeverCancelled)?;
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                app.discard_update_plan(plan);
+                return Err(error);
+            }
+        };
+        let report = app.apply_update(plan, policy, &mut progress, cancellation)?;
         progress.finish()?;
         report
     };
@@ -473,11 +515,34 @@ fn push_unique_format(formats: &mut Vec<FontFormat>, format: FontFormat) {
     }
 }
 
-struct NeverCancelled;
+#[derive(Clone)]
+struct CliCancellation {
+    cancelled: Arc<AtomicBool>,
+}
 
-impl CancellationToken for NeverCancelled {
+impl CliCancellation {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn install_ctrlc_handler(&self) -> Result<(), ctrlc::Error> {
+        let cancelled = self.cancelled.clone();
+        ctrlc::set_handler(move || {
+            cancelled.store(true, Ordering::SeqCst);
+        })
+    }
+
+    #[cfg(test)]
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+impl CancellationToken for CliCancellation {
     fn is_cancelled(&self) -> bool {
-        false
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -529,5 +594,83 @@ mod tests {
             font_format_preference(&args),
             vec![FontFormat::Otf, FontFormat::Ttf]
         );
+    }
+
+    #[test]
+    fn cli_cancellation_token_reflects_atomic_flag() {
+        let cancellation = CliCancellation::new();
+
+        assert!(!cancellation.is_cancelled());
+        cancellation.cancel();
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn command_consumes_cancellation_only_for_write_operations_using_the_token() {
+        assert!(Command::Install(InstallArgs {
+            source: "source-code-pro".to_string(),
+            reinstall: false,
+            yes: false,
+            dry_run: false,
+            refresh: false,
+            offline: false,
+            asset_selector: None,
+            format_preference: Vec::new(),
+            otf: false,
+            ttf: false,
+        })
+        .consumes_cancellation());
+        assert!(Command::Remove(RemoveArgs {
+            package_id: "source-code-pro".to_string(),
+            yes: false,
+            dry_run: false,
+        })
+        .consumes_cancellation());
+        assert!(Command::Update(UpdateArgs {
+            package_ids: Vec::new(),
+            yes: false,
+            dry_run: false,
+            jobs: None,
+        })
+        .consumes_cancellation());
+
+        assert!(!Command::List.consumes_cancellation());
+        assert!(!Command::Info(InfoArgs {
+            package_id: "source-code-pro".to_string(),
+        })
+        .consumes_cancellation());
+        assert!(!Command::Search(SearchArgs {
+            query: None,
+            limit: None,
+            refresh: false,
+            offline: false,
+        })
+        .consumes_cancellation());
+        assert!(!Command::Outdated(OutdatedArgs {
+            package_ids: Vec::new(),
+            offline: false,
+        })
+        .consumes_cancellation());
+        assert!(!Command::Config(ConfigArgs {
+            command: ConfigCommand::Get(ConfigGetArgs {
+                key: "registry.url".to_string(),
+            }),
+        })
+        .consumes_cancellation());
+        assert!(!Command::Config(ConfigArgs {
+            command: ConfigCommand::Set(ConfigSetArgs {
+                key: "registry.url".to_string(),
+                value: "https://example.test/registry.json".to_string(),
+            }),
+        })
+        .consumes_cancellation());
+        assert!(!Command::Registry(RegistryArgs {
+            command: RegistryCommand::Update,
+        })
+        .consumes_cancellation());
+        assert!(!Command::Registry(RegistryArgs {
+            command: RegistryCommand::Status,
+        })
+        .consumes_cancellation());
     }
 }

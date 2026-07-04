@@ -7,9 +7,10 @@ use crate::{
     github, install,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     model::{
-        CancellationToken, ExecutionPolicy, OperationId, PlannedChange, PreparedInstallPackage,
-        PreparedInstallSource, PreparedUpdatePackage, ProgressEvent, ProgressSink, UpdatePlan,
-        UpdatePlanFailure, UpdatePlanPackage, UpdateReport, UpdateRequest, UpdatedPackage,
+        ensure_not_cancelled, CancellationToken, ExecutionPolicy, OperationId, PlannedChange,
+        PreparedInstallPackage, PreparedInstallSource, PreparedUpdatePackage, ProgressEvent,
+        ProgressSink, UpdatePlan, UpdatePlanFailure, UpdatePlanPackage, UpdateReport,
+        UpdateRequest, UpdatedPackage,
     },
     model::{NotUpdatablePackage, OutdatedPackage, OutdatedReport, OutdatedRequest},
     platform::FontbrewPaths,
@@ -102,14 +103,15 @@ pub fn update_plan(
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<UpdatePlan> {
-    if cancellation.is_cancelled() {
-        return Err(cancelled_error());
-    }
+    ensure_not_cancelled(cancellation)?;
+    install::cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
 
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let records = selected_records(&manifest, &request.package_ids)?;
     let config_jobs = FontbrewConfig::load(&paths.config_path())?.update_concurrency;
     let jobs = request.jobs.unwrap_or(config_jobs).max(1);
+    ensure_not_cancelled(cancellation)?;
 
     for record in &records {
         progress.emit(ProgressEvent::PreparingUpdate {
@@ -118,7 +120,7 @@ pub fn update_plan(
     }
 
     let outcomes = tasks::map_bounded(records, jobs, |record| {
-        prepare_update_package(paths, record, request.offline, http_client)
+        prepare_update_package(paths, record, request.offline, http_client, cancellation)
     });
 
     let mut prepared = Vec::new();
@@ -136,6 +138,12 @@ pub fn update_plan(
             PrepareOutcome::Failed(failure) => failed.push(failure),
             PrepareOutcome::UpToDate => {}
         }
+    }
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        for prepared_update in &prepared_packages {
+            install::cleanup_staging(&prepared_update.prepared.staging_dir);
+        }
+        return Err(error);
     }
 
     let changes = prepared
@@ -183,8 +191,9 @@ fn prepare_update_package(
     record: ManifestPackageRecord,
     offline: bool,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> PrepareOutcome {
-    match prepare_update_package_inner(paths, &record, offline, http_client) {
+    match prepare_update_package_inner(paths, &record, offline, http_client, cancellation) {
         Ok(Some(prepared)) => PrepareOutcome::Prepared(prepared),
         Ok(None) => PrepareOutcome::UpToDate,
         Err(error) => PrepareOutcome::Failed(UpdatePlanFailure {
@@ -199,7 +208,9 @@ fn prepare_update_package_inner(
     record: &ManifestPackageRecord,
     offline: bool,
     http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
 ) -> Result<Option<PreparedUpdatePackage>> {
+    ensure_not_cancelled(cancellation)?;
     let Some(repo) = github_update_repo(record)? else {
         return Err(FontbrewError::NoUpdateSource {
             package_id: record.package_id.clone(),
@@ -213,6 +224,7 @@ fn prepare_update_package_inner(
     }
 
     let recipe_asset = registry_asset_selection(paths, record)?;
+    ensure_not_cancelled(cancellation)?;
     let asset = github::resolve_release_asset(
         http_client,
         &repo,
@@ -220,6 +232,7 @@ fn prepare_update_package_inner(
         None,
         &record.package_id,
     )?;
+    ensure_not_cancelled(cancellation)?;
     match compare_versions(&record.version, &asset.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
         VersionComparison::Unknown => {
@@ -241,7 +254,12 @@ fn prepare_update_package_inner(
         source,
         install::RemoteInstallOptions::for_update(record.package_id.clone()),
         http_client,
+        cancellation,
     )?;
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        install::cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
 
     if let Err(error) = validate_update_identity(record, &prepared) {
         install::cleanup_staging(&prepared.staging_dir);
@@ -359,6 +377,11 @@ pub fn apply_update(
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<UpdateReport> {
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_update_plan(&plan);
+        return Err(error);
+    }
+
     if matches!(policy, ExecutionPolicy::DryRun) {
         cleanup_update_plan(&plan);
         return Ok(UpdateReport {
@@ -369,21 +392,36 @@ pub fn apply_update(
         });
     }
 
-    require_policy_for_risks(&plan.risks, &policy)?;
+    if let Err(error) = require_policy_for_risks(&plan.risks, &policy) {
+        cleanup_update_plan(&plan);
+        return Err(error);
+    }
 
-    let _lock = GlobalFileLock::try_exclusive(&install::write_lock_path(paths))?;
-    let mut manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    let _lock = match GlobalFileLock::try_exclusive(&install::write_lock_path(paths)) {
+        Ok(lock) => lock,
+        Err(error) => {
+            cleanup_update_plan(&plan);
+            return Err(error);
+        }
+    };
+    let mut manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            cleanup_update_plan(&plan);
+            return Err(error);
+        }
+    };
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        cleanup_update_plan(&plan);
+        return Err(error);
+    }
     let mut updated = Vec::new();
-    let mut skipped = plan.failed;
+    let mut skipped = plan.failed.clone();
 
     for prepared_update in &plan.prepared_packages {
-        if cancellation.is_cancelled() {
-            skipped.push(UpdatePlanFailure {
-                package_id: prepared_update.summary.package_id.clone(),
-                reason: "operation cancelled".to_string(),
-            });
-            install::cleanup_staging(&prepared_update.prepared.staging_dir);
-            continue;
+        if let Err(error) = ensure_not_cancelled(cancellation) {
+            cleanup_update_plan(&plan);
+            return Err(error);
         }
 
         progress.emit(ProgressEvent::ApplyingUpdate {
@@ -395,17 +433,28 @@ pub fn apply_update(
             prepared_update,
             policy.clone(),
             progress,
+            cancellation,
         );
         install::cleanup_staging(&prepared_update.prepared.staging_dir);
 
         match result {
             Ok(package) => updated.push(package),
             Err(error) => {
+                if matches!(error, FontbrewError::Cancelled) {
+                    cleanup_update_plan(&plan);
+                    return Err(error);
+                }
                 skipped.push(UpdatePlanFailure {
                     package_id: prepared_update.summary.package_id.clone(),
                     reason: error.to_string(),
                 });
-                manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+                manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        cleanup_update_plan(&plan);
+                        return Err(error);
+                    }
+                };
             }
         }
     }
@@ -416,6 +465,10 @@ pub fn apply_update(
         updated,
         skipped,
     })
+}
+
+pub fn discard_update_plan(plan: UpdatePlan) {
+    cleanup_update_plan(&plan);
 }
 
 fn cleanup_update_plan(plan: &UpdatePlan) {
@@ -430,7 +483,9 @@ fn apply_prepared_update(
     prepared_update: &PreparedUpdatePackage,
     policy: ExecutionPolicy,
     progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
 ) -> Result<UpdatedPackage> {
+    ensure_not_cancelled(cancellation)?;
     let package_id = &prepared_update.summary.package_id;
     let current_record = manifest
         .get_package(package_id)
@@ -459,6 +514,7 @@ fn apply_prepared_update(
         });
     }
 
+    ensure_not_cancelled(cancellation)?;
     if let Err(error) = install::copy_prepared_files(paths, prepared) {
         remove_package_store(paths, &prepared.package_store_dir);
         return Err(error);
@@ -472,6 +528,10 @@ fn apply_prepared_update(
         artifacts: prepared.activation_artifacts.clone(),
         risks: Vec::new(),
     };
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        remove_package_store(paths, &prepared.package_store_dir);
+        return Err(error);
+    }
     let new_activation_artifacts = match replace_activation(
         paths,
         package_id,
@@ -486,6 +546,21 @@ fn apply_prepared_update(
         }
     };
 
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        let cleanup_error = deactivate(&paths.activation_dir(), &new_activation_artifacts).err();
+        let restore_error = restore_activation(paths, package_id, &old_activation_artifacts).err();
+        remove_package_store(paths, &prepared.package_store_dir);
+        if cleanup_error.is_none() && restore_error.is_none() {
+            return Err(error);
+        }
+        return Err(activation_transaction_error(
+            package_id,
+            "cancel after activate new activation",
+            error,
+            cleanup_error,
+            restore_error,
+        ));
+    }
     let new_manifest_record =
         install::manifest_record_from_prepared(prepared, new_activation_artifacts.clone())?;
     manifest.insert_package(new_manifest_record)?;
@@ -682,12 +757,6 @@ fn require_policy_for_risks(risks: &[PlanRisk], policy: &ExecutionPolicy) -> Res
             })
         }
         ExecutionPolicy::AllowUserApprovedRisk | ExecutionPolicy::AssumeYes => Ok(()),
-    }
-}
-
-fn cancelled_error() -> FontbrewError {
-    FontbrewError::Config {
-        message: "operation cancelled".to_string(),
     }
 }
 

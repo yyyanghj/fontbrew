@@ -5,7 +5,10 @@ use std::{
     time::Duration,
 };
 
-use crate::error::{FontbrewError, Result};
+use crate::{
+    error::{FontbrewError, Result},
+    model::{ensure_not_cancelled, CancellationToken},
+};
 
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_BUFFER_SIZE: usize = 64 * 1024;
@@ -36,6 +39,7 @@ pub trait HttpClient: Send + Sync {
         request: HttpRequest,
         destination: &Path,
         max_bytes: u64,
+        cancellation: &dyn CancellationToken,
     ) -> Result<u64>;
 }
 
@@ -92,7 +96,10 @@ impl HttpClient for ReqwestHttpClient {
         request: HttpRequest,
         destination: &Path,
         max_bytes: u64,
+        cancellation: &dyn CancellationToken,
     ) -> Result<u64> {
+        ensure_not_cancelled(cancellation)?;
+
         let mut builder = self.client.get(&request.url);
         for header in &request.headers {
             builder = builder.header(&header.name, &header.value);
@@ -124,6 +131,7 @@ impl HttpClient for ReqwestHttpClient {
             &mut destination_file,
             max_bytes,
             &request.url,
+            cancellation,
         );
         if result.is_err() {
             let _ = fs::remove_file(destination);
@@ -138,11 +146,13 @@ fn copy_limited_response(
     destination: &mut impl Write,
     max_bytes: u64,
     url: &str,
+    cancellation: &dyn CancellationToken,
 ) -> Result<u64> {
     let mut downloaded = 0_u64;
     let mut buffer = [0_u8; DOWNLOAD_BUFFER_SIZE];
 
     loop {
+        ensure_not_cancelled(cancellation)?;
         let read = response
             .read(&mut buffer)
             .map_err(|source| FontbrewError::Network {
@@ -152,6 +162,7 @@ fn copy_limited_response(
             return Ok(downloaded);
         }
 
+        ensure_not_cancelled(cancellation)?;
         let next_downloaded =
             downloaded
                 .checked_add(read as u64)

@@ -93,6 +93,7 @@ fn core_error_kind(error: &FontbrewError) -> &'static str {
         FontbrewError::ExecutionPolicyRequired { .. } => "execution_policy_required",
         FontbrewError::NoUpdateSource { .. } => "no_update_source",
         FontbrewError::PackageIdentityMismatch { .. } => "package_identity_mismatch",
+        FontbrewError::Cancelled => "cancelled",
         FontbrewError::ArchiveRejected { .. } => "archive_rejected",
         FontbrewError::RegistryValidationFailed { .. } => "registry_validation_failed",
         FontbrewError::InvalidPackageId { .. } => "invalid_package_id",

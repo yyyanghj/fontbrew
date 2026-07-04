@@ -2,6 +2,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use fontbrew_core::{
@@ -9,8 +10,8 @@ use fontbrew_core::{
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, FontFormat, FontbrewApp, FontbrewError,
-    InfoRequest, InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
-    ProgressSink, RemovePlan, RemoveRequest,
+    InfoRequest, InstallRequest, InstallSource, NoCancellation, PackageId, PackageVersion,
+    PlanRisk, ProgressEvent, ProgressSink, RemovePlan, RemoveRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -25,6 +26,46 @@ struct NeverCancelled;
 impl CancellationToken for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct AlwaysCancelled;
+
+impl CancellationToken for AlwaysCancelled {
+    fn is_cancelled(&self) -> bool {
+        true
+    }
+}
+
+struct CancelOnCheck {
+    checks: AtomicUsize,
+    cancel_on_check: usize,
+}
+
+impl CancelOnCheck {
+    fn new(cancel_on_check: usize) -> Self {
+        Self {
+            checks: AtomicUsize::new(0),
+            cancel_on_check,
+        }
+    }
+}
+
+impl CancellationToken for CancelOnCheck {
+    fn is_cancelled(&self) -> bool {
+        self.checks.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_on_check
+    }
+}
+
+struct CancelWhenInstallStagingExists {
+    paths: FontbrewPaths,
+}
+
+impl CancellationToken for CancelWhenInstallStagingExists {
+    fn is_cancelled(&self) -> bool {
+        staging_entries(&self.paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-"))
     }
 }
 
@@ -98,6 +139,25 @@ fn write_invalid_font_archive(archive_path: &Path) {
     zip.finish().expect("finish archive");
 }
 
+fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
+    if !paths.staging_dir().exists() {
+        return Vec::new();
+    }
+
+    let mut entries = fs::read_dir(paths.staging_dir())
+        .expect("read staging root")
+        .map(|entry| {
+            entry
+                .expect("read staging entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
 fn apply_install(app: &FontbrewApp, archive_path: &Path) -> fontbrew_core::Result<()> {
     let plan = app.install_plan(local_archive_request(archive_path, false))?;
     let mut progress = NoProgress;
@@ -109,6 +169,11 @@ fn apply_install(app: &FontbrewApp, archive_path: &Path) -> fontbrew_core::Resul
         &cancellation,
     )?;
     Ok(())
+}
+
+#[test]
+fn no_cancellation_token_never_cancels() {
+    assert!(!NoCancellation.is_cancelled());
 }
 
 #[test]
@@ -129,6 +194,216 @@ fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
     assert!(json.get("prepared").is_none());
     assert!(!json.to_string().contains("staging"));
     assert!(!json.to_string().contains("package_store"));
+}
+
+#[test]
+fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan local archive install");
+    assert!(
+        staging_entries(&paths)
+            .iter()
+            .any(|entry| entry.starts_with("install-")),
+        "install planning should create staging"
+    );
+
+    let error = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &AlwaysCancelled,
+        )
+        .expect_err("cancelled apply should fail");
+
+    assert!(matches!(error, FontbrewError::Cancelled));
+    assert!(staging_entries(&paths).is_empty());
+    assert!(!paths.manifest_path().exists());
+    assert!(!paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[test]
+fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let error = app
+        .install_plan_with_cancellation(
+            local_archive_request(&archive_path, false),
+            &CancelWhenInstallStagingExists {
+                paths: paths.clone(),
+            },
+        )
+        .expect_err("cancellation after staging creation should fail");
+
+    assert!(matches!(error, FontbrewError::Cancelled));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn install_plan_removes_stale_install_staging_without_touching_unrelated_paths_or_symlink_targets()
+{
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    let staging_root = paths.staging_dir();
+    fs::create_dir_all(&staging_root).expect("create staging root");
+    let stale_dir = staging_root.join("install-stale");
+    fs::create_dir_all(&stale_dir).expect("create stale staging");
+    fs::write(stale_dir.join("old"), b"old staging").expect("write stale file");
+    let unrelated_dir = staging_root.join("keep-this");
+    fs::create_dir_all(&unrelated_dir).expect("create unrelated staging");
+    fs::write(unrelated_dir.join("keep"), b"keep").expect("write unrelated file");
+    let outside_dir = temp.path().join("outside-target");
+    fs::create_dir_all(&outside_dir).expect("create outside target");
+    fs::write(outside_dir.join("keep"), b"outside").expect("write outside file");
+    let symlink_trap = staging_root.join("install-symlink-trap");
+    std::os::unix::fs::symlink(&outside_dir, &symlink_trap).expect("create stale symlink trap");
+
+    let plan = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect("plan local archive install");
+
+    assert!(!stale_dir.exists());
+    assert!(!symlink_trap.exists());
+    assert!(outside_dir.join("keep").exists());
+    assert!(unrelated_dir.join("keep").exists());
+    let install_entries = staging_entries(&paths)
+        .into_iter()
+        .filter(|entry| entry.starts_with("install-"))
+        .collect::<Vec<_>>();
+    assert_eq!(install_entries.len(), 1);
+
+    app.discard_install_plan(plan);
+    assert!(unrelated_dir.join("keep").exists());
+    assert!(outside_dir.join("keep").exists());
+}
+
+#[test]
+fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let first_archive = temp.path().join("source-code-pro.zip");
+    let second_archive = temp.path().join("source-code-pro-copy.zip");
+    write_fixture_archive(
+        &first_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    write_fixture_archive(
+        &second_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let first_plan = app
+        .install_plan(local_archive_request(&first_archive, false))
+        .expect("plan first local archive install");
+    let second_plan = app
+        .install_plan(local_archive_request(&second_archive, false))
+        .expect("planning second install should not delete first staging");
+
+    assert_eq!(
+        staging_entries(&paths)
+            .into_iter()
+            .filter(|entry| entry.starts_with("install-"))
+            .count(),
+        2
+    );
+    app.discard_install_plan(second_plan);
+    app.apply_install(
+        first_plan,
+        ExecutionPolicy::SafeOnly,
+        &mut NoProgress,
+        &NeverCancelled,
+    )
+    .expect("first plan should remain applicable after second planning cleanup");
+    assert!(paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .join("files/SourceCodePro-Regular.ttf")
+        .exists());
+}
+
+#[test]
+fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepared_plan_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let first_archive = temp.path().join("source-code-pro.zip");
+    let second_archive = temp.path().join("source-code-pro-copy.zip");
+    write_fixture_archive(
+        &first_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    write_fixture_archive(
+        &second_archive,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let first_plan = app
+        .install_plan(local_archive_request(&first_archive, false))
+        .expect("plan first local archive install");
+    let abandoned_staging = paths.staging_dir().join("install-abandoned");
+    fs::create_dir_all(&abandoned_staging).expect("create abandoned staging");
+    fs::write(abandoned_staging.join(".fontbrew-active"), b"active\n")
+        .expect("write abandoned old active marker");
+
+    let second_plan = app
+        .install_plan(local_archive_request(&second_archive, false))
+        .expect("planning second install should clean abandoned staging");
+
+    assert!(!abandoned_staging.exists());
+    assert_eq!(
+        staging_entries(&paths)
+            .into_iter()
+            .filter(|entry| entry.starts_with("install-"))
+            .count(),
+        2
+    );
+
+    app.discard_install_plan(second_plan);
+    app.apply_install(
+        first_plan,
+        ExecutionPolicy::SafeOnly,
+        &mut NoProgress,
+        &NeverCancelled,
+    )
+    .expect("first plan should remain applicable after abandoned cleanup");
+    assert!(paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .join("files/SourceCodePro-Regular.ttf")
+        .exists());
 }
 
 #[test]
@@ -229,6 +504,48 @@ fn local_archive_install_list_info_remove_round_trip() {
         .expect("list after remove")
         .packages
         .is_empty());
+}
+
+#[test]
+fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    apply_install(&app, &archive_path).expect("install local archive");
+    let package_store_dir = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("local"),
+    );
+    let activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
+    assert!(package_store_dir.exists());
+    assert!(activation_path.exists());
+
+    let remove_plan = app
+        .remove_plan(RemoveRequest {
+            package_id: package_id("source-code-pro"),
+        })
+        .expect("plan remove");
+    let report = app
+        .apply_remove(
+            remove_plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &CancelOnCheck::new(4),
+        )
+        .expect("remove should finish once mutation has started");
+
+    assert!(report.removed);
+    assert!(!activation_path.exists());
+    assert!(!package_store_dir.exists());
+    assert!(ManifestStore::read_or_empty(&paths.manifest_path())
+        .expect("read manifest")
+        .get_package(&package_id("source-code-pro"))
+        .is_none());
 }
 
 #[test]

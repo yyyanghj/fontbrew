@@ -427,8 +427,25 @@ pub trait ProgressSink {
     fn emit(&mut self, event: ProgressEvent);
 }
 
-pub trait CancellationToken {
+pub trait CancellationToken: Send + Sync {
     fn is_cancelled(&self) -> bool;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoCancellation;
+
+impl CancellationToken for NoCancellation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+pub(crate) fn ensure_not_cancelled(cancellation: &dyn CancellationToken) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(FontbrewError::Cancelled);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
