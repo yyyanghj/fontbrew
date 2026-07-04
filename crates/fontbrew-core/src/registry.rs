@@ -22,7 +22,7 @@ use crate::{
 
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
 const SUPPORTED_REQUIRED_BEHAVIORS: &[&str] = &["github", "asset-globs"];
-const DEFAULT_REGISTRY_SNAPSHOT: &str = include_str!("default_registry.json");
+const DEFAULT_REGISTRY_SNAPSHOT: &str = include_str!("registry/default_registry.json");
 
 pub const REGISTRY_URL_ENV_VAR: &str = "FONTBREW_REGISTRY_URL";
 

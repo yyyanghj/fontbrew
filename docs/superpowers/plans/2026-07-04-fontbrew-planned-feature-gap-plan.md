@@ -66,12 +66,12 @@ The current config exposes `registry.auto_update` and `network.metadata_ttl_hour
 
 ### Files
 
-- `crates/fontbrew-core/src/app/mod.rs`
-- `crates/fontbrew-core/src/config/mod.rs`
-- `crates/fontbrew-core/src/providers/mod.rs`
-- `crates/fontbrew-core/src/registry/mod.rs`
-- `crates/fontbrew-core/src/update/mod.rs`
-- `crates/fontbrew-cli/src/cli/mod.rs`
+- `crates/fontbrew-core/src/app.rs`
+- `crates/fontbrew-core/src/config.rs`
+- `crates/fontbrew-core/src/providers.rs`
+- `crates/fontbrew-core/src/registry.rs`
+- `crates/fontbrew-core/src/update.rs`
+- `crates/fontbrew-cli/src/cli.rs`
 - reporter tests and core provider/search/outdated tests
 
 ### Acceptance Criteria
@@ -137,9 +137,9 @@ Keep the schema conservative:
 
 ### Files
 
-- `crates/fontbrew-core/src/registry/mod.rs`
-- `crates/fontbrew-core/src/install/mod.rs`
-- `crates/fontbrew-core/src/update/mod.rs`
+- `crates/fontbrew-core/src/registry.rs`
+- `crates/fontbrew-core/src/install.rs`
+- `crates/fontbrew-core/src/update.rs`
 - `crates/fontbrew-core/tests/registry.rs`
 - `crates/fontbrew-core/tests/github_install.rs`
 - `crates/fontbrew-core/tests/update.rs`

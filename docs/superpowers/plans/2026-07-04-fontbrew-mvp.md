@@ -30,33 +30,33 @@ crates/
     Cargo.toml
     src/
       lib.rs
-      app/mod.rs
-      model/mod.rs
+      app.rs
+      model.rs
       error.rs
-      config/mod.rs
-      manifest/mod.rs
-      registry/mod.rs
-      sources/mod.rs
-      fetch/mod.rs
-      archives/mod.rs
-      fonts/mod.rs
-      install/mod.rs
-      activation/mod.rs
-      update/mod.rs
-      platform/mod.rs
-      fs/mod.rs
-      tasks/mod.rs
-      version/mod.rs
+      config.rs
+      manifest.rs
+      registry.rs
+      sources.rs
+      fetch.rs
+      archives.rs
+      fonts.rs
+      install.rs
+      activation.rs
+      update.rs
+      platform.rs
+      fs.rs
+      tasks.rs
+      version.rs
   fontbrew-cli/
     Cargo.toml
     src/
       main.rs
-      cli/mod.rs
-      reporter/mod.rs
+      cli.rs
+      reporter.rs
       reporter/human.rs
       reporter/json.rs
-      confirm/mod.rs
-      progress/mod.rs
+      confirm.rs
+      progress.rs
       exit.rs
 fixtures/
   fonts/
@@ -91,8 +91,8 @@ tests/
 ## Task 2: Define Core Models, Errors, and App Boundary
 
 **Files:**
-- Create: `crates/fontbrew-core/src/app/mod.rs`
-- Create: `crates/fontbrew-core/src/model/mod.rs`
+- Create: `crates/fontbrew-core/src/app.rs`
+- Create: `crates/fontbrew-core/src/model.rs`
 - Create: `crates/fontbrew-core/src/error.rs`
 - Modify: `crates/fontbrew-core/src/lib.rs`
 
@@ -103,7 +103,7 @@ tests/
 - [ ] Define `FontbrewError` with `thiserror`; include variants for already installed, ambiguous assets, conflict, execution policy required, no update source, identity mismatch, archive rejected, registry validation, I/O, network, and font parse errors.
 - [ ] Add `FontbrewApp` with stub methods returning structured `NotImplemented` errors only where needed.
 - [ ] Ensure frontend-facing models derive `Debug`, `Clone` where useful, and `Serialize` for JSON/report use.
-- [ ] Keep persistent manifest models out of `model/mod.rs`.
+- [ ] Keep persistent manifest models out of `model.rs`.
 - [ ] Run `cargo test --workspace`.
 - [ ] Commit: `feat: define core app boundary`.
 
@@ -116,9 +116,9 @@ tests/
 ## Task 3: Implement Path Resolution, Config, Atomic Writes, and File Locking
 
 **Files:**
-- Create: `crates/fontbrew-core/src/platform/mod.rs`
-- Create: `crates/fontbrew-core/src/config/mod.rs`
-- Create: `crates/fontbrew-core/src/fs/mod.rs`
+- Create: `crates/fontbrew-core/src/platform.rs`
+- Create: `crates/fontbrew-core/src/config.rs`
+- Create: `crates/fontbrew-core/src/fs.rs`
 - Modify: `crates/fontbrew-core/Cargo.toml`
 
 - [ ] Add `directories`-based path resolution for managed store, manifest, registry snapshot, provider metadata directory, config path, staging directory, package store, and activation directory.
@@ -141,8 +141,8 @@ tests/
 ## Task 4: Implement Package ID and Version Utilities
 
 **Files:**
-- Create: `crates/fontbrew-core/src/version/mod.rs`
-- Modify: `crates/fontbrew-core/src/model/mod.rs`
+- Create: `crates/fontbrew-core/src/version.rs`
+- Modify: `crates/fontbrew-core/src/model.rs`
 
 - [ ] Implement lowercase ASCII kebab-case package ID validation and normalization.
 - [ ] Reject unsafe IDs containing separators, uppercase, non-ASCII, empty components, leading/trailing hyphens, or repeated hyphens.
@@ -162,7 +162,7 @@ tests/
 ## Task 5: Build the Font Metadata Spike
 
 **Files:**
-- Create: `crates/fontbrew-core/src/fonts/mod.rs`
+- Create: `crates/fontbrew-core/src/fonts.rs`
 - Create: `fixtures/fonts/README.md`
 - Add: small open-source fixture fonts under `fixtures/fonts/`
 - Modify: `crates/fontbrew-core/Cargo.toml`
@@ -188,7 +188,7 @@ tests/
 ## Task 6: Implement Safe ZIP Archive Extraction
 
 **Files:**
-- Create: `crates/fontbrew-core/src/archives/mod.rs`
+- Create: `crates/fontbrew-core/src/archives.rs`
 - Modify: `crates/fontbrew-core/Cargo.toml`
 
 - [ ] Add the `zip` crate.
@@ -210,8 +210,8 @@ tests/
 ## Task 7: Implement Manifest V1 Persistence
 
 **Files:**
-- Create: `crates/fontbrew-core/src/manifest/mod.rs`
-- Modify: `crates/fontbrew-core/src/fs/mod.rs`
+- Create: `crates/fontbrew-core/src/manifest.rs`
+- Modify: `crates/fontbrew-core/src/fs.rs`
 
 - [ ] Define separate `ManifestV1` persistence models.
 - [ ] Include `schemaVersion`, package records, source/update source, families, font files, activation artifacts, installed timestamp, and active version.
@@ -231,7 +231,7 @@ tests/
 ## Task 8: Implement Activation Strategy and macOS Activation Spike
 
 **Files:**
-- Create: `crates/fontbrew-core/src/activation/mod.rs`
+- Create: `crates/fontbrew-core/src/activation.rs`
 - Create: `docs/research/macos-activation-spike.md`
 
 - [ ] Implement `ActivationStrategy` enum with `Symlink` and internal space for future `Copy`.
@@ -253,11 +253,11 @@ tests/
 ## Task 9: Implement Local Archive Install/List/Info/Remove Vertical Slice
 
 **Files:**
-- Create: `crates/fontbrew-core/src/install/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
-- Modify: `crates/fontbrew-core/src/model/mod.rs`
-- Modify: `crates/fontbrew-core/src/manifest/mod.rs`
-- Modify: `crates/fontbrew-core/src/activation/mod.rs`
+- Create: `crates/fontbrew-core/src/install.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
+- Modify: `crates/fontbrew-core/src/model.rs`
+- Modify: `crates/fontbrew-core/src/manifest.rs`
+- Modify: `crates/fontbrew-core/src/activation.rs`
 
 - [ ] Implement local archive source resolution.
 - [ ] Implement install plan for a local archive, including staging, archive extraction, font metadata parsing, package family grouping, package ID derivation, and conflict detection.
@@ -280,12 +280,12 @@ tests/
 ## Task 10: Build CLI Commands, Reporter, JSON Mode, and Prompt Handling
 
 **Files:**
-- Create: `crates/fontbrew-cli/src/cli/mod.rs`
-- Create: `crates/fontbrew-cli/src/reporter/mod.rs`
+- Create: `crates/fontbrew-cli/src/cli.rs`
+- Create: `crates/fontbrew-cli/src/reporter.rs`
 - Create: `crates/fontbrew-cli/src/reporter/human.rs`
 - Create: `crates/fontbrew-cli/src/reporter/json.rs`
-- Create: `crates/fontbrew-cli/src/confirm/mod.rs`
-- Create: `crates/fontbrew-cli/src/progress/mod.rs`
+- Create: `crates/fontbrew-cli/src/confirm.rs`
+- Create: `crates/fontbrew-cli/src/progress.rs`
 - Create: `crates/fontbrew-cli/src/exit.rs`
 - Modify: `crates/fontbrew-cli/src/main.rs`
 - Modify: `crates/fontbrew-cli/Cargo.toml`
@@ -311,10 +311,10 @@ tests/
 ## Task 11: Implement Registry Snapshot and Registry Short-Name Install
 
 **Files:**
-- Create: `crates/fontbrew-core/src/registry/mod.rs`
-- Modify: `crates/fontbrew-core/src/sources/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
-- Modify: `crates/fontbrew-cli/src/cli/mod.rs`
+- Create: `crates/fontbrew-core/src/registry.rs`
+- Modify: `crates/fontbrew-core/src/sources.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
+- Modify: `crates/fontbrew-cli/src/cli.rs`
 
 - [ ] Define `registry.json` v1 persistence structs separate from report models.
 - [ ] Implement schema validation for package IDs, source types, GitHub repo syntax, glob patterns, required fields, and unknown required behavior.
@@ -335,9 +335,9 @@ tests/
 ## Task 12: Implement GitHub Release Resolution and Asset Fetching
 
 **Files:**
-- Create: `crates/fontbrew-core/src/sources/mod.rs`
-- Create: `crates/fontbrew-core/src/fetch/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
+- Create: `crates/fontbrew-core/src/sources.rs`
+- Create: `crates/fontbrew-core/src/fetch.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
 - Modify: `crates/fontbrew-core/Cargo.toml`
 
 - [ ] Add `reqwest` blocking HTTP adapter behind an `HttpClient` interface.
@@ -361,10 +361,10 @@ tests/
 ## Task 13: Implement Search and Outdated for Registry/GitHub/Local
 
 **Files:**
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
-- Modify: `crates/fontbrew-core/src/registry/mod.rs`
-- Modify: `crates/fontbrew-core/src/update/mod.rs`
-- Modify: `crates/fontbrew-cli/src/cli/mod.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
+- Modify: `crates/fontbrew-core/src/registry.rs`
+- Modify: `crates/fontbrew-core/src/update.rs`
+- Modify: `crates/fontbrew-cli/src/cli.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/human.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/json.rs`
 
@@ -386,10 +386,10 @@ tests/
 ## Task 14: Implement Conservative Update with Bounded Parallel Prepare
 
 **Files:**
-- Create: `crates/fontbrew-core/src/update/mod.rs`
-- Create: `crates/fontbrew-core/src/tasks/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
-- Modify: `crates/fontbrew-cli/src/cli/mod.rs`
+- Create: `crates/fontbrew-core/src/update.rs`
+- Create: `crates/fontbrew-core/src/tasks.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
+- Modify: `crates/fontbrew-cli/src/cli.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/human.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/json.rs`
 
@@ -414,9 +414,9 @@ tests/
 ## Task 15: Add Conflict Detection and Safety Polishing
 
 **Files:**
-- Modify: `crates/fontbrew-core/src/install/mod.rs`
-- Modify: `crates/fontbrew-core/src/activation/mod.rs`
-- Modify: `crates/fontbrew-core/src/model/mod.rs`
+- Modify: `crates/fontbrew-core/src/install.rs`
+- Modify: `crates/fontbrew-core/src/activation.rs`
+- Modify: `crates/fontbrew-core/src/model.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/human.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/json.rs`
 
@@ -438,9 +438,9 @@ tests/
 ## Task 16: Add Config Commands and Format Preference Overrides
 
 **Files:**
-- Modify: `crates/fontbrew-core/src/config/mod.rs`
-- Modify: `crates/fontbrew-core/src/install/mod.rs`
-- Modify: `crates/fontbrew-cli/src/cli/mod.rs`
+- Modify: `crates/fontbrew-core/src/config.rs`
+- Modify: `crates/fontbrew-core/src/install.rs`
+- Modify: `crates/fontbrew-cli/src/cli.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/human.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/json.rs`
 
@@ -462,8 +462,8 @@ tests/
 ## Task 17: Add Cancellation, Staging Cleanup, and Operational Hardening
 
 **Files:**
-- Modify: `crates/fontbrew-core/src/fs/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
+- Modify: `crates/fontbrew-core/src/fs.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
 - Modify: `crates/fontbrew-cli/src/main.rs`
 - Modify: `crates/fontbrew-cli/Cargo.toml`
 
@@ -484,10 +484,10 @@ tests/
 ## Task 18: Add Provider Adapter Interfaces, Then Implement Fontsource
 
 **Files:**
-- Create: `crates/fontbrew-core/src/providers/mod.rs`
-- Modify: `crates/fontbrew-core/src/sources/mod.rs`
-- Modify: `crates/fontbrew-core/src/app/mod.rs`
-- Modify: `crates/fontbrew-cli/src/cli/mod.rs`
+- Create: `crates/fontbrew-core/src/providers.rs`
+- Modify: `crates/fontbrew-core/src/sources.rs`
+- Modify: `crates/fontbrew-core/src/app.rs`
+- Modify: `crates/fontbrew-cli/src/cli.rs`
 
 - [ ] Add provider adapter interface after registry/GitHub/local flows are stable.
 - [ ] Implement provider metadata snapshot storage without downloaded font cache.
@@ -506,8 +506,8 @@ tests/
 ## Task 19: Implement Google Fonts Provider
 
 **Files:**
-- Modify: `crates/fontbrew-core/src/providers/mod.rs`
-- Modify: `crates/fontbrew-core/src/config/mod.rs`
+- Modify: `crates/fontbrew-core/src/providers.rs`
+- Modify: `crates/fontbrew-core/src/config.rs`
 - Modify: `crates/fontbrew-cli/src/reporter/human.rs`
 
 - [ ] Add Google Fonts adapter using API key from environment only.

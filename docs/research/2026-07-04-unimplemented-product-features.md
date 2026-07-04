@@ -37,10 +37,10 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- 配置项已经存在：`registry.auto_update`、`network.metadata_ttl_hours`、`network.update_concurrency` 可以读写（`crates/fontbrew-core/src/config/mod.rs:210-280`）。
-- 旧的 search refresh 参数只调用 `registry_update()`，没有刷新 provider metadata；这属于旧 flag 路径，应被默认刷新行为替代（`crates/fontbrew-core/src/app/mod.rs:189-198`）。
-- Fontsource/Google provider 目前仍有 offline search 分支；这属于旧用户模式，应收敛为默认联网刷新 metadata（`crates/fontbrew-core/src/providers/mod.rs:57-98`、`crates/fontbrew-core/src/providers/mod.rs:169-187`）。
-- `install_plan_with_cancellation` 直接解析 registry snapshot 或 provider/GitHub 源，没有看到 `request.refresh` 或 `registry.auto_update` 的消费路径（`crates/fontbrew-core/src/app/mod.rs:56-109`）。
+- 配置项已经存在：`registry.auto_update`、`network.metadata_ttl_hours`、`network.update_concurrency` 可以读写（`crates/fontbrew-core/src/config.rs:210-280`）。
+- 旧的 search refresh 参数只调用 `registry_update()`，没有刷新 provider metadata；这属于旧 flag 路径，应被默认刷新行为替代（`crates/fontbrew-core/src/app.rs:189-198`）。
+- Fontsource/Google provider 目前仍有 offline search 分支；这属于旧用户模式，应收敛为默认联网刷新 metadata（`crates/fontbrew-core/src/providers.rs:57-98`、`crates/fontbrew-core/src/providers.rs:169-187`）。
+- `install_plan_with_cancellation` 直接解析 registry snapshot 或 provider/GitHub 源，没有看到 `request.refresh` 或 `registry.auto_update` 的消费路径（`crates/fontbrew-core/src/app.rs:56-109`）。
 
 影响：
 
@@ -63,7 +63,7 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- CLI 仍有部分手动 refresh/offline 参数和 request 字段（`crates/fontbrew-cli/src/cli/mod.rs:86-162`）。
+- CLI 仍有部分手动 refresh/offline 参数和 request 字段（`crates/fontbrew-cli/src/cli.rs:86-162`）。
 
 影响：
 
@@ -87,9 +87,9 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- registry record 保存 `families`，但 recipe 生成后主要用于 search 展示；安装路径使用 recipe 的 package id、asset selector 和 format preference，没有使用 recipe families 来筛选或校验安装边界（`crates/fontbrew-core/src/registry/mod.rs:250-330`、`crates/fontbrew-core/src/app/mod.rs:206-215`）。
-- archive 解析会收集所有 family，然后在没有 `package_id_hint` 时取排序后的第一个 family 生成 package id；没有在多 family 且无 recipe 时直接拒绝（`crates/fontbrew-core/src/install/mod.rs:1090-1135`）。
-- 安装记录会保留 selected files 中的所有 families（`crates/fontbrew-core/src/install/mod.rs:1158-1207`）。
+- registry record 保存 `families`，但 recipe 生成后主要用于 search 展示；安装路径使用 recipe 的 package id、asset selector 和 format preference，没有使用 recipe families 来筛选或校验安装边界（`crates/fontbrew-core/src/registry.rs:250-330`、`crates/fontbrew-core/src/app.rs:206-215`）。
+- archive 解析会收集所有 family，然后在没有 `package_id_hint` 时取排序后的第一个 family 生成 package id；没有在多 family 且无 recipe 时直接拒绝（`crates/fontbrew-core/src/install.rs:1090-1135`）。
+- 安装记录会保留 selected files 中的所有 families（`crates/fontbrew-core/src/install.rs:1158-1207`）。
 
 影响：
 
@@ -112,8 +112,8 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- CLI 已暴露旧的 install refresh 参数（`crates/fontbrew-cli/src/cli/mod.rs:86-120`）。
-- `InstallRequest` 包含旧的 `refresh` 字段，但 `FontbrewApp::install_plan_with_cancellation` 分发到 local/registry/GitHub/provider install 时没有统一默认刷新 registry/provider metadata（`crates/fontbrew-core/src/app/mod.rs:56-109`）。
+- CLI 已暴露旧的 install refresh 参数（`crates/fontbrew-cli/src/cli.rs:86-120`）。
+- `InstallRequest` 包含旧的 `refresh` 字段，但 `FontbrewApp::install_plan_with_cancellation` 分发到 local/registry/GitHub/provider install 时没有统一默认刷新 registry/provider metadata（`crates/fontbrew-core/src/app.rs:56-109`）。
 - provider install 当前总是在线 fetch detail；registry short-name install则依赖已有 snapshot。
 
 影响：
@@ -136,9 +136,9 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- `install.activation_strategy` 是可读写配置项（`crates/fontbrew-core/src/config/mod.rs:210-280`）。
-- parser 接受 `copy`（`crates/fontbrew-core/src/config/mod.rs:340-344`）。
-- 但 apply/deactivate 遇到 `ActivationStrategy::Copy` 会返回 `NotImplemented`（`crates/fontbrew-core/src/activation/mod.rs:124-149`）。
+- `install.activation_strategy` 是可读写配置项（`crates/fontbrew-core/src/config.rs:210-280`）。
+- parser 接受 `copy`（`crates/fontbrew-core/src/config.rs:340-344`）。
+- 但 apply/deactivate 遇到 `ActivationStrategy::Copy` 会返回 `NotImplemented`（`crates/fontbrew-core/src/activation.rs:124-149`）。
 
 影响：
 
@@ -160,8 +160,8 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- CLI `install` 参数没有 `--id`（`crates/fontbrew-cli/src/cli/mod.rs:86-120`）。
-- local archive 无 package id hint 时用第一个 family name normalize 成 package id；normalize 失败会直接报错（`crates/fontbrew-core/src/install/mod.rs:1125-1135`）。
+- CLI `install` 参数没有 `--id`（`crates/fontbrew-cli/src/cli.rs:86-120`）。
+- local archive 无 package id hint 时用第一个 family name normalize 成 package id；normalize 失败会直接报错（`crates/fontbrew-core/src/install.rs:1125-1135`）。
 
 影响：
 
@@ -182,7 +182,7 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 当前实现：
 
-- `RegistryStatusReport` 包含 available、snapshot path、registry updated at、snapshot modified at、package count，但不包含 schema version（`crates/fontbrew-core/src/model/mod.rs:676-683`）。
+- `RegistryStatusReport` 包含 available、snapshot path、registry updated at、snapshot modified at、package count，但不包含 schema version（`crates/fontbrew-core/src/model.rs:676-683`）。
 
 影响：
 
@@ -197,7 +197,7 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 以下内容在产品规格中明确不是 MVP，或已经有当前等价实现，所以不列为缺口：
 
 - 产品名：当前规格和源码使用 `Fontbrew/fontbrew`，不列为功能缺口。
-- `uninstall`：当前 CLI 使用 `remove` 作为主命令，并提供 `uninstall` alias（`crates/fontbrew-cli/src/cli/mod.rs:60-64`）。
+- `uninstall`：当前 CLI 使用 `remove` 作为主命令，并提供 `uninstall` alias（`crates/fontbrew-cli/src/cli.rs:60-64`）。
 - GUI、跨平台 activation、rollback、download cache、项目级 lockfile、显式 activate/deactivate、任意 GitHub 搜索、商业字体授权管理：均为非 MVP。
 - 安全主线：不管理系统字体、不接管手动字体、不删除非 managed 字体、冲突需要显式 consent，这些在产品规格中是核心边界，当前源码和测试已有覆盖。
 

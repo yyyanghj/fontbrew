@@ -212,40 +212,39 @@ MVP can implement CLI Ctrl-C with an atomic flag. GUI cancellation can be added 
 Recommended `fontbrew-core/src` layout:
 
 ```text
-app/
-  mod.rs                 # FontbrewApp use cases
-model/
-  mod.rs                 # frontend-facing request/plan/report models
+app.rs                   # FontbrewApp use cases
+model.rs                 # frontend-facing request/plan/report models
 error.rs                 # structured FontbrewError
-config/
-manifest/
+config.rs
+manifest.rs
+registry.rs
 registry/
-providers/
-sources/
-fetch/
-archives/
-fonts/
-install/
-activation/
-update/
-platform/
-fs/
-tasks/
-version/
+  default_registry.json
+providers.rs
+sources.rs
+fetch.rs
+archives.rs
+fonts.rs
+install.rs
+activation.rs
+update.rs
+platform.rs
+fs.rs
+tasks.rs
+version.rs
 ```
 
 Recommended `fontbrew-cli/src` layout:
 
 ```text
 main.rs
-cli/
-  mod.rs                 # clap command definitions
+cli.rs                   # clap command definitions
+reporter.rs
 reporter/
-  mod.rs
   human.rs
   json.rs
-confirm/
-progress/
+confirm.rs
+progress.rs
 exit.rs
 ```
 
