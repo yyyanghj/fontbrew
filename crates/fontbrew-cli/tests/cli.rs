@@ -6,6 +6,10 @@ use std::{
 };
 
 use assert_cmd::Command;
+use fontbrew_core::{
+    manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
+    FamilyName, PackageId, PackageVersion, ProviderKind,
+};
 use predicates::prelude::*;
 use serde_json::Value;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -67,6 +71,40 @@ fn staging_is_empty_or_absent(home: &Path) -> bool {
             "could not read staging dir {}: {error}",
             staging_dir.display()
         ),
+    }
+}
+
+fn package_id(id: &str) -> PackageId {
+    PackageId::parse(id).expect("test package id should parse")
+}
+
+fn write_manifest(home: &Path, records: Vec<ManifestPackageRecord>) {
+    let manifest_path = home.join(".local/share/fontbrew/manifest.json");
+    fs::create_dir_all(manifest_path.parent().expect("manifest should have parent"))
+        .expect("create manifest directory");
+
+    let mut manifest = ManifestV1::empty();
+    for record in records {
+        manifest.insert_package(record).expect("insert package");
+    }
+
+    ManifestStore::write(&manifest_path, &manifest).expect("write manifest");
+}
+
+fn manifest_record(id: &str, version: &str, families: Vec<&str>) -> ManifestPackageRecord {
+    ManifestPackageRecord {
+        package_id: package_id(id),
+        version: PackageVersion::new(version),
+        source: ManifestSource::Provider {
+            provider: ProviderKind::Fontsource,
+            id: id.to_string(),
+        },
+        update_source: None,
+        families: families.into_iter().map(FamilyName::new).collect(),
+        font_files: Vec::new(),
+        activation_artifacts: Vec::new(),
+        installed_at: "2026-07-05T00:00:00Z".to_string(),
+        active_version: Some(PackageVersion::new(version)),
     }
 }
 
@@ -179,6 +217,50 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
         .success()
         .stdout(predicate::str::contains("No managed packages installed."))
         .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn human_list_summarizes_many_families_to_keep_rows_scannable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    write_manifest(
+        &home,
+        vec![
+            manifest_record("geist", "v1.7.2", vec!["Geist"]),
+            manifest_record(
+                "inter",
+                "v20",
+                vec![
+                    "Inter",
+                    "Inter Black",
+                    "Inter ExtraBold",
+                    "Inter ExtraLight",
+                    "Inter Light",
+                    "Inter Medium",
+                    "Inter SemiBold",
+                    "Inter Thin",
+                ],
+            ),
+        ],
+    );
+
+    let output = fontbrew(&home)
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+
+    assert!(stdout.contains("inter"));
+    assert!(stdout.contains("Inter (+7 more)"));
+    assert!(!stdout.contains("Inter Black"));
+    assert!(
+        stdout.lines().all(|line| line.len() <= 80),
+        "list output should stay readable in a normal terminal:\n{stdout}"
+    );
 }
 
 #[test]

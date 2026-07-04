@@ -87,7 +87,7 @@ impl Reporter for HumanReporter {
                 [
                     package.package_id.as_str().to_string(),
                     package.version.as_str().to_string(),
-                    families_label(&package.families),
+                    families_overview_label(&package.families),
                     if package.activated {
                         "active".to_string()
                     } else {
@@ -470,6 +470,18 @@ fn families_label(families: &[FamilyName]) -> String {
         .map(FamilyName::as_str)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn families_overview_label(families: &[FamilyName]) -> String {
+    let Some(first_family) = families.first() else {
+        return "unknown family".to_string();
+    };
+
+    if families.len() == 1 {
+        return first_family.as_str().to_string();
+    }
+
+    format!("{} (+{} more)", first_family.as_str(), families.len() - 1)
 }
 
 fn package_status_label(activated: bool, managed: bool) -> String {
