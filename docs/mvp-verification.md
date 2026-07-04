@@ -54,11 +54,11 @@ HOME="$HOME_DIR" target/debug/fontbrew list
 HOME="$HOME_DIR" target/debug/fontbrew info source-code-pro
 HOME="$HOME_DIR" target/debug/fontbrew remove source-code-pro
 FONTBREW_REGISTRY_URL="file://$REGISTRY" HOME="$HOME_DIR" target/debug/fontbrew registry update
-HOME="$HOME_DIR" target/debug/fontbrew search inter --offline
+HOME="$HOME_DIR" target/debug/fontbrew search inter
 HOME="$HOME_DIR" target/debug/fontbrew --quiet install inter
 HOME="$HOME_DIR" target/debug/fontbrew --quiet install --format ttf inter
 HOME="$HOME_DIR" target/debug/fontbrew info inter
-HOME="$HOME_DIR" target/debug/fontbrew outdated --offline inter
+HOME="$HOME_DIR" target/debug/fontbrew outdated inter
 HOME="$HOME_DIR" target/debug/fontbrew update --dry-run inter
 HOME="$HOME_DIR" target/debug/fontbrew remove --dry-run inter
 ```
@@ -70,11 +70,11 @@ Observed results:
 - `info source-code-pro` showed the expected family and source.
 - `remove source-code-pro` reported removal.
 - `registry update` loaded a one-package test registry snapshot from `file://.../registry.json`.
-- `search inter --offline` returned `inter` as an installable registry result.
+- `search inter` returned `inter` as an installable registry result.
 - `install inter` without a format override refused to choose because Inter's OTF, TTF, and TTC coverage differs.
 - `install --format ttf inter` installed Inter from GitHub release `v4.1`.
 - `info inter` reported source `registry:inter`, update source `github:rsms/inter`, activation state, managed state, update availability as `unknown`, installed files, and activation artifacts.
-- `outdated --offline inter` reported that offline mode cannot check GitHub releases.
+- `outdated inter` reported the update status for the GitHub-backed package.
 - `update --dry-run inter` completed with `No updates prepared.`
 - `remove --dry-run` reports the managed font files and activation artifacts that would be removed without mutating the package.
 
@@ -118,7 +118,7 @@ For the smoke-installed Inter package:
 
 - `fontbrew list` showed the managed package ID, version, families, and active state.
 - `fontbrew info inter` showed source, update source, version, families, activation state, managed state, update availability, installed files, and activation artifacts.
-- `fontbrew outdated --offline inter` explained why update status could not be checked without network access.
+- `fontbrew outdated inter` reported the update status for the GitHub-backed package.
 - `fontbrew update --dry-run inter` reported the update plan without applying changes.
 - `fontbrew remove --dry-run inter` reported the managed font files and activation artifacts that would be removed without applying changes.
 - Manifest-backed remove/update behavior is covered by automated CLI and core tests using injected paths.

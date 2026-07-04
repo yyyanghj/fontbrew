@@ -20,63 +20,60 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 仍然没完全实现的功能主要集中在三类：
 
-- metadata 自动刷新策略：配置项和部分 flag 存在，但 TTL/auto-update 行为没有真正串起来。
+- metadata 自动刷新策略：配置项和部分旧 flag 存在，但需要联网的命令还没有统一默认刷新 registry/provider metadata。
 - registry recipe 的 package boundary 覆盖：文档说 recipe 可以覆盖 family grouping，但安装实现没有用 recipe families 约束或筛选安装边界。
-- 若干规格/设计层细节：`update --offline/--refresh`、`outdated --refresh`、copy activation、local archive `--id` 等还没有产品化。
+- 若干规格/设计层细节：copy activation、local archive `--id` 等还没有产品化。
 
 ## 未实现或部分实现清单
 
-### 1. Registry/provider metadata 的 TTL 和自动刷新
+### 1. Registry/provider metadata 的自动刷新
 
 状态：部分实现。
 
 计划/规格要求：
 
-- 产品规格写明 registry/provider metadata 有 24 小时 freshness window，`--refresh` 强制刷新，`--offline` 只使用本地 snapshot，并且 `search`、`install`、`outdated`、`update` 都可能在 stale 时刷新 metadata。
-- 产品规格的 install/update 流程也提到刷新 registry/provider metadata。
+- 产品规格写明需要 registry/provider metadata 的命令应自动刷新 metadata，不再暴露用户可见的 refresh/offline 模式。
+- 产品规格的 install/outdated 流程也需要使用最新 registry/provider metadata。
 
 当前实现：
 
 - 配置项已经存在：`registry.auto_update`、`network.metadata_ttl_hours`、`network.update_concurrency` 可以读写（`crates/fontbrew-core/src/config/mod.rs:210-280`）。
-- `search --refresh` 只调用 `registry_update()`，没有刷新 provider metadata，也没有根据 TTL 判定是否 stale（`crates/fontbrew-core/src/app/mod.rs:189-198`）。
-- Fontsource/Google provider 在非 offline search 时总是请求网络并写 snapshot，在 offline 时只读 snapshot；没有 TTL 判断（`crates/fontbrew-core/src/providers/mod.rs:57-98`、`crates/fontbrew-core/src/providers/mod.rs:169-187`）。
+- 旧的 search refresh 参数只调用 `registry_update()`，没有刷新 provider metadata；这属于旧 flag 路径，应被默认刷新行为替代（`crates/fontbrew-core/src/app/mod.rs:189-198`）。
+- Fontsource/Google provider 目前仍有 offline search 分支；这属于旧用户模式，应收敛为默认联网刷新 metadata（`crates/fontbrew-core/src/providers/mod.rs:57-98`、`crates/fontbrew-core/src/providers/mod.rs:169-187`）。
 - `install_plan_with_cancellation` 直接解析 registry snapshot 或 provider/GitHub 源，没有看到 `request.refresh` 或 `registry.auto_update` 的消费路径（`crates/fontbrew-core/src/app/mod.rs:56-109`）。
 
 影响：
 
-- 用户能手动 `fontbrew registry update`，也能 `search --refresh` 刷 registry，但无法获得 spec 描述的“按 TTL 自动刷新”体验。
-- `network.metadata_ttl_hours` 和 `registry.auto_update` 当前更像已持久化的未来配置，不是完整生效的产品能力。
+- 用户能手动 `fontbrew registry update`，但需要联网或 metadata 的命令还没有统一默认刷新 registry/provider metadata。
+- `network.metadata_ttl_hours` 和 `registry.auto_update` 当前更像已持久化的旧策略配置，不是完整生效的产品能力。
 
 建议：
 
-- 明确定义 freshness metadata 存储位置和判断规则。
-- 在 `search/install/outdated/update` 的 source resolution 前统一调用 metadata refresh policy。
-- `--refresh` 需要同时覆盖 registry 和 provider metadata；`--offline` 保持只读本地 snapshot。
+- 删除用户可见 refresh/offline 模式。
+- 在 `search/install/outdated` 的 source resolution 前统一默认刷新 registry/provider metadata。
+- 保留 provider metadata snapshot 作为内部缓存/记录，不作为用户可选 offline 模式。
 
-### 2. `update`/`outdated` 的 refresh/offline flag 覆盖不完整
+### 2. refresh/offline CLI surface 需要移除
 
 状态：部分实现。
 
 计划/规格要求：
 
-- `outdated` useful flags 包括 `--refresh` 和 `--offline`。
-- `update` useful flags 包括 `--yes`、`--dry-run`、`--refresh`、`--offline`。
+- 产品规格不再规划手动 refresh/offline 用户 flag。
 
 当前实现：
 
-- CLI 的 `outdated` 只有 `--offline`，没有 `--refresh`（`crates/fontbrew-cli/src/cli/mod.rs:156-162`）。
-- CLI 的 `update` 只有 `--yes`、`--dry-run`、`--jobs`，没有 `--refresh` 或 `--offline`（`crates/fontbrew-cli/src/cli/mod.rs:164-176`）。
-- `update()` 组装 `UpdateRequest` 时把 `offline` 固定为 `false`，即 core 虽然有 `UpdateRequest.offline` 字段，CLI 用户无法启用它（`crates/fontbrew-cli/src/cli/mod.rs:396-412`）。
+- CLI 仍有部分手动 refresh/offline 参数和 request 字段（`crates/fontbrew-cli/src/cli/mod.rs:86-162`）。
 
 影响：
 
-- `outdated --offline` 已可用；`update --offline` 在 CLI 层不可用。
-- 用户无法对 `outdated`/`update` 强制刷新 metadata，也无法让 `update` 明确走 offline 语义。
+- CLI help 仍可能暴露已经不符合产品方向的手动 refresh/offline 模式。
 
 建议：
 
-- 给 `OutdatedArgs` 增加 `refresh`，给 `UpdateArgs` 增加 `refresh`/`offline`。
-- 和上一条 metadata policy 一起实现，否则 flag 只是形式完整。
+- 删除 `InstallArgs`、`SearchArgs`、`OutdatedArgs` 中的 refresh/offline 用户参数。
+- 删除或收敛 core request 中只服务于用户 refresh/offline 模式的字段。
+- 用默认刷新行为覆盖原先需要用户手动选择的路径。
 
 ### 3. Registry recipe 尚未真正覆盖 package boundary
 
@@ -105,29 +102,29 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 - 本地/GitHub 显式安装在发现多个 family 且没有 recipe/用户选择时，按 spec 返回保守错误。
 - 更新 identity validation 时同时使用 recipe family rules，而不只依赖 manifest 中旧 families。
 
-### 4. `install --refresh` flag 目前没有实质行为
+### 4. `install` 需要默认刷新 registry/provider metadata
 
 状态：部分实现。
 
 计划/规格要求：
 
-- `fontbrew install <source>` useful flags 包含 `--refresh`，默认流程也要求在需要时刷新 registry/provider metadata。
+- `fontbrew install <source>` 默认流程要求在需要时刷新 registry/provider metadata，不再通过手动 refresh 参数暴露给用户。
 
 当前实现：
 
-- CLI 已暴露 `install --refresh`（`crates/fontbrew-cli/src/cli/mod.rs:86-120`）。
-- `InstallRequest` 包含 `refresh` 字段，但 `FontbrewApp::install_plan_with_cancellation` 分发到 local/registry/GitHub/provider install 时没有先处理刷新（`crates/fontbrew-core/src/app/mod.rs:56-109`）。
+- CLI 已暴露旧的 install refresh 参数（`crates/fontbrew-cli/src/cli/mod.rs:86-120`）。
+- `InstallRequest` 包含旧的 `refresh` 字段，但 `FontbrewApp::install_plan_with_cancellation` 分发到 local/registry/GitHub/provider install 时没有统一默认刷新 registry/provider metadata（`crates/fontbrew-core/src/app/mod.rs:56-109`）。
 - provider install 当前总是在线 fetch detail；registry short-name install则依赖已有 snapshot。
 
 影响：
 
-- 对 registry short-name install，`--refresh` 不会先更新 registry snapshot。
-- 对 provider install，`--refresh` 与普通在线安装没有区别。
+- 对 registry short-name install，不会先默认更新 registry snapshot。
+- 对 provider install，metadata 刷新行为没有和 registry 刷新形成统一默认策略。
 
 建议：
 
-- 在 registry/provider source resolution 前处理 `request.refresh`。
-- 对 `--refresh --offline` 定义并拒绝冲突组合，和 search 一致。
+- 在 registry/provider source resolution 前默认刷新所需 metadata。
+- 删除旧 refresh/offline flag 的冲突处理需求。
 
 ### 5. Copy activation 只预留，未实现
 
@@ -206,8 +203,8 @@ MVP 主线能力已经基本实现：registry/GitHub/local/provider 安装，lis
 
 ## 优先级建议
 
-1. 补齐 metadata refresh policy：这是最容易让用户感知“配置无效/flag 无效”的缺口。
-2. 补齐 `update/outdated/install` 的 refresh/offline 行为：和第一项一起做，避免重复改 CLI/core request。
+1. 补齐默认 metadata refresh policy：这是最容易让用户感知“registry 没自动更新”的缺口。
+2. 删除 refresh/offline 用户 flag：和第一项一起做，避免继续扩大旧 CLI surface。
 3. 明确 registry package boundary recipe 语义：这是以后支持 Maple Mono、Nerd Font、CN/NF 等复杂发行包时的关键能力。
 4. 处理 copy activation 配置入口：要么禁用，要么实现，避免用户配置到未实现状态。
 5. 增加 local archive `--id` 和 registry status schema version：较小但能提升边界完整度。

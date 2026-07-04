@@ -46,11 +46,10 @@ fontbrew info some-font
 fontbrew remove some-font
 ```
 
-Refresh the registry snapshot and install a registry package:
+Search and install a registry package:
 
 ```bash
-fontbrew registry update
-fontbrew search inter --offline
+fontbrew search inter
 fontbrew install inter --format ttf
 ```
 

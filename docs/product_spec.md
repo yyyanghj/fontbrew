@@ -1,8 +1,4 @@
-# Fontbrew 产品规格
-
-最后更新：2026-07-04
-
-本文档描述 Fontbrew 当前 MVP 的产品规格。
+# Fontbrew Product Spec
 
 ## 1. 产品定义
 
@@ -170,7 +166,7 @@ Fontbrew 不碰它没有安装并记录的字体。即使发现同名 family 已
 | Source | Fontbrew 能解析为 package 的上游来源，例如 registry short name、provider name、GitHub repo 或 local archive。 |
 | Recipe | 描述一个 source 如何解析为 package 的 curated 规则，可覆盖默认 package boundary、release selection、asset selection 和 format preference。 |
 | Registry | Fontbrew 第一方 curated recipe index，提供稳定 short name 和可靠安装 recipe。 |
-| Registry Snapshot | CLI 本地保存的 registry JSON 副本，用于 short-name install、registry search 和有限 offline 行为。 |
+| Registry Snapshot | CLI 本地保存的 registry JSON 副本，用于 short-name install 和 registry search。 |
 | Search Provider | 第三方字体目录或 API，例如 Google Fonts、Fontsource。它们用于发现可安装 package，但不是 Fontbrew Registry。 |
 | Provider Metadata Snapshot | 本地保存的 provider metadata，只包含 metadata，不包含字体 archive 或 font binary。 |
 | Font File | 具体字体二进制文件，例如 `.ttf`、`.otf`、`.ttc`、`.otc`。 |
@@ -299,16 +295,15 @@ Fontbrew Registry v1 使用一个远程 `registry.json` 文件作为 curated rec
 
 ### 9.5 Provider metadata 只保存 metadata
 
-Fontbrew 可以保存 Google Fonts、Fontsource 等 provider 的 metadata snapshot，用于减少重复 API 调用和支持有限 offline 行为。这些 snapshot 不包含下载的字体 archive 或 font binary。
+Fontbrew 可以保存 Google Fonts、Fontsource 等 provider 的 metadata snapshot，用于减少重复 API 调用。这些 snapshot 不包含下载的字体 archive 或 font binary。
 
-默认产品规则是 registry/provider metadata 有 24 小时 freshness window，`--refresh` 强制刷新，`--offline` 只使用本地 snapshot。
+默认产品规则是需要 registry/provider metadata 的命令自动刷新 metadata。需要联网解析 registry、provider 或 update source 的命令不提供用户可见的 refresh/offline 模式。
 
-以下命令在 metadata stale 时可以触发 refresh policy：
+以下命令可以自动刷新 metadata：
 
 - `fontbrew search`
 - `fontbrew install`
 - `fontbrew outdated`
-- `fontbrew update`
 
 ### 9.6 GitHub source 必须显式
 
@@ -557,8 +552,6 @@ fontbrew install ./MapleMono.zip
 --asset <asset-name-or-pattern>
 --reinstall
 --yes
---refresh
---offline
 ```
 
 默认流程：
@@ -653,25 +646,22 @@ my-local-font  local archive, no update source
 
 更新一个 package 或所有可更新 managed package。
 
-`fontbrew update` 的主要语义是更新字体 package。Registry refresh 只是支持步骤，不是该命令的主要含义。
+`fontbrew update` 的主要语义是更新字体 package。Registry refresh 不作为该命令的用户可见 flag；需要 registry metadata 的命令应默认刷新 registry。
 
 默认流程：
 
-1. 按配置刷新 registry/provider metadata。
-2. 检查 update source。
-3. 构建 update plan。
-4. 展示目标版本和 skipped package。
-5. 要求用户确认。
-6. 使用 conservative two-phase replacement 应用更新。
-7. 展示结果 summary。
+1. 检查 update source。
+2. 构建 update plan。
+3. 展示目标版本和 skipped package。
+4. 要求用户确认。
+5. 使用 conservative two-phase replacement 应用更新。
+6. 展示结果 summary。
 
 常用 flags：
 
 ```bash
 --yes
 --dry-run
---refresh
---offline
 ```
 
 ### 11.7 `fontbrew remove <package>`
@@ -733,7 +723,6 @@ fontbrew config set install.format_preference otf,ttf,ttc,otc
 用户想安装 Inter：
 
 ```bash
-fontbrew registry update
 fontbrew install inter
 fontbrew info inter
 ```
@@ -872,7 +861,7 @@ MVP 可接受的条件是 macOS 用户可以：
 仍需注意的产品化差距：
 
 - Registry/provider metadata 的 TTL 和自动刷新策略尚未完整串联。
-- `install --refresh`、`outdated --refresh`、`update --refresh/--offline` 等 flag 行为需要和 metadata policy 一起补齐。
+- 需要联网或 metadata 的命令应默认刷新 registry/provider metadata，不再暴露 refresh/offline flag。
 - Registry recipe 对 package boundary 的覆盖还需要更明确的 family include/exclude/expected 语义。
 - Copy activation 是预留策略，当前不应被当作完整可用默认路径。
 - Local archive 缺少 `--id` 兜底，遇到无法安全 slug 化的 family name 时用户缺少手动指定 package ID 的入口。

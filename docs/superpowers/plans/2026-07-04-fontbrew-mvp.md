@@ -371,7 +371,7 @@ tests/
 - [ ] Implement registry search returning installable registry candidates.
 - [ ] Implement `outdated` for managed GitHub-backed packages.
 - [ ] Report local archive packages without update sources as `not_updatable`, not command failures.
-- [ ] Support `--refresh` and `--offline` where applicable for registry snapshot behavior.
+- [ ] Refresh registry metadata by default where registry snapshot behavior is needed.
 - [ ] Add CLI commands `search` and `outdated`.
 - [ ] Add tests for registry search, outdated GitHub package, local archive not-updatable report, and JSON outputs.
 - [ ] Run `cargo test --workspace`.
