@@ -104,11 +104,10 @@ mod tests {
                 provider: ProviderKind::Google,
                 id: "Inter".to_string(),
             },
+            package_id_override: None,
             format_preference: vec![FontFormat::Otf, FontFormat::Ttf],
             asset_selector: Some("*desktop*".to_string()),
             reinstall: true,
-            refresh: true,
-            offline: false,
         };
 
         let json = serde_json::to_value(&request).expect("install request should serialize");
@@ -118,22 +117,23 @@ mod tests {
         assert_eq!(json["format_preference"][0], "Otf");
         assert_eq!(json["asset_selector"], "*desktop*");
         assert_eq!(json["reinstall"], true);
-        assert_eq!(json["refresh"], true);
-        assert_eq!(json["offline"], false);
+        assert!(json.get("package_id_override").is_none());
+        assert!(json.get("refresh").is_none());
+        assert!(json.get("offline").is_none());
 
         let local_request = InstallRequest {
             source: InstallSource::LocalPath(PathBuf::from("/tmp/fonts.zip")),
+            package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: true,
         };
 
         let local_json =
             serde_json::to_value(&local_request).expect("local install request should serialize");
 
         assert_eq!(local_json["source"]["LocalPath"], "/tmp/fonts.zip");
+        assert_eq!(local_json["package_id_override"], "custom-local");
     }
 
     #[test]
@@ -196,11 +196,10 @@ mod tests {
                 provider: ProviderKind::Google,
                 id: "inter".to_string(),
             },
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         };
 
         let error = app

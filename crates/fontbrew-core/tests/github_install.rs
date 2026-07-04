@@ -13,7 +13,7 @@ use fontbrew_core::{
     fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
-    registry::{RegistrySnapshotStore, RegistrySnapshotV1},
+    registry::OFFICIAL_REGISTRY_URL,
     CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InstallRequest, InstallSource,
     PackageId, ProgressEvent, ProgressSink,
 };
@@ -295,22 +295,20 @@ fn github_request(owner: &str, repo: &str, asset_selector: Option<&str>) -> Inst
             owner: owner.to_string(),
             repo: repo.to_string(),
         },
+        package_id_override: None,
         format_preference: Vec::new(),
         asset_selector: asset_selector.map(str::to_string),
         reinstall: false,
-        refresh: false,
-        offline: false,
     }
 }
 
 fn registry_request(short_name: &str) -> InstallRequest {
     InstallRequest {
         source: InstallSource::RegistryName(short_name.to_string()),
+        package_id_override: None,
         format_preference: Vec::new(),
         asset_selector: None,
         reinstall: false,
-        refresh: false,
-        offline: false,
     }
 }
 
@@ -448,6 +446,49 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
             repo: "source-code-pro".to_string(),
         })
     );
+}
+
+#[test]
+fn direct_github_install_rejects_multiple_families_without_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-code-pro.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let error = app
+        .install_plan(github_request("adobe", "source-code-pro", None))
+        .expect_err("multi-family direct GitHub archive should require a boundary");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    let message = error.to_string();
+    assert!(message.contains("multiple font families"));
+    assert!(message.contains("Source Code Pro"));
+    assert!(message.contains("Inter"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
 }
 
 #[test]
@@ -624,8 +665,7 @@ fn direct_github_install_plan_is_noop_without_network_when_package_is_already_ma
 fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_managed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let snapshot = RegistrySnapshotV1::parse(
-        r#"{
+    let registry_json = r#"{
   "schemaVersion": 1,
   "updatedAt": "2026-07-03T00:00:00Z",
   "packages": {
@@ -642,14 +682,10 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
       }
     }
   }
-}"#,
-    )
-    .expect("parse registry snapshot");
-    RegistrySnapshotStore::new(paths.clone())
-        .write_snapshot(&snapshot)
-        .expect("write registry snapshot");
+}"#;
 
     let first_http = Arc::new(FakeHttpClient::default());
+    first_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
     first_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -677,6 +713,7 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
     apply_plan(&app, first_plan);
 
     let no_route_http = Arc::new(FakeHttpClient::default());
+    no_route_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
     let app = FontbrewApp::with_paths_and_http_client(paths, no_route_http.clone());
     let plan = app
         .install_plan(registry_request("source-code-pro"))
@@ -684,7 +721,10 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
 
     assert!(plan.already_installed);
     assert!(plan.changes.is_empty());
-    assert!(no_route_http.requested_urls().is_empty());
+    assert_eq!(
+        no_route_http.requested_urls(),
+        vec![OFFICIAL_REGISTRY_URL.to_string()]
+    );
 }
 
 #[test]
@@ -831,8 +871,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let snapshot = RegistrySnapshotV1::parse(
-        r#"{
+    let registry_json = r#"{
   "schemaVersion": 1,
   "updatedAt": "2026-07-03T00:00:00Z",
   "packages": {
@@ -849,14 +888,10 @@ fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_sou
       }
     }
   }
-}"#,
-    )
-    .expect("parse registry snapshot");
-    RegistrySnapshotStore::new(paths.clone())
-        .write_snapshot(&snapshot)
-        .expect("write registry snapshot");
+}"#;
 
     let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -913,8 +948,7 @@ fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_sou
 fn registry_recipe_format_preference_does_not_override_user_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let snapshot = RegistrySnapshotV1::parse(
-        r#"{
+    let registry_json = r#"{
   "schemaVersion": 1,
   "updatedAt": "2026-07-03T00:00:00Z",
   "packages": {
@@ -934,12 +968,7 @@ fn registry_recipe_format_preference_does_not_override_user_config() {
       }
     }
   }
-}"#,
-    )
-    .expect("parse registry snapshot");
-    RegistrySnapshotStore::new(paths.clone())
-        .write_snapshot(&snapshot)
-        .expect("write registry snapshot");
+}"#;
     let config_path = paths.config_path();
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
     fs::write(
@@ -954,6 +983,7 @@ format_preference = ["ttf", "otf"]
     .expect("write config");
 
     let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -992,4 +1022,213 @@ format_preference = ["ttf", "otf"]
         .join("files");
     assert!(files_dir.join("SourceCodePro-Regular.ttf").exists());
     assert!(!files_dir.join("SourceCodePro-Regular.otf").exists());
+}
+
+#[test]
+fn registry_recipe_include_families_filter_extra_archive_families() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let registry_json = r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": {
+        "type": "github",
+        "repo": "adobe/source-code-pro"
+      },
+      "families": ["Source Code Pro"],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      },
+      "install": {
+        "includeFamilies": [" source   code pro "]
+      }
+    }
+  }
+}"#;
+
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-code-pro.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let plan = app
+        .install_plan(registry_request("source-code-pro"))
+        .expect("registry recipe includeFamilies should explain the archive boundary");
+    let report = apply_plan(&app, plan);
+
+    assert_eq!(
+        report.families,
+        vec![fontbrew_core::FamilyName::new("Source Code Pro")]
+    );
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("source-code-pro"))
+        .expect("manifest record");
+    assert_eq!(
+        record.families,
+        vec![fontbrew_core::FamilyName::new("Source Code Pro")]
+    );
+    assert!(record
+        .font_files
+        .iter()
+        .all(|font_file| font_file.family.as_str() == "Source Code Pro"));
+
+    let files_dir = paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &fontbrew_core::PackageVersion::new("v1.2.3"),
+        )
+        .join("files");
+    assert!(files_dir.join("SourceCodePro-Regular.ttf").exists());
+    assert!(!files_dir.join("Inter-Variable.ttf").exists());
+}
+
+#[test]
+fn registry_recipe_include_families_cannot_weaken_expected_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let registry_json = r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-and-inter": {
+      "name": "Source Code Pro + Inter",
+      "source": {
+        "type": "github",
+        "repo": "adobe/source-code-pro"
+      },
+      "families": ["Source Code Pro", "Inter"],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      },
+      "install": {
+        "includeFamilies": ["Source Code Pro"]
+      }
+    }
+  }
+}"#;
+
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-and-inter.zip",
+        "browser_download_url": "https://downloads.example/source-and-inter.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-and-inter.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let error = app
+        .install_plan(registry_request("source-and-inter"))
+        .expect_err("includeFamilies cannot remove top-level identity families");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    let message = error.to_string();
+    assert!(message.contains("selected font files"));
+    assert!(message.contains("Inter"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn registry_recipe_requires_all_expected_families() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let registry_json = r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-and-inter": {
+      "name": "Source Code Pro + Inter",
+      "source": {
+        "type": "github",
+        "repo": "adobe/source-code-pro"
+      },
+      "families": ["Source Code Pro", "Inter"],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      }
+    }
+  }
+}"#;
+
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-and-inter.zip",
+        "browser_download_url": "https://downloads.example/source-and-inter.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-and-inter.zip",
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let error = app
+        .install_plan(registry_request("source-and-inter"))
+        .expect_err("registry recipe should require every expected family");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    let message = error.to_string();
+    assert!(message.contains("missing expected registry recipe font families"));
+    assert!(message.contains("Inter"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
 }

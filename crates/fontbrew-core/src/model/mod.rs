@@ -297,11 +297,11 @@ pub enum FontFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallRequest {
     pub source: InstallSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id_override: Option<PackageId>,
     pub format_preference: Vec<FontFormat>,
     pub asset_selector: Option<String>,
     pub reinstall: bool,
-    pub refresh: bool,
-    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,22 +317,18 @@ pub struct InfoRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutdatedRequest {
     pub package_ids: Vec<PackageId>,
-    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRequest {
     pub package_ids: Vec<PackageId>,
     pub jobs: Option<usize>,
-    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     pub limit: Option<usize>,
-    pub refresh: bool,
-    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +673,8 @@ pub struct RegistryUpdateReport {
 pub struct RegistryStatusReport {
     pub available: bool,
     pub snapshot_path: PathBuf,
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: Option<u64>,
     pub registry_updated_at: Option<String>,
     pub snapshot_modified_at: Option<String>,
     pub package_count: usize,

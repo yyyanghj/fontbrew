@@ -14,7 +14,7 @@ use crate::{
     },
     model::{NotUpdatablePackage, OutdatedPackage, OutdatedReport, OutdatedRequest},
     platform::FontbrewPaths,
-    registry::{RegistryAssetSelection, RegistrySnapshotStore},
+    registry::{normalize_family_boundary_name, RegistryPackageRecipe, RegistrySnapshotStore},
     sources::GitHubRepo,
     tasks,
     version::{compare_versions, VersionComparison},
@@ -43,14 +43,6 @@ pub fn outdated(
             not_updatable.push(not_updatable_package(&record, "no GitHub update source"));
             continue;
         };
-
-        if request.offline {
-            not_updatable.push(not_updatable_package(
-                &record,
-                "offline mode cannot check GitHub releases",
-            ));
-            continue;
-        }
 
         let latest_version = github::resolve_latest_stable_release_version(http_client, &repo)?;
         match compare_versions(&record.version, &latest_version) {
@@ -120,7 +112,7 @@ pub fn update_plan(
     }
 
     let outcomes = tasks::map_bounded(records, jobs, |record| {
-        prepare_update_package(paths, record, request.offline, http_client, cancellation)
+        prepare_update_package(paths, record, http_client, cancellation)
     });
 
     let mut prepared = Vec::new();
@@ -190,11 +182,10 @@ enum PrepareOutcome {
 fn prepare_update_package(
     paths: &FontbrewPaths,
     record: ManifestPackageRecord,
-    offline: bool,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> PrepareOutcome {
-    match prepare_update_package_inner(paths, &record, offline, http_client, cancellation) {
+    match prepare_update_package_inner(paths, &record, http_client, cancellation) {
         Ok(Some(prepared)) => PrepareOutcome::Prepared(Box::new(prepared)),
         Ok(None) => PrepareOutcome::UpToDate,
         Err(error) => PrepareOutcome::Failed(UpdatePlanFailure {
@@ -207,7 +198,6 @@ fn prepare_update_package(
 fn prepare_update_package_inner(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
-    offline: bool,
     http_client: &dyn HttpClient,
     cancellation: &dyn CancellationToken,
 ) -> Result<Option<PreparedUpdatePackage>> {
@@ -218,18 +208,14 @@ fn prepare_update_package_inner(
         });
     };
 
-    if offline {
-        return Err(FontbrewError::NoUpdateSource {
-            package_id: record.package_id.clone(),
-        });
-    }
-
-    let recipe_asset = registry_asset_selection(paths, record)?;
+    let registry_recipe = registry_recipe_for_record(paths, record)?;
     ensure_not_cancelled(cancellation)?;
     let asset = github::resolve_release_asset(
         http_client,
         &repo,
-        recipe_asset.as_ref(),
+        registry_recipe
+            .as_ref()
+            .and_then(|recipe| recipe.asset.as_ref()),
         None,
         &record.package_id,
     )?;
@@ -249,11 +235,16 @@ fn prepare_update_package_inner(
     }
 
     let source = prepared_source_for_update(record, &repo)?;
+    let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());
+    if let Some(recipe) = &registry_recipe {
+        options.recipe_format_preference = recipe.format_preference.clone();
+        options.family_boundary = Some(recipe.family_boundary.clone());
+    }
     let mut prepared = install::prepare_resolved_github_release_archive(
         paths,
         asset,
         source,
-        install::RemoteInstallOptions::for_update(record.package_id.clone()),
+        options,
         http_client,
         cancellation,
     )?;
@@ -262,7 +253,11 @@ fn prepare_update_package_inner(
         return Err(error);
     }
 
-    if let Err(error) = validate_update_identity(record, &prepared) {
+    let expected_families = registry_recipe
+        .as_ref()
+        .map(|recipe| recipe.family_boundary.expected_families())
+        .unwrap_or(&record.families);
+    if let Err(error) = validate_update_identity(record, &prepared, expected_families) {
         install::cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }
@@ -322,36 +317,37 @@ fn prepared_source_for_update(
     }
 }
 
-fn registry_asset_selection(
+fn registry_recipe_for_record(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
-) -> Result<Option<RegistryAssetSelection>> {
+) -> Result<Option<RegistryPackageRecipe>> {
     let ManifestSource::Registry { id } = &record.source else {
         return Ok(None);
     };
 
     let recipe = RegistrySnapshotStore::new(paths.clone()).resolve_short_name(id)?;
 
-    Ok(recipe.asset)
+    Ok(Some(recipe))
 }
 
 fn validate_update_identity(
     record: &ManifestPackageRecord,
     prepared: &PreparedInstallPackage,
+    expected_families: &[FamilyName],
 ) -> Result<()> {
     if prepared.package_id != record.package_id {
         return Err(FontbrewError::PackageIdentityMismatch {
             package_id: record.package_id.clone(),
-            expected: first_family(&record.families),
+            expected: first_family(expected_families),
             found: first_family(&prepared.families),
         });
     }
 
-    for expected_family in &record.families {
+    for expected_family in expected_families {
         if !prepared
             .families
             .iter()
-            .any(|family| family == expected_family)
+            .any(|family| family_names_match(family, expected_family))
         {
             return Err(FontbrewError::PackageIdentityMismatch {
                 package_id: record.package_id.clone(),
@@ -362,6 +358,10 @@ fn validate_update_identity(
     }
 
     Ok(())
+}
+
+fn family_names_match(left: &FamilyName, right: &FamilyName) -> bool {
+    normalize_family_boundary_name(left.as_str()) == normalize_family_boundary_name(right.as_str())
 }
 
 fn first_family(families: &[FamilyName]) -> FamilyName {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -19,7 +19,6 @@ const GOOGLE_FONTS_API_BASE_URL: &str = "https://www.googleapis.com/webfonts/v1/
 pub(crate) struct ProviderSearchRequest<'a> {
     pub(crate) query: &'a str,
     pub(crate) limit: Option<usize>,
-    pub(crate) offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,17 +60,7 @@ impl<'a> FontsourceProvider<'a> {
         }
 
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
-        let list_records = if request.offline {
-            match snapshot_store.read_list(query) {
-                Ok(records) => records,
-                Err(FontbrewError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(Vec::new());
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            fetch_fontsource_list(self.http_client, &snapshot_store, query)?
-        };
+        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, query)?;
 
         let mut results = Vec::new();
         for record in list_records {
@@ -83,19 +72,7 @@ impl<'a> FontsourceProvider<'a> {
                 continue;
             }
 
-            let detail = if request.offline {
-                match snapshot_store.read_detail(&record.id) {
-                    Ok(detail) => detail,
-                    Err(FontbrewError::Io(error))
-                        if error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                fetch_fontsource_detail(self.http_client, &snapshot_store, &record.id)?
-            };
+            let detail = fetch_fontsource_detail(self.http_client, &snapshot_store, &record.id)?;
 
             let Some(result) = search_result_from_detail(&detail)? else {
                 continue;
@@ -174,17 +151,7 @@ impl<'a> GoogleProvider<'a> {
         let query = google_family_query(raw_query);
 
         let snapshot_store = GoogleSnapshotStore::new(self.paths);
-        let response = if request.offline {
-            match snapshot_store.read_family(&query) {
-                Ok(response) => response,
-                Err(FontbrewError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(Vec::new());
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            fetch_google_family(self.http_client, &snapshot_store, &query)?
-        };
+        let response = fetch_google_family(self.http_client, &snapshot_store, &query)?;
 
         let mut results = Vec::new();
         for record in response.items {
@@ -300,18 +267,8 @@ impl<'a> FontsourceSnapshotStore<'a> {
         Self { paths }
     }
 
-    fn read_list(&self, query: &str) -> Result<Vec<FontsourceListRecord>> {
-        let body = fs::read(self.list_path(query))?;
-        parse_fontsource_list(&body, query)
-    }
-
     fn write_list(&self, query: &str, body: &[u8]) -> Result<()> {
         write_atomically(&self.list_path(query), body)
-    }
-
-    fn read_detail(&self, provider_id: &str) -> Result<FontsourceDetailRecord> {
-        let body = fs::read(self.detail_path(provider_id))?;
-        parse_fontsource_detail(&body, provider_id)
     }
 
     fn write_detail(&self, provider_id: &str, body: &[u8]) -> Result<()> {
@@ -339,11 +296,6 @@ struct GoogleSnapshotStore<'a> {
 impl<'a> GoogleSnapshotStore<'a> {
     fn new(paths: &'a FontbrewPaths) -> Self {
         Self { paths }
-    }
-
-    fn read_family(&self, family_query: &str) -> Result<GoogleWebfontsResponse> {
-        let body = fs::read(self.family_path(family_query))?;
-        parse_google_webfonts_response(&body, family_query)
     }
 
     fn write_family(&self, family_query: &str, body: &[u8]) -> Result<()> {

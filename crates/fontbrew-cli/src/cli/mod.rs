@@ -100,11 +100,8 @@ struct InstallArgs {
     #[arg(long, help = "Build the install plan without applying changes")]
     dry_run: bool,
 
-    #[arg(long, help = "Refresh source metadata before installing")]
-    refresh: bool,
-
-    #[arg(long, help = "Use local metadata and archives only")]
-    offline: bool,
+    #[arg(long = "id", help = "Package ID override for local archive sources")]
+    package_id: Option<String>,
 
     #[arg(long = "asset", help = "Select a release asset by name or pattern")]
     asset_selector: Option<String>,
@@ -145,20 +142,11 @@ struct SearchArgs {
 
     #[arg(long, help = "Maximum number of results to return")]
     limit: Option<usize>,
-
-    #[arg(long, help = "Refresh registry metadata before searching")]
-    refresh: bool,
-
-    #[arg(long, help = "Use local registry and provider metadata snapshots only")]
-    offline: bool,
 }
 
 #[derive(Debug, Args)]
 struct OutdatedArgs {
     package_ids: Vec<String>,
-
-    #[arg(long, help = "Do not query GitHub release metadata")]
-    offline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -299,11 +287,14 @@ fn install(
 ) -> CliResult<()> {
     let request = InstallRequest {
         source: install_source_from_arg(&args.source),
+        package_id_override: args
+            .package_id
+            .as_deref()
+            .map(PackageId::parse)
+            .transpose()?,
         format_preference: font_format_preference(&args),
         asset_selector: args.asset_selector,
         reinstall: args.reinstall,
-        refresh: args.refresh,
-        offline: args.offline,
     };
     let plan = app.install_plan_with_cancellation(request, cancellation)?;
     let policy = match confirmer.execution_policy(
@@ -372,8 +363,6 @@ fn search(args: SearchArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> C
     let report = app.search(SearchRequest {
         query: args.query.unwrap_or_default(),
         limit: args.limit,
-        refresh: args.refresh,
-        offline: args.offline,
     })?;
 
     reporter.render_search_report(report)
@@ -385,10 +374,7 @@ fn outdated(args: OutdatedArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) 
         .into_iter()
         .map(PackageId::parse)
         .collect::<fontbrew_core::Result<Vec<_>>>()?;
-    let report = app.outdated(OutdatedRequest {
-        package_ids,
-        offline: args.offline,
-    })?;
+    let report = app.outdated(OutdatedRequest { package_ids })?;
 
     reporter.render_outdated_report(report)
 }
@@ -408,7 +394,6 @@ fn update(
     let request = UpdateRequest {
         package_ids,
         jobs: args.jobs,
-        offline: false,
     };
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
@@ -588,6 +573,34 @@ mod tests {
     }
 
     #[test]
+    fn cli_help_does_not_expose_manual_refresh_or_offline_flags() {
+        for command_name in ["install", "search", "outdated"] {
+            let mut command = Cli::command();
+            let help = command
+                .find_subcommand_mut(command_name)
+                .expect("subcommand")
+                .render_long_help()
+                .to_string();
+
+            assert!(!help.contains("--refresh"));
+            assert!(!help.contains("--offline"));
+        }
+    }
+
+    #[test]
+    fn install_help_documents_local_archive_package_id_override() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("install")
+            .expect("install subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("--id"));
+        assert!(help.contains("local archive"));
+    }
+
+    #[test]
     fn install_source_parses_owner_repo_as_github_repo() {
         let source = install_source_from_arg("adobe/source-code-pro");
 
@@ -645,8 +658,7 @@ mod tests {
             reinstall: false,
             yes: false,
             dry_run: false,
-            refresh: false,
-            offline: false,
+            package_id: None,
             asset_selector: None,
             format_preference: vec![CliFontFormat::Otf, CliFontFormat::Ttf, CliFontFormat::Otf],
             otf: true,
@@ -675,8 +687,7 @@ mod tests {
             reinstall: false,
             yes: false,
             dry_run: false,
-            refresh: false,
-            offline: false,
+            package_id: None,
             asset_selector: None,
             format_preference: Vec::new(),
             otf: false,
@@ -705,13 +716,10 @@ mod tests {
         assert!(!Command::Search(SearchArgs {
             query: None,
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .consumes_cancellation());
         assert!(!Command::Outdated(OutdatedArgs {
             package_ids: Vec::new(),
-            offline: false,
         })
         .consumes_cancellation());
         assert!(!Command::Config(ConfigArgs {

@@ -197,6 +197,7 @@ impl RawConfig {
             activation_strategy: install
                 .and_then(|install| install.activation_strategy)
                 .map(RawActivationStrategy::into_activation_strategy)
+                .transpose()?
                 .unwrap_or(ActivationStrategy::Symlink),
             registry_auto_update: registry
                 .and_then(|registry| registry.auto_update)
@@ -340,7 +341,7 @@ fn parse_font_format(value: &str) -> Result<FontFormat> {
 fn parse_activation_strategy(value: &str) -> Result<ActivationStrategy> {
     match value.trim().to_ascii_lowercase().as_str() {
         "symlink" => Ok(ActivationStrategy::Symlink),
-        "copy" => Ok(ActivationStrategy::Copy),
+        "copy" => reserved_copy_activation_error(),
         _ => invalid_value("install.activation_strategy"),
     }
 }
@@ -403,6 +404,13 @@ fn validate_update_concurrency(update_concurrency: usize) -> Result<usize> {
 fn invalid_value<T>(key: &str) -> Result<T> {
     Err(FontbrewError::Config {
         message: format!("invalid value for {key}"),
+    })
+}
+
+fn reserved_copy_activation_error<T>() -> Result<T> {
+    Err(FontbrewError::Config {
+        message: "copy activation is reserved but not supported; use install.activation_strategy = \"symlink\""
+            .to_string(),
     })
 }
 
@@ -548,10 +556,10 @@ enum RawActivationStrategy {
 }
 
 impl RawActivationStrategy {
-    fn into_activation_strategy(self) -> ActivationStrategy {
+    fn into_activation_strategy(self) -> Result<ActivationStrategy> {
         match self {
-            Self::Symlink => ActivationStrategy::Symlink,
-            Self::Copy => ActivationStrategy::Copy,
+            Self::Symlink => Ok(ActivationStrategy::Symlink),
+            Self::Copy => reserved_copy_activation_error(),
         }
     }
 }

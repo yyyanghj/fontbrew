@@ -30,7 +30,10 @@ use crate::{
     },
     platform::FontbrewPaths,
     providers::{self, FontsourceProvider, GoogleProvider, ResolvedProviderPackage},
-    registry::{RegistryAssetSelection, RegistryPackageRecipe},
+    registry::{
+        normalize_family_boundary_name, RegistryAssetSelection, RegistryFamilyBoundary,
+        RegistryPackageRecipe,
+    },
     sources::GitHubRepo,
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
@@ -49,24 +52,43 @@ pub fn install_plan(
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlan> {
     ensure_not_cancelled(cancellation)?;
+    ensure_package_id_override_allowed_for_source(&request)?;
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
     let InstallRequest {
         source,
+        package_id_override,
         format_preference,
         reinstall,
         ..
     } = request;
 
     match source {
-        InstallSource::LocalPath(path) => {
-            local_archive_install_plan(paths, path, reinstall, format_preference, cancellation)
-        }
+        InstallSource::LocalPath(path) => local_archive_install_plan(
+            paths,
+            path,
+            package_id_override,
+            reinstall,
+            format_preference,
+            cancellation,
+        ),
         _ => Err(FontbrewError::NotImplemented {
             operation: "install_source",
         }),
     }
+}
+
+pub(crate) fn ensure_package_id_override_allowed_for_source(
+    request: &InstallRequest,
+) -> Result<()> {
+    if request.package_id_override.is_some()
+        && !matches!(request.source, InstallSource::LocalPath(_))
+    {
+        return Err(package_id_override_unsupported_source_error());
+    }
+
+    Ok(())
 }
 
 pub fn github_repo_install_plan(
@@ -80,7 +102,7 @@ pub fn github_repo_install_plan(
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
-    let options = RemoteInstallOptions::from_request(request);
+    let options = RemoteInstallOptions::from_request(request)?;
     let package_id = package_id_from_repo_name(&repo.repo)?;
     let requested_source = ManifestSource::GitHub {
         owner: repo.owner.clone(),
@@ -126,10 +148,11 @@ pub fn registry_recipe_install_plan(
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
-    let mut options = RemoteInstallOptions::from_request(request);
+    let mut options = RemoteInstallOptions::from_request(request)?;
     let repo = recipe.github_repo.clone();
     let package_id = recipe.package_id.clone();
     options.recipe_format_preference = dedupe_formats(recipe.format_preference.clone());
+    options.family_boundary = Some(recipe.family_boundary.clone());
     let requested_source = ManifestSource::Registry {
         id: package_id.as_str().to_string(),
     };
@@ -177,8 +200,7 @@ pub fn fontsource_install_plan(
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
-    let offline = request.offline;
-    let options = RemoteInstallOptions::from_request(request);
+    let options = RemoteInstallOptions::from_request(request)?;
     let package_id = PackageId::parse(&provider_id)?;
     let requested_source = ManifestSource::Provider {
         provider: ProviderKind::Fontsource,
@@ -197,13 +219,6 @@ pub fn fontsource_install_plan(
     if options.asset_selector.is_some() {
         return Err(FontbrewError::Config {
             message: "--asset is not supported for Fontsource provider sources".to_string(),
-        });
-    }
-
-    if offline {
-        return Err(FontbrewError::Config {
-            message: "Fontsource installs require network because font binaries are not cached"
-                .to_string(),
         });
     }
 
@@ -226,8 +241,7 @@ pub fn google_install_plan(
     cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation)?;
 
-    let offline = request.offline;
-    let options = RemoteInstallOptions::from_request(request);
+    let options = RemoteInstallOptions::from_request(request)?;
     let package_id = PackageId::parse(&provider_id)?;
     let requested_source = ManifestSource::Provider {
         provider: ProviderKind::Google,
@@ -246,13 +260,6 @@ pub fn google_install_plan(
     if options.asset_selector.is_some() {
         return Err(FontbrewError::Config {
             message: "--asset is not supported for Google Fonts provider sources".to_string(),
-        });
-    }
-
-    if offline {
-        return Err(FontbrewError::Config {
-            message: "Google Fonts installs require network because font binaries are not cached"
-                .to_string(),
         });
     }
 
@@ -574,6 +581,7 @@ pub fn apply_remove(
 fn local_archive_install_plan(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
+    package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
     cancellation: &dyn CancellationToken,
@@ -583,6 +591,7 @@ fn local_archive_install_plan(
     let prepared = prepare_local_archive(
         paths,
         archive_path,
+        package_id_override,
         reinstall,
         format_preference,
         cancellation,
@@ -698,6 +707,7 @@ fn source_conflict_plan(
 fn prepare_local_archive(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
+    package_id_override: Option<PackageId>,
     reinstall: bool,
     format_preference: Vec<FontFormat>,
     cancellation: &dyn CancellationToken,
@@ -712,12 +722,13 @@ fn prepare_local_archive(
         staging_cleanup.path().to_path_buf(),
         PackageVersion::new(LOCAL_ARCHIVE_VERSION),
         PreparedInstallSource::LocalArchive { path: archive_path },
-        None,
+        package_id_override,
         reinstall,
         ArchiveFormatPreference {
             explicit_format_preference: format_preference,
             recipe_format_preference: Vec::new(),
         },
+        None,
         cancellation,
     );
 
@@ -735,17 +746,23 @@ pub(crate) struct RemoteInstallOptions {
     pub(crate) reinstall: bool,
     pub(crate) explicit_format_preference: Vec<FontFormat>,
     pub(crate) recipe_format_preference: Vec<FontFormat>,
+    pub(crate) family_boundary: Option<RegistryFamilyBoundary>,
 }
 
 impl RemoteInstallOptions {
-    fn from_request(request: InstallRequest) -> Self {
-        Self {
+    fn from_request(request: InstallRequest) -> Result<Self> {
+        if request.package_id_override.is_some() {
+            return Err(package_id_override_unsupported_source_error());
+        }
+
+        Ok(Self {
             asset_selector: request.asset_selector,
             package_id: None,
             reinstall: request.reinstall,
             explicit_format_preference: dedupe_formats(request.format_preference),
             recipe_format_preference: Vec::new(),
-        }
+            family_boundary: None,
+        })
     }
 
     fn with_package_id(mut self, package_id: PackageId) -> Self {
@@ -760,7 +777,14 @@ impl RemoteInstallOptions {
             reinstall: false,
             explicit_format_preference: Vec::new(),
             recipe_format_preference: Vec::new(),
+            family_boundary: None,
         }
+    }
+}
+
+fn package_id_override_unsupported_source_error() -> FontbrewError {
+    FontbrewError::Config {
+        message: "--id is only supported for local archive sources".to_string(),
     }
 }
 
@@ -932,6 +956,7 @@ fn download_and_parse_provider_fonts(
             explicit_format_preference: options.explicit_format_preference,
             recipe_format_preference: options.recipe_format_preference,
         },
+        options.family_boundary,
         cancellation,
     )
 }
@@ -1032,6 +1057,7 @@ fn download_and_parse_resolved_github_archive(
             explicit_format_preference: options.explicit_format_preference,
             recipe_format_preference: options.recipe_format_preference,
         },
+        options.family_boundary,
         cancellation,
     )
 }
@@ -1046,6 +1072,7 @@ fn extract_and_parse_archive(
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
+    family_boundary: Option<RegistryFamilyBoundary>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
@@ -1064,6 +1091,7 @@ fn extract_and_parse_archive(
         package_id_hint,
         reinstall,
         archive_format_preference,
+        family_boundary,
         cancellation,
     )
 }
@@ -1078,6 +1106,7 @@ fn parse_staged_font_files(
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
+    family_boundary: Option<RegistryFamilyBoundary>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     if staged_fonts.is_empty() {
@@ -1122,16 +1151,56 @@ fn parse_staged_font_files(
         });
     }
 
-    let Some(package_family) = family_names.iter().next() else {
+    let archive_families = family_names
+        .iter()
+        .map(|family| FamilyName::new(family.clone()))
+        .collect::<Vec<_>>();
+    if archive_families.is_empty() {
         cleanup_staging(&staging_dir);
         return Err(FontbrewError::FontParse {
             message: "archive contained no readable font families".to_string(),
         });
     };
 
+    if let Some(boundary) = &family_boundary {
+        if let Err(error) = validate_archive_family_boundary(boundary, &archive_families) {
+            cleanup_staging(&staging_dir);
+            return Err(error);
+        }
+        parsed_files = match filter_parsed_files_by_family_boundary(parsed_files, boundary) {
+            Ok(parsed_files) => parsed_files,
+            Err(error) => {
+                cleanup_staging(&staging_dir);
+                return Err(error);
+            }
+        };
+    } else if should_reject_unbounded_multiple_families(&source) && archive_families.len() > 1 {
+        cleanup_staging(&staging_dir);
+        return Err(FontbrewError::ArchiveRejected {
+            reason: format!(
+                "source contains multiple font families without a registry recipe family boundary: {}",
+                family_list_label(&archive_families)
+            ),
+        });
+    }
+
+    let boundary_families = selected_family_names(&parsed_files);
+    let Some(package_family) = boundary_families.first() else {
+        cleanup_staging(&staging_dir);
+        return Err(FontbrewError::ArchiveRejected {
+            reason: "registry recipe family boundary selected no font files".to_string(),
+        });
+    };
+
     let package_id = match package_id_hint {
         Some(package_id) => package_id,
-        None => PackageId::normalize(package_family)?,
+        None => match PackageId::normalize(package_family.as_str()) {
+            Ok(package_id) => package_id,
+            Err(error) => {
+                cleanup_staging(&staging_dir);
+                return Err(error);
+            }
+        },
     };
     ensure_not_cancelled(cancellation)?;
     let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
@@ -1154,6 +1223,15 @@ fn parse_staged_font_files(
                 return Err(error);
             }
         };
+    if let Some(boundary) = &family_boundary {
+        let selected_families = selected_family_names(&parsed_files);
+        if let Err(error) =
+            validate_expected_family_boundary(boundary, &selected_families, "selected font files")
+        {
+            cleanup_staging(&staging_dir);
+            return Err(error);
+        }
+    }
 
     let package_store_dir = paths.package_store_dir(&package_id, &version);
     let files_dir = package_store_dir.join("files");
@@ -1216,6 +1294,129 @@ struct ParsedFontFile {
     staging_path: PathBuf,
     faces: Vec<FontFaceMetadata>,
     format: FontFormat,
+}
+
+fn validate_archive_family_boundary(
+    boundary: &RegistryFamilyBoundary,
+    archive_families: &[FamilyName],
+) -> Result<()> {
+    validate_expected_family_boundary(boundary, archive_families, "archive")?;
+
+    if boundary.has_explicit_include_families() {
+        return Ok(());
+    }
+
+    let unexpected = archive_families
+        .iter()
+        .filter(|family| !boundary.includes_family(family) && !boundary.excludes_family(family))
+        .cloned()
+        .collect::<Vec<_>>();
+    if unexpected.is_empty() {
+        return Ok(());
+    }
+
+    Err(FontbrewError::ArchiveRejected {
+        reason: format!(
+            "archive contains unexpected registry recipe font families: {}",
+            family_list_label(&unexpected)
+        ),
+    })
+}
+
+fn validate_expected_family_boundary(
+    boundary: &RegistryFamilyBoundary,
+    families: &[FamilyName],
+    source_label: &str,
+) -> Result<()> {
+    let missing = boundary
+        .expected_families()
+        .iter()
+        .filter(|expected| !family_matches_any(families, expected))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(FontbrewError::ArchiveRejected {
+        reason: format!(
+            "{source_label} is missing expected registry recipe font families: {}",
+            family_list_label(&missing)
+        ),
+    })
+}
+
+fn filter_parsed_files_by_family_boundary(
+    parsed_files: Vec<ParsedFontFile>,
+    boundary: &RegistryFamilyBoundary,
+) -> Result<Vec<ParsedFontFile>> {
+    let mut filtered_files = Vec::new();
+
+    for parsed_file in parsed_files {
+        let included_face_count = parsed_file
+            .faces
+            .iter()
+            .filter(|face| boundary.includes_family(&face.family_name))
+            .count();
+
+        if included_face_count == 0 {
+            continue;
+        }
+
+        if included_face_count != parsed_file.faces.len() {
+            return Err(FontbrewError::ArchiveRejected {
+                reason: format!(
+                    "font file contains both included and excluded registry recipe families; cannot install a family subset from one font binary: {} (included: {}; excluded: {})",
+                    parsed_file.staging_path.display(),
+                    face_family_list(&parsed_file.faces, boundary, true),
+                    face_family_list(&parsed_file.faces, boundary, false)
+                ),
+            });
+        }
+
+        filtered_files.push(parsed_file);
+    }
+
+    Ok(filtered_files)
+}
+
+fn should_reject_unbounded_multiple_families(source: &PreparedInstallSource) -> bool {
+    matches!(
+        source,
+        PreparedInstallSource::LocalArchive { .. } | PreparedInstallSource::GitHub { .. }
+    )
+}
+
+fn family_matches_any(families: &[FamilyName], family: &FamilyName) -> bool {
+    let normalized = normalize_family_boundary_name(family.as_str());
+
+    families
+        .iter()
+        .any(|candidate| normalize_family_boundary_name(candidate.as_str()) == normalized)
+}
+
+fn family_list_label(families: &[FamilyName]) -> String {
+    families
+        .iter()
+        .map(|family| family.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn face_family_list(
+    faces: &[FontFaceMetadata],
+    boundary: &RegistryFamilyBoundary,
+    included: bool,
+) -> String {
+    let mut families = BTreeSet::new();
+
+    for face in faces {
+        if boundary.includes_family(&face.family_name) == included {
+            families.insert(face.family_name.as_str().to_string());
+        }
+    }
+
+    families.into_iter().collect::<Vec<_>>().join(", ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2396,5 +2597,98 @@ pub(crate) fn write_lock_path(paths: &FontbrewPaths) -> PathBuf {
 fn package_not_installed_error(package_id: &PackageId) -> FontbrewError {
     FontbrewError::Manifest {
         message: format!("package is not installed: {:?}", package_id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boundary_from_registry_json() -> RegistryFamilyBoundary {
+        let snapshot = crate::registry::RegistrySnapshotStore::parse(
+            r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": { "type": "github", "repo": "adobe/source-code-pro" },
+      "families": ["Source Code Pro"],
+      "install": { "includeFamilies": ["Source Code Pro"] }
+    }
+  }
+}"#,
+        )
+        .expect("registry snapshot should parse");
+
+        snapshot
+            .resolve_short_name("source-code-pro")
+            .expect("recipe should resolve")
+            .family_boundary
+    }
+
+    fn face(family: &str) -> FontFaceMetadata {
+        FontFaceMetadata {
+            family_name: FamilyName::new(family),
+            subfamily_name: None,
+            full_name: None,
+            postscript_name: None,
+            weight: Some(400),
+            is_italic: false,
+            is_oblique: false,
+            format: FontFileFormat::Ttc,
+            face_index: 0,
+        }
+    }
+
+    #[test]
+    fn family_boundary_filter_rejects_mixed_family_font_file() {
+        let boundary = boundary_from_registry_json();
+        let files = vec![ParsedFontFile {
+            staging_path: PathBuf::from("Mixed.ttc"),
+            faces: vec![face("Source Code Pro"), face("Inter")],
+            format: FontFormat::Ttc,
+        }];
+
+        let error = filter_parsed_files_by_family_boundary(files, &boundary)
+            .expect_err("mixed-family binary should not be partially filtered");
+
+        assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+        let message = error.to_string();
+        assert!(message.contains("one font binary"));
+        assert!(message.contains("Mixed.ttc"));
+        assert!(message.contains("Source Code Pro"));
+        assert!(message.contains("Inter"));
+    }
+
+    #[test]
+    fn family_boundary_filter_discards_whole_nonincluded_files() {
+        let boundary = boundary_from_registry_json();
+        let files = vec![
+            ParsedFontFile {
+                staging_path: PathBuf::from("SourceCodePro-Collection.ttc"),
+                faces: vec![face("Source Code Pro"), face("Source Code Pro")],
+                format: FontFormat::Ttc,
+            },
+            ParsedFontFile {
+                staging_path: PathBuf::from("Inter-Variable.ttf"),
+                faces: vec![face("Inter")],
+                format: FontFormat::Ttf,
+            },
+        ];
+
+        let filtered = filter_parsed_files_by_family_boundary(files, &boundary)
+            .expect("whole-file filtering should succeed");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(
+            filtered[0].staging_path,
+            PathBuf::from("SourceCodePro-Collection.ttc")
+        );
+        assert_eq!(filtered[0].faces.len(), 2);
+        assert!(filtered[0]
+            .faces
+            .iter()
+            .all(|face| face.family_name.as_str() == "Source Code Pro"));
     }
 }

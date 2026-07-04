@@ -79,6 +79,30 @@ fn registry_snapshot_rejects_invalid_entries_before_use() {
             "unknown required behavior",
             r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "required": ["future-registry-v99"], "packages": {}}"#,
         ),
+        (
+            "empty include family",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"inter": {"name": "Inter", "source": {"type": "github", "repo": "rsms/inter"}, "families": ["Inter"], "install": {"includeFamilies": [" "]}}}}"#,
+        ),
+        (
+            "empty exclude family",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"inter": {"name": "Inter", "source": {"type": "github", "repo": "rsms/inter"}, "families": ["Inter"], "install": {"excludeFamilies": [" "]}}}}"#,
+        ),
+        (
+            "duplicate normalized include family",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"source-code-pro": {"name": "Source Code Pro", "source": {"type": "github", "repo": "adobe/source-code-pro"}, "families": ["Source Code Pro"], "install": {"includeFamilies": ["Source Code Pro", " source   code pro "]}}}}"#,
+        ),
+        (
+            "duplicate normalized exclude family",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"source-code-pro": {"name": "Source Code Pro", "source": {"type": "github", "repo": "adobe/source-code-pro"}, "families": ["Source Code Pro"], "install": {"excludeFamilies": ["Inter", " inter "]}}}}"#,
+        ),
+        (
+            "include exclude overlap",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"source-code-pro": {"name": "Source Code Pro", "source": {"type": "github", "repo": "adobe/source-code-pro"}, "families": ["Source Code Pro"], "install": {"includeFamilies": ["Source Code Pro"], "excludeFamilies": [" source code pro "]}}}}"#,
+        ),
+        (
+            "exclude overlaps default include family",
+            r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"source-code-pro": {"name": "Source Code Pro", "source": {"type": "github", "repo": "adobe/source-code-pro"}, "families": ["Source Code Pro"], "install": {"excludeFamilies": [" source code pro "]}}}}"#,
+        ),
     ] {
         let error = RegistrySnapshotStore::parse(json)
             .expect_err(&format!("{name} registry should be rejected"));
@@ -137,24 +161,73 @@ fn registry_update_fetches_metadata_with_fake_client_without_caching_fonts() {
 }
 
 #[test]
-fn app_rejects_invalid_registry_snapshot_before_short_name_use() {
+fn registry_status_reports_snapshot_schema_version_when_available() {
     let (_temp, paths) = paths();
+    let store = RegistrySnapshotStore::new(paths);
+
+    let missing = store.status().expect("missing status should report");
+    assert!(!missing.available);
+    assert_eq!(missing.schema_version, None);
+
+    let snapshot =
+        RegistrySnapshotStore::parse(&valid_registry_json()).expect("valid registry should parse");
+    store
+        .write_snapshot(&snapshot)
+        .expect("snapshot should write atomically");
+
+    let available = store.status().expect("available status should report");
+    assert!(available.available);
+    assert_eq!(available.schema_version, Some(1));
+}
+
+#[test]
+fn registry_status_rejects_newer_snapshot_schema_before_reporting_status() {
+    let (_temp, paths) = paths();
+    let store = RegistrySnapshotStore::new(paths.clone());
+    fs::create_dir_all(paths.managed_store_dir()).expect("create data root");
+    fs::write(
+        paths.registry_snapshot_path(),
+        r#"{"schemaVersion": 2, "updatedAt": "2026-07-03T00:00:00Z", "packages": {}}"#,
+    )
+    .expect("write newer snapshot");
+
+    let error = store
+        .status()
+        .expect_err("newer schema should fail before status is rendered");
+
+    assert!(matches!(
+        error,
+        FontbrewError::RegistryValidationFailed { .. }
+    ));
+    assert!(error
+        .to_string()
+        .contains("unsupported registry schemaVersion"));
+}
+
+#[test]
+fn app_rejects_invalid_refreshed_registry_snapshot_before_short_name_use() {
+    let (_temp, paths) = paths();
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
     fs::create_dir_all(paths.managed_store_dir()).expect("create data root");
     fs::write(
         paths.registry_snapshot_path(),
         r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"inter": {"name": "Inter", "source": {"type": "github", "repo": "rsms//inter"}, "families": ["Inter"]}}}"#,
     )
     .expect("write invalid snapshot");
+    std::env::set_var(
+        REGISTRY_URL_ENV_VAR,
+        format!("file://{}", paths.registry_snapshot_path().display()),
+    );
     let app = FontbrewApp::with_paths(paths);
 
     let error = app
         .install_plan(InstallRequest {
             source: InstallSource::RegistryName("inter".to_string()),
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         })
         .expect_err("invalid registry snapshot should be rejected");
 
@@ -162,6 +235,11 @@ fn app_rejects_invalid_registry_snapshot_before_short_name_use() {
         error,
         FontbrewError::RegistryValidationFailed { .. }
     ));
+
+    match original {
+        Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),
+        None => std::env::remove_var(REGISTRY_URL_ENV_VAR),
+    }
 }
 
 #[test]

@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -9,7 +8,7 @@ use fontbrew_core::{
     fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    registry::{RegistrySnapshotStore, RegistrySnapshotV1},
+    registry::OFFICIAL_REGISTRY_URL,
     CancellationToken, FamilyName, FontbrewApp, FontbrewError, OutdatedRequest, PackageId,
     PackageVersion, SearchRequest,
 };
@@ -85,9 +84,16 @@ fn github_releases_url(owner: &str, repo: &str) -> String {
     format!("https://api.github.com/repos/{owner}/{repo}/releases")
 }
 
-fn write_registry_snapshot(paths: &FontbrewPaths) {
-    let snapshot = RegistrySnapshotV1::parse(
-        r#"{
+fn fontsource_list_url(query: &str) -> String {
+    format!("https://api.fontsource.org/v1/fonts?family={query}")
+}
+
+fn fontsource_detail_url(id: &str) -> String {
+    format!("https://api.fontsource.org/v1/fonts/{id}")
+}
+
+fn registry_snapshot_json() -> &'static str {
+    r#"{
   "schemaVersion": 1,
   "updatedAt": "2026-07-03T00:00:00Z",
   "packages": {
@@ -107,13 +113,7 @@ fn write_registry_snapshot(paths: &FontbrewPaths) {
       "families": ["Source Code Pro"]
     }
   }
-}"#,
-    )
-    .expect("parse registry snapshot");
-
-    RegistrySnapshotStore::new(paths.clone())
-        .write_snapshot(&snapshot)
-        .expect("write registry snapshot");
+}"#
 }
 
 fn manifest_record(
@@ -148,18 +148,84 @@ fn write_manifest(paths: &FontbrewPaths, records: Vec<ManifestPackageRecord>) {
 }
 
 #[test]
-fn search_uses_local_registry_snapshot_with_case_insensitive_matching_and_limit() {
+fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    write_registry_snapshot(&paths);
-    let app = FontbrewApp::with_paths(paths);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_snapshot_json());
+    fake_http.with_text(
+        &fontsource_list_url("Abel"),
+        r#"[
+  {
+    "id": "abel",
+    "family": "Abel",
+    "subsets": ["latin"],
+    "weights": [400],
+    "styles": ["normal"],
+    "lastModified": "2025-05-30",
+    "license": "OFL-1.1",
+    "type": "google"
+  }
+]"#,
+    );
+    fake_http.with_text(
+        &fontsource_detail_url("abel"),
+        r#"{
+  "id": "abel",
+  "family": "Abel",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v18",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/abel.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+
+    let report = app
+        .search(SearchRequest {
+            query: "Abel".to_string(),
+            limit: Some(1),
+        })
+        .expect("unprefixed search should refresh registry and fetch Fontsource fallback");
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].package_id, package_id("abel"));
+    assert_eq!(report.results[0].source, "fontsource:abel");
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![
+            OFFICIAL_REGISTRY_URL.to_string(),
+            fontsource_list_url("Abel"),
+            fontsource_detail_url("abel"),
+        ]
+    );
+}
+
+#[test]
+fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_snapshot_json());
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
 
     let report = app
         .search(SearchRequest {
             query: "code".to_string(),
-            limit: Some(10),
-            refresh: false,
-            offline: true,
+            limit: Some(1),
         })
         .expect("search registry snapshot");
 
@@ -171,9 +237,7 @@ fn search_uses_local_registry_snapshot_with_case_insensitive_matching_and_limit(
     let family_report = app
         .search(SearchRequest {
             query: "MAPLE MONO".to_string(),
-            limit: None,
-            refresh: false,
-            offline: true,
+            limit: Some(1),
         })
         .expect("search registry families");
 
@@ -187,32 +251,35 @@ fn search_uses_local_registry_snapshot_with_case_insensitive_matching_and_limit(
         .search(SearchRequest {
             query: String::new(),
             limit: Some(2),
-            refresh: false,
-            offline: true,
         })
         .expect("empty query returns registry candidates");
 
     assert_eq!(limited_report.results.len(), 2);
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![
+            OFFICIAL_REGISTRY_URL.to_string(),
+            OFFICIAL_REGISTRY_URL.to_string(),
+            OFFICIAL_REGISTRY_URL.to_string(),
+        ]
+    );
 }
 
 #[test]
-fn search_rejects_invalid_registry_snapshot_before_use() {
+fn search_rejects_invalid_refreshed_registry_snapshot_before_use() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    fs::create_dir_all(paths.managed_store_dir()).expect("create data root");
-    fs::write(
-        paths.registry_snapshot_path(),
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        OFFICIAL_REGISTRY_URL,
         r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"bad": {"name": "Bad", "source": {"type": "github", "repo": "owner//repo"}, "families": ["Bad"]}}}"#,
-    )
-    .expect("write invalid snapshot");
-    let app = FontbrewApp::with_paths(paths);
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
 
     let error = app
         .search(SearchRequest {
             query: "bad".to_string(),
             limit: None,
-            refresh: false,
-            offline: true,
         })
         .expect_err("invalid registry snapshot should fail");
 
@@ -220,24 +287,6 @@ fn search_rejects_invalid_registry_snapshot_before_use() {
         error,
         FontbrewError::RegistryValidationFailed { .. }
     ));
-}
-
-#[test]
-fn search_rejects_refresh_with_offline() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths);
-
-    let error = app
-        .search(SearchRequest {
-            query: String::new(),
-            limit: None,
-            refresh: true,
-            offline: true,
-        })
-        .expect_err("refresh cannot run in offline mode");
-
-    assert!(matches!(error, FontbrewError::Config { .. }));
 }
 
 #[test]
@@ -304,7 +353,6 @@ fn outdated_reports_newer_github_releases_and_local_packages_without_update_sour
     let report = app
         .outdated(OutdatedRequest {
             package_ids: Vec::new(),
-            offline: false,
         })
         .expect("check outdated packages");
 
@@ -327,51 +375,4 @@ fn outdated_reports_newer_github_releases_and_local_packages_without_update_sour
             github_releases_url("owner", "up-to-date"),
         ]
     );
-}
-
-#[test]
-fn outdated_offline_reports_github_packages_as_not_updatable_without_network() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_manifest(
-        &paths,
-        vec![
-            manifest_record(
-                "source-code-pro",
-                "v1.0.0",
-                ManifestSource::GitHub {
-                    owner: "adobe".to_string(),
-                    repo: "source-code-pro".to_string(),
-                },
-                None,
-            ),
-            manifest_record(
-                "local-only",
-                "local",
-                ManifestSource::LocalArchive {
-                    path: PathBuf::from("/tmp/local.zip"),
-                },
-                None,
-            ),
-        ],
-    );
-    let fake_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
-
-    let report = app
-        .outdated(OutdatedRequest {
-            package_ids: Vec::new(),
-            offline: true,
-        })
-        .expect("offline outdated should report without network");
-
-    assert!(report.packages.is_empty());
-    assert_eq!(report.not_updatable.len(), 2);
-    assert_eq!(report.not_updatable[0].package_id, package_id("local-only"));
-    assert_eq!(
-        report.not_updatable[1].package_id,
-        package_id("source-code-pro")
-    );
-    assert!(report.not_updatable[1].reason.contains("offline"));
-    assert!(fake_http.requested_urls().is_empty());
 }

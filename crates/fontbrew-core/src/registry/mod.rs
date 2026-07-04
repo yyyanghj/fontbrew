@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -89,6 +89,7 @@ impl RegistrySnapshotStore {
             return Ok(RegistryStatusReport {
                 available: false,
                 snapshot_path,
+                schema_version: None,
                 registry_updated_at: None,
                 snapshot_modified_at: None,
                 package_count: 0,
@@ -104,6 +105,7 @@ impl RegistrySnapshotStore {
         Ok(RegistryStatusReport {
             available: true,
             snapshot_path,
+            schema_version: Some(snapshot.schema_version),
             registry_updated_at: Some(snapshot.updated_at),
             snapshot_modified_at: modified_at,
             package_count: snapshot.packages.len(),
@@ -294,17 +296,14 @@ impl RegistryPackageRecord {
             ));
         }
 
-        for family in &self.families {
-            if family.as_str().trim().is_empty() {
-                return registry_invalid(format!(
-                    "registry package {} has an empty family name",
-                    package_id.as_str()
-                ));
-            }
-        }
+        validate_family_names(package_id, "families", &self.families, false)?;
 
         if let Some(asset) = &self.asset {
             asset.validate(package_id)?;
+        }
+
+        if let Some(install) = &self.install {
+            install.validate(package_id, &self.families)?;
         }
 
         Ok(())
@@ -328,6 +327,7 @@ impl RegistryPackageRecord {
             release: self.release.clone(),
             asset: self.asset.clone(),
             format_preference,
+            family_boundary: RegistryFamilyBoundary::resolve(&self.families, self.install.as_ref()),
         })
     }
 }
@@ -373,6 +373,10 @@ impl RegistryAssetSelection {
 pub struct RegistryInstallOptions {
     #[serde(default)]
     pub format_preference: Vec<RegistryFontFormat>,
+    #[serde(default)]
+    pub include_families: Vec<FamilyName>,
+    #[serde(default)]
+    pub exclude_families: Vec<FamilyName>,
 }
 
 impl RegistryInstallOptions {
@@ -381,6 +385,42 @@ impl RegistryInstallOptions {
             .iter()
             .map(RegistryFontFormat::font_format)
             .collect()
+    }
+
+    fn validate(
+        &self,
+        package_id: &PackageId,
+        default_include_families: &[FamilyName],
+    ) -> Result<()> {
+        validate_family_names(
+            package_id,
+            "install.includeFamilies",
+            &self.include_families,
+            true,
+        )?;
+        validate_family_names(
+            package_id,
+            "install.excludeFamilies",
+            &self.exclude_families,
+            true,
+        )?;
+
+        let effective_include_families = if self.include_families.is_empty() {
+            default_include_families
+        } else {
+            &self.include_families
+        };
+        for included_family in effective_include_families {
+            if family_matches_any(&self.exclude_families, included_family) {
+                return registry_invalid(format!(
+                    "registry package {} lists family {} in both included families and install.excludeFamilies",
+                    package_id.as_str(),
+                    included_family.as_str()
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -413,6 +453,61 @@ pub struct RegistryPackageRecipe {
     pub release: Option<RegistryReleaseSelection>,
     pub asset: Option<RegistryAssetSelection>,
     pub format_preference: Vec<FontFormat>,
+    pub family_boundary: RegistryFamilyBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryFamilyBoundary {
+    expected_families: Vec<FamilyName>,
+    include_families: Vec<FamilyName>,
+    exclude_families: Vec<FamilyName>,
+    has_explicit_include_families: bool,
+}
+
+impl RegistryFamilyBoundary {
+    fn resolve(families: &[FamilyName], install: Option<&RegistryInstallOptions>) -> Self {
+        let include_options =
+            install.and_then(|install| (!install.include_families.is_empty()).then_some(install));
+        let include_families = if let Some(install) = include_options {
+            install.include_families.clone()
+        } else {
+            families.to_vec()
+        };
+        let exclude_families = install
+            .map(|install| install.exclude_families.clone())
+            .unwrap_or_default();
+
+        Self {
+            expected_families: families.to_vec(),
+            include_families,
+            exclude_families,
+            has_explicit_include_families: include_options.is_some(),
+        }
+    }
+
+    pub fn expected_families(&self) -> &[FamilyName] {
+        &self.expected_families
+    }
+
+    pub fn include_families(&self) -> &[FamilyName] {
+        &self.include_families
+    }
+
+    pub fn exclude_families(&self) -> &[FamilyName] {
+        &self.exclude_families
+    }
+
+    pub(crate) fn includes_family(&self, family: &FamilyName) -> bool {
+        family_matches_any(&self.include_families, family)
+    }
+
+    pub(crate) fn excludes_family(&self, family: &FamilyName) -> bool {
+        family_matches_any(&self.exclude_families, family)
+    }
+
+    pub(crate) fn has_explicit_include_families(&self) -> bool {
+        self.has_explicit_include_families
+    }
 }
 
 fn deserialize_package_map<'de, D>(
@@ -500,6 +595,62 @@ fn validate_globs(package_id: &PackageId, field: &str, patterns: &[String]) -> R
     }
 
     Ok(())
+}
+
+fn validate_family_names(
+    package_id: &PackageId,
+    field: &str,
+    families: &[FamilyName],
+    allow_empty_list: bool,
+) -> Result<()> {
+    if families.is_empty() && !allow_empty_list {
+        return registry_invalid(format!(
+            "registry package {} must list at least one family",
+            package_id.as_str()
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for family in families {
+        let normalized = normalize_family_boundary_name(family.as_str());
+        if normalized.is_empty() {
+            return registry_invalid(format!(
+                "registry package {} has an empty {field} family name",
+                package_id.as_str()
+            ));
+        }
+
+        if !seen.insert(normalized) {
+            return registry_invalid(format!(
+                "registry package {} has duplicate {field} family {} after normalization",
+                package_id.as_str(),
+                family.as_str()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn family_matches_any(families: &[FamilyName], family: &FamilyName) -> bool {
+    let normalized = normalize_family_boundary_name(family.as_str());
+
+    families
+        .iter()
+        .any(|candidate| normalize_family_boundary_name(candidate.as_str()) == normalized)
+}
+
+pub(crate) fn normalize_family_boundary_name(name: &str) -> String {
+    let mut normalized = String::new();
+
+    for part in name.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(&part.to_lowercase());
+    }
+
+    normalized
 }
 
 fn registry_validation(source: impl std::error::Error) -> FontbrewError {

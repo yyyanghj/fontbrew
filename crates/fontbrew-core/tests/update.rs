@@ -221,11 +221,7 @@ fn github_release_json(version: &str, asset_name: &str, download_url: &str) -> S
 }
 
 fn update_request(package_ids: Vec<PackageId>, jobs: Option<usize>) -> UpdateRequest {
-    UpdateRequest {
-        package_ids,
-        jobs,
-        offline: false,
-    }
+    UpdateRequest { package_ids, jobs }
 }
 
 fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
@@ -368,11 +364,10 @@ fn install_github_source_code_pro_with_entries(
                 owner: "adobe".to_string(),
                 repo: "source-code-pro".to_string(),
             },
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         })
         .expect("plan GitHub install");
     let mut progress = NoProgress;
@@ -717,6 +712,149 @@ fn update_prepare_reuses_registry_asset_selection_for_registry_packages() {
     assert_eq!(plan.prepared.len(), 1);
     assert!(plan.failed.is_empty());
     assert_eq!(plan.prepared[0].target_version.as_str(), "v2.0.0");
+}
+
+#[test]
+fn update_prepare_uses_registry_recipe_family_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let snapshot = RegistrySnapshotV1::parse(
+        r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": { "type": "github", "repo": "adobe/source-code-pro" },
+      "families": ["Source Code Pro", "Inter"],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      }
+    }
+  }
+}"#,
+    )
+    .expect("parse registry snapshot");
+    RegistrySnapshotStore::new(paths.clone())
+        .write_snapshot(&snapshot)
+        .expect("write registry snapshot");
+    write_manifest(
+        &paths,
+        vec![manifest_record(
+            "source-code-pro",
+            "v1.0.0",
+            "Source Code Pro",
+            ManifestSource::Registry {
+                id: "source-code-pro".to_string(),
+            },
+            Some(ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            }),
+        )],
+    );
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            "https://downloads.example/source-code-pro.zip",
+        ),
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(vec![package_id("source-code-pro")], Some(1)),
+            &mut progress,
+            &NeverCancelled,
+        )
+        .expect("registry boundary failure should be reported in update plan");
+
+    assert!(plan.prepared.is_empty());
+    assert_eq!(plan.failed.len(), 1);
+    assert_eq!(plan.failed[0].package_id, package_id("source-code-pro"));
+    assert!(plan.failed[0]
+        .reason
+        .contains("missing expected registry recipe font families"));
+    assert!(plan.failed[0].reason.contains("Inter"));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn update_prepare_matches_registry_expected_families_after_normalization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let snapshot = RegistrySnapshotV1::parse(
+        r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": { "type": "github", "repo": "adobe/source-code-pro" },
+      "families": [" source   code pro "],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      }
+    }
+  }
+}"#,
+    )
+    .expect("parse registry snapshot");
+    RegistrySnapshotStore::new(paths.clone())
+        .write_snapshot(&snapshot)
+        .expect("write registry snapshot");
+    write_manifest(
+        &paths,
+        vec![manifest_record(
+            "source-code-pro",
+            "v1.0.0",
+            "Source Code Pro",
+            ManifestSource::Registry {
+                id: "source-code-pro".to_string(),
+            },
+            Some(ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            }),
+        )],
+    );
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            "https://downloads.example/source-code-pro.zip",
+        ),
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
+
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(vec![package_id("source-code-pro")], Some(1)),
+            &mut progress,
+            &NeverCancelled,
+        )
+        .expect("normalized registry expected family should match prepared family");
+
+    assert_eq!(plan.prepared.len(), 1);
+    assert!(plan.failed.is_empty());
+    assert_eq!(plan.prepared[0].package_id, package_id("source-code-pro"));
 }
 
 #[test]

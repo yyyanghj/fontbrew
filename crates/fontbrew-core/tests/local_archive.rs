@@ -11,7 +11,7 @@ use fontbrew_core::{
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, FontFormat, FontbrewApp, FontbrewError,
     InfoRequest, InstallRequest, InstallSource, NoCancellation, PackageId, PackageVersion,
-    PlanRisk, ProgressEvent, ProgressSink, RemovePlan, RemoveRequest,
+    PlanRisk, ProgressEvent, ProgressSink, ProviderKind, RemovePlan, RemoveRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -98,11 +98,10 @@ fn local_archive_request_with_formats(
 ) -> InstallRequest {
     InstallRequest {
         source: InstallSource::LocalPath(archive_path.to_path_buf()),
+        package_id_override: None,
         format_preference,
         asset_selector: None,
         reinstall,
-        refresh: false,
-        offline: true,
     }
 }
 
@@ -124,6 +123,67 @@ fn write_fixture_archive(archive_path: &Path, entries: &[(&str, &str)]) {
     }
 
     zip.finish().expect("finish archive");
+}
+
+fn write_archive_entry_bytes(archive_path: &Path, entry_name: &str, bytes: &[u8]) {
+    let file = File::create(archive_path).expect("create archive");
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o100644);
+    zip.start_file(entry_name, options)
+        .expect("start archive entry");
+    zip.write_all(bytes).expect("write archive entry");
+    zip.finish().expect("finish archive");
+}
+
+fn local_archive_request_with_package_id_override(
+    archive_path: &Path,
+    package_id_override: PackageId,
+) -> InstallRequest {
+    InstallRequest {
+        source: InstallSource::LocalPath(archive_path.to_path_buf()),
+        package_id_override: Some(package_id_override),
+        format_preference: Vec::new(),
+        asset_selector: None,
+        reinstall: false,
+    }
+}
+
+fn font_bytes_with_unsafe_family_name(fixture_name: &str) -> Vec<u8> {
+    let mut bytes = fs::read(fixture_font_path(fixture_name)).expect("read fixture font");
+    let from = utf16be("Source Code Pro");
+    let to = utf16be("Source/Code Pro");
+    let replacements = replace_all_same_length(&mut bytes, &from, &to);
+
+    assert!(replacements > 0, "fixture should contain family name bytes");
+
+    bytes
+}
+
+fn utf16be(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect::<Vec<_>>()
+}
+
+fn replace_all_same_length(bytes: &mut [u8], from: &[u8], to: &[u8]) -> usize {
+    assert_eq!(from.len(), to.len());
+
+    let mut replacements = 0;
+    let mut offset = 0;
+    while offset + from.len() <= bytes.len() {
+        if &bytes[offset..offset + from.len()] == from {
+            bytes[offset..offset + to.len()].copy_from_slice(to);
+            replacements += 1;
+            offset += from.len();
+        } else {
+            offset += 1;
+        }
+    }
+
+    replacements
 }
 
 fn write_invalid_font_archive(archive_path: &Path) {
@@ -507,6 +567,169 @@ fn local_archive_install_list_info_remove_round_trip() {
 }
 
 #[test]
+fn local_archive_package_id_override_installs_non_normalizable_family_and_records_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("unsafe-family.zip");
+    let unsafe_family_font = font_bytes_with_unsafe_family_name("SourceCodePro-Regular.ttf");
+    write_archive_entry_bytes(&archive_path, "UnsafeFamily.ttf", &unsafe_family_font);
+
+    let error = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect_err("unsafe family should not normalize into a package id");
+
+    assert!(matches!(error, FontbrewError::InvalidPackageId { .. }));
+    assert!(format!("{error}").contains("Source/Code Pro"));
+    assert!(staging_entries(&paths).is_empty());
+
+    let plan = app
+        .install_plan(local_archive_request_with_package_id_override(
+            &archive_path,
+            package_id("custom-local"),
+        ))
+        .expect("override should name the local package");
+
+    assert_eq!(plan.package_id, package_id("custom-local"));
+
+    let mut progress = NoProgress;
+    let cancellation = NeverCancelled;
+    let report = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut progress,
+            &cancellation,
+        )
+        .expect("install local archive with override");
+
+    assert_eq!(report.package_id, package_id("custom-local"));
+    assert_eq!(report.families[0].as_str(), "Source/Code Pro");
+
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("custom-local"))
+        .expect("override package should be recorded");
+    assert_eq!(record.package_id, package_id("custom-local"));
+    assert_eq!(record.families[0].as_str(), "Source/Code Pro");
+}
+
+#[test]
+fn direct_local_archive_rejects_multiple_families_without_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    let error = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect_err("multi-family local archive should require an explicit boundary");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    let message = error.to_string();
+    assert!(message.contains("multiple font families"));
+    assert!(message.contains("Source Code Pro"));
+    assert!(message.contains("Inter"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    let error = app
+        .install_plan(local_archive_request_with_package_id_override(
+            &archive_path,
+            package_id("custom-local"),
+        ))
+        .expect_err("override should not define a family boundary");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    let message = error.to_string();
+    assert!(message.contains("multiple font families"));
+    assert!(message.contains("Source Code Pro"));
+    assert!(message.contains("Inter"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
+fn package_id_override_is_rejected_for_non_local_sources() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+
+    for request in [
+        InstallRequest {
+            source: InstallSource::RegistryName("source-code-pro".to_string()),
+            package_id_override: Some(package_id("custom-local")),
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        },
+        InstallRequest {
+            source: InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+            package_id_override: Some(package_id("custom-local")),
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        },
+        InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: Some(package_id("custom-local")),
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        },
+        InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Google,
+                id: "source-sans-3".to_string(),
+            },
+            package_id_override: Some(package_id("custom-local")),
+            format_preference: Vec::new(),
+            asset_selector: None,
+            reinstall: false,
+        },
+    ] {
+        let error = app
+            .install_plan(request)
+            .expect_err("override should be local-only");
+
+        assert!(matches!(error, FontbrewError::Config { .. }));
+        assert!(error.to_string().contains("--id"));
+        assert!(error.to_string().contains("local archive"));
+    }
+
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[test]
 fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -549,7 +772,7 @@ fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
 }
 
 #[test]
-fn failed_activation_rolls_back_copied_package_files() {
+fn install_plan_rejects_reserved_copy_activation_config_and_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -571,21 +794,15 @@ activation_strategy = "copy"
     )
     .expect("write copy activation config");
 
-    let plan = app
-        .install_plan(local_archive_request(&archive_path, false))
-        .expect("plan local archive install");
-    let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
     let error = app
-        .apply_install(
-            plan,
-            ExecutionPolicy::SafeOnly,
-            &mut progress,
-            &cancellation,
-        )
-        .expect_err("copy activation is not implemented");
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect_err("copy activation config should be rejected");
 
-    assert!(matches!(error, FontbrewError::NotImplemented { .. }));
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    let message = error.to_string();
+    assert!(message.contains("copy activation"));
+    assert!(message.contains("reserved"));
+    assert!(message.contains("not supported"));
     assert!(!paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -593,6 +810,7 @@ activation_strategy = "copy"
         )
         .exists());
     assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
 }
 
 #[test]

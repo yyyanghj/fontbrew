@@ -1,8 +1,8 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, fs, sync::Arc};
 
 use crate::config::FontbrewConfig;
 use crate::error::{FontbrewError, Result};
-use crate::fetch::{HttpClient, ReqwestHttpClient};
+use crate::fetch::{HttpClient, HttpHeader, HttpRequest, ReqwestHttpClient};
 use crate::fs::GlobalFileLock;
 use crate::install;
 use crate::model::{
@@ -14,7 +14,9 @@ use crate::model::{
 };
 use crate::platform::FontbrewPaths;
 use crate::providers::{FontsourceProvider, GoogleProvider, ProviderSearchRequest};
-use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
+use crate::registry::{
+    registry_url_from_env, RegistryHttpClient, RegistrySnapshotStore, ReqwestRegistryHttpClient,
+};
 use crate::sources::ProviderSource;
 use crate::update;
 
@@ -60,11 +62,14 @@ impl FontbrewApp {
     ) -> Result<InstallPlan> {
         ensure_not_cancelled(cancellation)?;
         let paths = self.paths()?;
+        install::ensure_package_id_override_allowed_for_source(&request)?;
         match request.source.clone() {
             crate::InstallSource::LocalPath(_) => {
                 install::install_plan(&paths, request, cancellation)
             }
             crate::InstallSource::RegistryName(short_name) => {
+                self.refresh_registry_snapshot(&paths)?;
+                ensure_not_cancelled(cancellation)?;
                 let recipe =
                     RegistrySnapshotStore::new(paths.clone()).resolve_short_name(&short_name)?;
                 ensure_not_cancelled(cancellation)?;
@@ -187,22 +192,13 @@ impl FontbrewApp {
     }
 
     pub fn search(&self, request: SearchRequest) -> Result<SearchReport> {
-        if request.refresh && request.offline {
-            return Err(FontbrewError::Config {
-                message: "search cannot use --refresh with --offline".to_string(),
-            });
-        }
-
-        if request.refresh {
-            self.registry_update()?;
-        }
-
         let paths = self.paths()?;
         if let Some(provider_source) = ProviderSource::parse_prefixed(&request.query) {
             let results = self.search_provider_source(&paths, provider_source, &request)?;
             return Ok(SearchReport { results });
         }
 
+        self.refresh_registry_snapshot(&paths)?;
         let mut results = RegistrySnapshotStore::new(paths.clone())
             .search(&request.query, None)?
             .into_iter()
@@ -224,7 +220,6 @@ impl FontbrewApp {
                 ProviderSearchRequest {
                     query: &request.query,
                     limit: remaining_limit,
-                    offline: request.offline,
                 },
             )?;
             results.extend(fontsource_results);
@@ -233,13 +228,11 @@ impl FontbrewApp {
         let remaining_limit = request
             .limit
             .map(|limit| limit.saturating_sub(results.len()));
-        if remaining_limit != Some(0) && !request.offline && GoogleProvider::api_key_is_configured()
-        {
+        if remaining_limit != Some(0) && GoogleProvider::api_key_is_configured() {
             let google_results = GoogleProvider::new(&paths, self.http_client()?.as_ref()).search(
                 ProviderSearchRequest {
                     query: &request.query,
                     limit: remaining_limit,
-                    offline: false,
                 },
             )?;
             results.extend(google_results);
@@ -291,6 +284,23 @@ impl FontbrewApp {
         Ok(Arc::new(ReqwestHttpClient::try_new()?))
     }
 
+    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<()> {
+        let store = RegistrySnapshotStore::new(paths.clone());
+        let registry_url = registry_url_from_env();
+
+        if let Some(http_client) = &self.http_client {
+            let client = AppRegistryHttpClient {
+                http_client: http_client.as_ref(),
+            };
+            store.update_from_client(&client, &registry_url)?;
+            return Ok(());
+        }
+
+        let client = ReqwestRegistryHttpClient::default();
+        store.update_from_client(&client, &registry_url)?;
+        Ok(())
+    }
+
     fn search_provider_source(
         &self,
         paths: &FontbrewPaths,
@@ -304,16 +314,54 @@ impl FontbrewApp {
                 .search(ProviderSearchRequest {
                     query: &provider_source.id,
                     limit: request.limit,
-                    offline: request.offline,
                 }),
             crate::ProviderKind::Google => {
                 GoogleProvider::new(paths, http_client.as_ref()).search(ProviderSearchRequest {
                     query: &provider_source.id,
                     limit: request.limit,
-                    offline: request.offline,
                 })
             }
         }
+    }
+}
+
+struct AppRegistryHttpClient<'a> {
+    http_client: &'a dyn HttpClient,
+}
+
+impl RegistryHttpClient for AppRegistryHttpClient<'_> {
+    fn get_text(&self, url: &str) -> Result<String> {
+        if let Some(path) = url.strip_prefix("file://") {
+            return fs::read_to_string(path).map_err(FontbrewError::from);
+        }
+
+        let response = self.http_client.get(HttpRequest {
+            url: url.to_string(),
+            display_url: None,
+            headers: vec![
+                HttpHeader {
+                    name: "User-Agent".to_string(),
+                    value: "fontbrew".to_string(),
+                },
+                HttpHeader {
+                    name: "Accept".to_string(),
+                    value: "application/json".to_string(),
+                },
+            ],
+        })?;
+
+        if !(200..300).contains(&response.status) {
+            return Err(FontbrewError::Network {
+                message: format!(
+                    "registry request failed with HTTP {} for {url}",
+                    response.status
+                ),
+            });
+        }
+
+        String::from_utf8(response.body).map_err(|source| FontbrewError::Network {
+            message: format!("could not read registry response from {url}: {source}"),
+        })
     }
 }
 

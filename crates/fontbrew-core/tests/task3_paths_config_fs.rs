@@ -92,7 +92,7 @@ schema_version = 1
 
 [install]
 format_preference = ["ttf", "otf"]
-activation_strategy = "copy"
+activation_strategy = "symlink"
 
 [registry]
 auto_update = false
@@ -110,10 +110,34 @@ update_concurrency = 2
         config.format_preference,
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
+    assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
     assert!(!config.registry_auto_update);
     assert_eq!(config.metadata_ttl, Duration::from_secs(6 * 60 * 60));
     assert_eq!(config.update_concurrency, 2);
+}
+
+#[test]
+fn config_file_rejects_reserved_copy_activation_strategy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = 1
+
+[install]
+activation_strategy = "copy"
+"#,
+    )
+    .expect("write config");
+
+    let error = FontbrewConfig::load(&config_path).expect_err("copy activation should be rejected");
+
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    let message = error.to_string();
+    assert!(message.contains("copy activation"));
+    assert!(message.contains("reserved"));
+    assert!(message.contains("not supported"));
 }
 
 #[test]
@@ -225,8 +249,8 @@ fn config_set_and_get_support_all_known_scalar_keys() {
     for (key, raw_value, expected_value) in [
         (
             "install.activation_strategy",
-            "copy",
-            ConfigValue::String("copy".to_string()),
+            "symlink",
+            ConfigValue::String("symlink".to_string()),
         ),
         ("registry.auto_update", "false", ConfigValue::Bool(false)),
         ("network.metadata_ttl_hours", "6", ConfigValue::Integer(6)),
@@ -249,6 +273,27 @@ fn config_set_and_get_support_all_known_scalar_keys() {
         assert_eq!(get_report.key, key);
         assert_eq!(get_report.value, expected_value);
     }
+}
+
+#[test]
+fn config_set_rejects_reserved_copy_activation_strategy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+
+    let error = app
+        .config_set(ConfigSetRequest {
+            key: "install.activation_strategy".to_string(),
+            value: "copy".to_string(),
+        })
+        .expect_err("copy activation should be rejected");
+
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    let message = error.to_string();
+    assert!(message.contains("copy activation"));
+    assert!(message.contains("reserved"));
+    assert!(message.contains("not supported"));
+    assert!(!paths.config_path().exists());
 }
 
 #[test]

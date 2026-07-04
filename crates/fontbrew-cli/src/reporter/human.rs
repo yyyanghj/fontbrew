@@ -284,6 +284,9 @@ impl Reporter for HumanReporter {
 
         writeln!(stdout, "Registry snapshot: available")?;
         writeln!(stdout, "Path: {}", report.snapshot_path.display())?;
+        if let Some(schema_version) = report.schema_version {
+            writeln!(stdout, "Schema version: {schema_version}")?;
+        }
         if let Some(updated_at) = report.registry_updated_at {
             writeln!(stdout, "Registry updated at: {updated_at}")?;
         }

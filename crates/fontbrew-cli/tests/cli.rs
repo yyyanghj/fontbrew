@@ -195,6 +195,83 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
 }
 
 #[test]
+fn install_local_archive_with_package_id_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["--quiet", "install"])
+        .arg(&archive_path)
+        .args(["--id", "custom-local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed custom-local"))
+        .stderr(predicate::str::is_empty());
+
+    fontbrew(&home)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("custom-local")
+                .and(predicate::str::contains("Source Code Pro")),
+        )
+        .stderr(predicate::str::is_empty());
+
+    assert!(home
+        .join(".local/share/fontbrew/packages/custom-local/local/files/SourceCodePro-Regular.ttf")
+        .exists());
+}
+
+#[test]
+fn install_rejects_invalid_package_id_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    fontbrew(&home)
+        .args(["install"])
+        .arg(&archive_path)
+        .args(["--id", "Source Code Pro"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("invalid package id")
+                .and(predicate::str::contains("lowercase")),
+        );
+
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
+fn install_rejects_package_id_override_for_non_local_sources() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    for source in [
+        "source-code-pro",
+        "adobe/source-code-pro",
+        "fontsource:source-code-pro",
+        "google:source-sans-3",
+    ] {
+        fontbrew(&home)
+            .args(["install", source, "--id", "custom-local"])
+            .assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            .stderr(
+                predicate::str::contains("--id").and(predicate::str::contains("local archive")),
+            );
+    }
+
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
 fn uninstall_alias_removes_local_archive_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -322,6 +399,47 @@ fn config_set_and_get_report_human_and_json_values() {
     assert_eq!(json["report"]["key"], "install.format_preference");
     assert_eq!(json["report"]["value"][0], "ttf");
     assert_eq!(json["report"]["value"][1], "otf");
+}
+
+#[test]
+fn config_set_rejects_reserved_copy_activation_strategy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    fontbrew(&home)
+        .args(["config", "set", "install.activation_strategy", "copy"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("copy activation")
+                .and(predicate::str::contains("reserved"))
+                .and(predicate::str::contains("not supported")),
+        );
+
+    let output = fontbrew(&home)
+        .args([
+            "--json",
+            "config",
+            "set",
+            "install.activation_strategy",
+            "copy",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+    let message = json["error"]["message"]
+        .as_str()
+        .expect("error message should be a string");
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["error"]["kind"], "config");
+    assert!(message.contains("copy activation"));
+    assert!(message.contains("reserved"));
+    assert!(message.contains("not supported"));
 }
 
 #[test]
@@ -657,7 +775,21 @@ fn registry_status_reports_missing_and_present_snapshots() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Registry snapshot: missing"))
+        .stdout(predicate::str::contains("Schema version").not())
         .stderr(predicate::str::is_empty());
+
+    let missing_output = fontbrew(&home)
+        .args(["--json", "registry", "status"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let missing_json = stdout_json(&missing_output);
+
+    assert_eq!(missing_json["command"], "registry_status");
+    assert_eq!(missing_json["report"]["available"], false);
+    assert!(missing_json["report"]["schemaVersion"].is_null());
 
     write_registry_snapshot(&registry_path);
     fontbrew(&home)
@@ -668,6 +800,14 @@ fn registry_status_reports_missing_and_present_snapshots() {
         .args(["registry", "update"])
         .assert()
         .success();
+
+    fontbrew(&home)
+        .args(["registry", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Registry snapshot: available"))
+        .stdout(predicate::str::contains("Schema version: 1"))
+        .stderr(predicate::str::is_empty());
 
     let output = fontbrew(&home)
         .args(["--json", "registry", "status"])
@@ -681,6 +821,7 @@ fn registry_status_reports_missing_and_present_snapshots() {
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["command"], "registry_status");
     assert_eq!(json["report"]["available"], true);
+    assert_eq!(json["report"]["schemaVersion"], 1);
     assert_eq!(json["report"]["package_count"], 1);
     assert_eq!(
         json["report"]["registry_updated_at"],
@@ -700,7 +841,7 @@ fn json_search_refreshes_registry_snapshot_and_reports_matches_on_stdout_only() 
             REGISTRY_URL_ENV_VAR,
             format!("file://{}", registry_path.display()),
         )
-        .args(["--json", "search", "code", "--limit", "1", "--refresh"])
+        .args(["--json", "search", "code", "--limit", "1"])
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -733,7 +874,7 @@ fn human_search_reports_registry_result_fields_on_stdout_only() {
             REGISTRY_URL_ENV_VAR,
             format!("file://{}", registry_path.display()),
         )
-        .args(["search", "code", "--limit", "1", "--refresh"])
+        .args(["search", "code", "--limit", "1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -756,7 +897,7 @@ fn json_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
         .success();
 
     let output = fontbrew(&home)
-        .args(["--json", "outdated", "--offline", "source-code-pro"])
+        .args(["--json", "outdated", "source-code-pro"])
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -779,7 +920,7 @@ fn json_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
 }
 
 #[test]
-fn human_outdated_offline_reports_local_archive_as_not_updatable_on_stdout_only() {
+fn human_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
     let archive_path = temp.path().join("source-code-pro.zip");
@@ -792,7 +933,7 @@ fn human_outdated_offline_reports_local_archive_as_not_updatable_on_stdout_only(
         .success();
 
     fontbrew(&home)
-        .args(["outdated", "--offline", "source-code-pro"])
+        .args(["outdated", "source-code-pro"])
         .assert()
         .success()
         .stdout(

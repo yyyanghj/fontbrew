@@ -371,10 +371,8 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
 
     let report = app
         .search(SearchRequest {
-            query: "Abel".to_string(),
+            query: "fontsource:Abel".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect("search Fontsource");
 
@@ -416,7 +414,6 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
     let paths = test_paths(&temp);
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(&fontsource_list_url("Source%20Sans%203"), "[]");
     fake_http.with_text(
         &google_webfonts_url("Source%20Sans%203", "test-google-key"),
         r#"{
@@ -439,10 +436,8 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
 
     let report = app
         .search(SearchRequest {
-            query: "Source Sans 3".to_string(),
+            query: "google:source-sans-3".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect("search Google Fonts");
 
@@ -460,10 +455,7 @@ fn google_search_returns_installable_ttf_result_with_provider_source() {
     );
     assert_eq!(
         fake_http.requested_urls(),
-        vec![
-            fontsource_list_url("Source%20Sans%203"),
-            google_webfonts_url("Source%20Sans%203", "test-google-key"),
-        ]
+        vec![google_webfonts_url("Source%20Sans%203", "test-google-key"),]
     );
     assert!(!provider_metadata_files(&paths).is_empty());
     assert_provider_metadata_has_no_font_binaries(&paths);
@@ -476,7 +468,6 @@ fn google_search_filters_results_without_desktop_font_files() {
     let paths = test_paths(&temp);
     write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(&fontsource_list_url("Web%20Only"), "[]");
     fake_http.with_text(
         &google_webfonts_url("Web%20Only", "test-google-key"),
         r#"{
@@ -500,10 +491,8 @@ fn google_search_filters_results_without_desktop_font_files() {
 
     let report = app
         .search(SearchRequest {
-            query: "Web Only".to_string(),
+            query: "google:web-only".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect("search Google Fonts");
 
@@ -523,8 +512,6 @@ fn explicit_google_search_without_api_key_returns_actionable_error() {
         .search(SearchRequest {
             query: "google:source-sans-3".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect_err("missing Google Fonts API key should fail explicit Google search");
 
@@ -551,8 +538,6 @@ fn google_rate_limit_returns_actionable_error() {
         .search(SearchRequest {
             query: "google:source-sans-3".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect_err("rate-limited Google Fonts search should fail");
 
@@ -574,8 +559,6 @@ fn google_transport_error_does_not_expose_api_key() {
         .search(SearchRequest {
             query: "google:source-sans-3".to_string(),
             limit: None,
-            refresh: false,
-            offline: false,
         })
         .expect_err("transport failure should be reported");
     let message = error.to_string();
@@ -621,11 +604,10 @@ fn google_install_downloads_ttf_and_records_provider_manifest_source() {
                 provider: ProviderKind::Google,
                 id: "source-sans-3".to_string(),
             },
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         })
         .expect("plan Google Fonts install");
 
@@ -701,11 +683,10 @@ fn explicit_google_install_without_api_key_returns_actionable_error() {
                 provider: ProviderKind::Google,
                 id: "source-sans-3".to_string(),
             },
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         })
         .expect_err("missing Google Fonts API key should fail Google install");
 
@@ -715,7 +696,7 @@ fn explicit_google_install_without_api_key_returns_actionable_error() {
 }
 
 #[test]
-fn fontsource_offline_search_uses_metadata_snapshots_without_network() {
+fn fontsource_search_refreshes_metadata_snapshot_on_each_call() {
     let _env = EnvVarGuard::set_google_fonts_api_key(None);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -759,28 +740,75 @@ fn fontsource_offline_search_uses_metadata_snapshots_without_network() {
 }"#,
     );
     let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
-    app.search(SearchRequest {
-        query: "Abel".to_string(),
-        limit: None,
-        refresh: false,
-        offline: false,
-    })
-    .expect("prime Fontsource metadata snapshot");
-
-    let offline_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths, offline_http.clone());
-    let report = app
+    let first_report = app
         .search(SearchRequest {
-            query: "Abel".to_string(),
+            query: "fontsource:Abel".to_string(),
             limit: None,
-            refresh: false,
-            offline: true,
         })
-        .expect("offline search should use Fontsource metadata snapshot");
+        .expect("first search should refresh Fontsource metadata snapshot");
 
-    assert_eq!(report.results.len(), 1);
-    assert_eq!(report.results[0].source, "fontsource:abel");
-    assert!(offline_http.requested_urls().is_empty());
+    assert_eq!(first_report.results.len(), 1);
+    assert_eq!(
+        first_report.results[0]
+            .version
+            .as_ref()
+            .expect("version")
+            .as_str(),
+        "v18"
+    );
+
+    fake_http.with_text(
+        &fontsource_detail_url("abel"),
+        r#"{
+  "id": "abel",
+  "family": "Abel",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-06-01",
+  "version": "v19",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/abel.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+
+    let second_report = app
+        .search(SearchRequest {
+            query: "fontsource:Abel".to_string(),
+            limit: None,
+        })
+        .expect("second search should refresh Fontsource metadata snapshot");
+
+    assert_eq!(second_report.results.len(), 1);
+    assert_eq!(second_report.results[0].source, "fontsource:abel");
+    assert_eq!(
+        second_report.results[0]
+            .version
+            .as_ref()
+            .expect("version")
+            .as_str(),
+        "v19"
+    );
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![
+            fontsource_list_url("Abel"),
+            fontsource_detail_url("abel"),
+            fontsource_list_url("Abel"),
+            fontsource_detail_url("abel"),
+        ]
+    );
+    assert_provider_metadata_has_no_font_binaries(&paths);
 }
 
 #[test]
@@ -825,11 +853,10 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
                 provider: ProviderKind::Fontsource,
                 id: "source-code-pro".to_string(),
             },
+            package_id_override: None,
             format_preference: Vec::new(),
             asset_selector: None,
             reinstall: false,
-            refresh: false,
-            offline: false,
         })
         .expect("plan Fontsource install");
 
