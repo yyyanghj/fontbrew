@@ -746,14 +746,6 @@ fn package_id_override_is_rejected_for_non_local_sources() {
 
     for request in [
         InstallRequest {
-            source: InstallSource::RegistryName("source-code-pro".to_string()),
-            package_id_override: Some(package_id("custom-local")),
-            format_preference: Vec::new(),
-            asset_selector: None,
-            selected_families: Vec::new(),
-            reinstall: false,
-        },
-        InstallRequest {
             source: InstallSource::GitHubRepo {
                 owner: "adobe".to_string(),
                 repo: "source-code-pro".to_string(),
@@ -768,17 +760,6 @@ fn package_id_override_is_rejected_for_non_local_sources() {
             source: InstallSource::Provider {
                 provider: ProviderKind::Fontsource,
                 id: "source-code-pro".to_string(),
-            },
-            package_id_override: Some(package_id("custom-local")),
-            format_preference: Vec::new(),
-            asset_selector: None,
-            selected_families: Vec::new(),
-            reinstall: false,
-        },
-        InstallRequest {
-            source: InstallSource::Provider {
-                provider: ProviderKind::Google,
-                id: "source-sans-3".to_string(),
             },
             package_id_override: Some(package_id("custom-local")),
             format_preference: Vec::new(),
@@ -1277,7 +1258,7 @@ fn repeated_local_archive_install_without_reinstall_is_noop() {
 }
 
 #[test]
-fn remove_keeps_unmanaged_files_and_registry_config_provider_metadata() {
+fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1290,9 +1271,8 @@ fn remove_keeps_unmanaged_files_and_registry_config_provider_metadata() {
 
     let unmanaged_activation_file = paths.activation_dir().join("Unmanaged.ttf");
     fs::write(&unmanaged_activation_file, b"unmanaged").expect("write unmanaged activation file");
-    fs::write(paths.registry_snapshot_path(), b"registry").expect("write registry metadata");
     fs::create_dir_all(paths.provider_metadata_dir()).expect("create provider metadata dir");
-    let provider_metadata_file = paths.provider_metadata_dir().join("google.json");
+    let provider_metadata_file = paths.provider_metadata_dir().join("fontsource.json");
     fs::write(&provider_metadata_file, b"provider").expect("write provider metadata");
     let config_path = paths.config_path();
     fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
@@ -1316,10 +1296,6 @@ fn remove_keeps_unmanaged_files_and_registry_config_provider_metadata() {
     assert_eq!(
         fs::read(&unmanaged_activation_file).expect("unmanaged activation file remains"),
         b"unmanaged"
-    );
-    assert_eq!(
-        fs::read(paths.registry_snapshot_path()).expect("registry metadata remains"),
-        b"registry"
     );
     assert_eq!(
         fs::read(provider_metadata_file).expect("provider metadata remains"),

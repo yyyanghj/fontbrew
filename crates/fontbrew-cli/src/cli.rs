@@ -64,7 +64,7 @@ enum Command {
     /// Remove a managed package.
     #[command(alias = "uninstall")]
     Remove(RemoveArgs),
-    /// Search installable registry and provider packages.
+    /// Search installable Fontsource packages.
     Search(SearchArgs),
     /// Check managed packages for available updates.
     Outdated(OutdatedArgs),
@@ -72,8 +72,6 @@ enum Command {
     Update(UpdateArgs),
     /// Read and update Fontbrew configuration.
     Config(ConfigArgs),
-    /// Manage the local first-party registry snapshot.
-    Registry(RegistryArgs),
     /// Update the fontbrew CLI binary to the latest stable release.
     SelfUpdate(SelfUpdateArgs),
 }
@@ -90,8 +88,8 @@ impl Command {
 #[derive(Debug, Args)]
 struct InstallArgs {
     #[arg(
-        help = "Source to install: registry name, provider:id, owner/repo, or local archive.",
-        long_help = "Source to install: registry name, provider:id, owner/repo, or local archive. Provider sources include fontsource:<id> and google:<id>. Google Fonts sources require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+        help = "Source to install: Fontsource id, fontsource:<id>, owner/repo, or local archive.",
+        long_help = "Source to install: Fontsource id, fontsource:<id>, owner/repo, or local archive. Unprefixed names are exact Fontsource package IDs."
     )]
     source: String,
 
@@ -158,8 +156,8 @@ struct RemoveArgs {
 #[derive(Debug, Args)]
 struct SearchArgs {
     #[arg(
-        help = "Query or provider:id to search.",
-        long_help = "Query or provider:id to search. Provider sources include fontsource:<id> and google:<id>. Google Fonts searches require GOOGLE_FONTS_API_KEY from the environment, and the key is never stored in config."
+        help = "Query or fontsource:<id> to search.",
+        long_help = "Query or fontsource:<id> to search. Search uses Fontsource package metadata."
     )]
     query: Option<String>,
 
@@ -209,20 +207,6 @@ struct ConfigGetArgs {
 struct ConfigSetArgs {
     key: String,
     value: String,
-}
-
-#[derive(Debug, Args)]
-struct RegistryArgs {
-    #[command(subcommand)]
-    command: RegistryCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum RegistryCommand {
-    /// Refresh the local registry metadata snapshot.
-    Update,
-    /// Show local registry snapshot status.
-    Status,
 }
 
 #[derive(Debug, Args)]
@@ -315,7 +299,6 @@ fn execute(
         Command::Outdated(args) => outdated(args, app, reporter),
         Command::Update(args) => update(args, app, reporter, confirmer, cancellation),
         Command::Config(args) => config(args, app, reporter),
-        Command::Registry(args) => registry(args, app, reporter),
         Command::SelfUpdate(args) => run_self_update(args, reporter, confirmer, cancellation),
     }
 }
@@ -615,19 +598,6 @@ fn config(args: ConfigArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> C
     }
 }
 
-fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
-    match args.command {
-        RegistryCommand::Update => {
-            let report = app.registry_update()?;
-            reporter.render_registry_update_report(report)
-        }
-        RegistryCommand::Status => {
-            let report = app.registry_status()?;
-            reporter.render_registry_status_report(report)
-        }
-    }
-}
-
 fn run_self_update(
     args: SelfUpdateArgs,
     reporter: &mut dyn Reporter,
@@ -657,7 +627,10 @@ fn install_source_from_arg(source: &str) -> InstallSource {
     } else if looks_like_invalid_local_path(source) {
         InstallSource::LocalPath(path)
     } else {
-        InstallSource::RegistryName(source.to_string())
+        InstallSource::Provider {
+            provider: fontbrew_core::ProviderKind::Fontsource,
+            id: source.to_string(),
+        }
     }
 }
 
@@ -741,7 +714,7 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn cli_help_documents_provider_prefixes_and_google_fonts_api_key_environment_variable() {
+    fn cli_help_documents_fontsource_sources() {
         let mut install_command = Cli::command();
         let install_help = install_command
             .find_subcommand_mut("install")
@@ -757,10 +730,7 @@ mod tests {
 
         for help in [install_help, search_help] {
             assert!(help.contains("fontsource:<id>"));
-            assert!(help.contains("google:<id>"));
-            assert!(help.contains("GOOGLE_FONTS_API_KEY"));
-            assert!(help.contains("environment"));
-            assert!(help.contains("never stored in config"));
+            assert!(help.contains("Fontsource"));
         }
     }
 
@@ -819,13 +789,13 @@ mod tests {
     }
 
     #[test]
-    fn install_source_parses_google_prefix_as_provider_source() {
-        let source = install_source_from_arg("google:source-sans-3");
+    fn install_source_parses_unprefixed_name_as_fontsource_source() {
+        let source = install_source_from_arg("source-sans-3");
 
         assert_eq!(
             source,
             InstallSource::Provider {
-                provider: fontbrew_core::ProviderKind::Google,
+                provider: fontbrew_core::ProviderKind::Fontsource,
                 id: "source-sans-3".to_string(),
             }
         );
@@ -920,23 +890,15 @@ mod tests {
         .consumes_cancellation());
         assert!(!Command::Config(ConfigArgs {
             command: ConfigCommand::Get(ConfigGetArgs {
-                key: "registry.url".to_string(),
+                key: "network.metadata_ttl_hours".to_string(),
             }),
         })
         .consumes_cancellation());
         assert!(!Command::Config(ConfigArgs {
             command: ConfigCommand::Set(ConfigSetArgs {
-                key: "registry.url".to_string(),
-                value: "https://example.test/registry.json".to_string(),
+                key: "network.metadata_ttl_hours".to_string(),
+                value: "24".to_string(),
             }),
-        })
-        .consumes_cancellation());
-        assert!(!Command::Registry(RegistryArgs {
-            command: RegistryCommand::Update,
-        })
-        .consumes_cancellation());
-        assert!(!Command::Registry(RegistryArgs {
-            command: RegistryCommand::Status,
         })
         .consumes_cancellation());
     }

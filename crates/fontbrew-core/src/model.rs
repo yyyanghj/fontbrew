@@ -274,13 +274,11 @@ impl OperationId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
-    Google,
     Fontsource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallSource {
-    RegistryName(String),
     Provider { provider: ProviderKind, id: String },
     GitHubRepo { owner: String, repo: String },
     LocalPath(PathBuf),
@@ -483,22 +481,9 @@ pub(crate) struct PreparedInstallPackage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PreparedInstallSource {
-    LocalArchive {
-        path: PathBuf,
-    },
-    GitHub {
-        owner: String,
-        repo: String,
-    },
-    Registry {
-        id: String,
-        github_owner: String,
-        github_repo: String,
-    },
-    Provider {
-        provider: ProviderKind,
-        id: String,
-    },
+    LocalArchive { path: PathBuf },
+    GitHub { owner: String, repo: String },
+    Provider { provider: ProviderKind, id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,23 +658,4 @@ pub struct SearchResult {
     pub source: String,
     pub version: Option<PackageVersion>,
     pub families: Vec<FamilyName>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegistryUpdateReport {
-    pub registry_url: String,
-    pub snapshot_path: PathBuf,
-    pub registry_updated_at: String,
-    pub package_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegistryStatusReport {
-    pub available: bool,
-    pub snapshot_path: PathBuf,
-    #[serde(rename = "schemaVersion")]
-    pub schema_version: Option<u64>,
-    pub registry_updated_at: Option<String>,
-    pub snapshot_modified_at: Option<String>,
-    pub package_count: usize,
 }

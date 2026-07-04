@@ -12,16 +12,12 @@ use crate::model::{ConfigGetRequest, ConfigReport, ConfigSetRequest, ConfigValue
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_METADATA_TTL_HOURS: u64 = 24;
 const DEFAULT_UPDATE_CONCURRENCY: usize = 4;
-/// Google Fonts API key environment variable. The key is intentionally not a
-/// persisted config value because it is a secret.
-pub const GOOGLE_FONTS_API_KEY_ENV_VAR: &str = "GOOGLE_FONTS_API_KEY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontbrewConfig {
     pub schema_version: u32,
     pub format_preference: Vec<FontFormat>,
     pub activation_strategy: ActivationStrategy,
-    pub registry_auto_update: bool,
     pub metadata_ttl: Duration,
     pub update_concurrency: usize,
 }
@@ -112,7 +108,6 @@ impl Default for FontbrewConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             format_preference: default_format_preference(),
             activation_strategy: ActivationStrategy::Symlink,
-            registry_auto_update: true,
             metadata_ttl: Duration::from_secs(DEFAULT_METADATA_TTL_HOURS * 60 * 60),
             update_concurrency: DEFAULT_UPDATE_CONCURRENCY,
         }
@@ -124,7 +119,6 @@ impl Default for FontbrewConfig {
 struct RawConfig {
     schema_version: Option<u32>,
     install: Option<RawInstallConfig>,
-    registry: Option<RawRegistryConfig>,
     network: Option<RawNetworkConfig>,
 }
 
@@ -133,12 +127,6 @@ struct RawConfig {
 struct RawInstallConfig {
     format_preference: Option<Vec<RawFontFormat>>,
     activation_strategy: Option<RawActivationStrategy>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRegistryConfig {
-    auto_update: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +157,6 @@ impl RawConfig {
         }
 
         let install = self.install;
-        let registry = self.registry;
         let network = self.network;
 
         let format_preference = install
@@ -199,9 +186,6 @@ impl RawConfig {
                 .map(RawActivationStrategy::into_activation_strategy)
                 .transpose()?
                 .unwrap_or(ActivationStrategy::Symlink),
-            registry_auto_update: registry
-                .and_then(|registry| registry.auto_update)
-                .unwrap_or(true),
             metadata_ttl: metadata_ttl_from_hours(metadata_ttl_hours)?,
             update_concurrency: validate_update_concurrency(update_concurrency)?,
         })
@@ -212,7 +196,6 @@ impl RawConfig {
 enum ConfigKey {
     InstallFormatPreference,
     InstallActivationStrategy,
-    RegistryAutoUpdate,
     NetworkMetadataTtlHours,
     NetworkUpdateConcurrency,
 }
@@ -222,7 +205,6 @@ impl ConfigKey {
         match key {
             "install.format_preference" => Ok(Self::InstallFormatPreference),
             "install.activation_strategy" => Ok(Self::InstallActivationStrategy),
-            "registry.auto_update" => Ok(Self::RegistryAutoUpdate),
             "network.metadata_ttl_hours" => Ok(Self::NetworkMetadataTtlHours),
             "network.update_concurrency" => Ok(Self::NetworkUpdateConcurrency),
             _ => Err(FontbrewError::Config {
@@ -235,7 +217,6 @@ impl ConfigKey {
         match self {
             Self::InstallFormatPreference => "install.format_preference",
             Self::InstallActivationStrategy => "install.activation_strategy",
-            Self::RegistryAutoUpdate => "registry.auto_update",
             Self::NetworkMetadataTtlHours => "network.metadata_ttl_hours",
             Self::NetworkUpdateConcurrency => "network.update_concurrency",
         }
@@ -254,7 +235,6 @@ impl ConfigKey {
             Self::InstallActivationStrategy => ConfigValue::String(
                 activation_strategy_label(config.activation_strategy).to_string(),
             ),
-            Self::RegistryAutoUpdate => ConfigValue::Bool(config.registry_auto_update),
             Self::NetworkMetadataTtlHours => {
                 ConfigValue::Integer(config.metadata_ttl.as_secs() / 60 / 60)
             }
@@ -271,9 +251,6 @@ impl ConfigKey {
             }
             Self::InstallActivationStrategy => {
                 config.activation_strategy = parse_activation_strategy(raw_value)?;
-            }
-            Self::RegistryAutoUpdate => {
-                config.registry_auto_update = parse_bool(raw_value, self)?;
             }
             Self::NetworkMetadataTtlHours => {
                 let hours = parse_positive_u64(raw_value, self)?;
@@ -343,14 +320,6 @@ fn parse_activation_strategy(value: &str) -> Result<ActivationStrategy> {
         "symlink" => Ok(ActivationStrategy::Symlink),
         "copy" => reserved_copy_activation_error(),
         _ => invalid_value("install.activation_strategy"),
-    }
-}
-
-fn parse_bool(value: &str, key: ConfigKey) -> Result<bool> {
-    match value.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => invalid_value(key.as_str()),
     }
 }
 
@@ -446,7 +415,6 @@ fn activation_strategy_label(strategy: ActivationStrategy) -> &'static str {
 struct PersistedConfig {
     schema_version: u32,
     install: PersistedInstallConfig,
-    registry: PersistedRegistryConfig,
     network: PersistedNetworkConfig,
 }
 
@@ -464,9 +432,6 @@ impl PersistedConfig {
                     config.activation_strategy,
                 ),
             },
-            registry: PersistedRegistryConfig {
-                auto_update: config.registry_auto_update,
-            },
             network: PersistedNetworkConfig {
                 metadata_ttl_hours: config.metadata_ttl.as_secs() / 60 / 60,
                 update_concurrency: config.update_concurrency,
@@ -479,11 +444,6 @@ impl PersistedConfig {
 struct PersistedInstallConfig {
     format_preference: Vec<PersistedFontFormat>,
     activation_strategy: PersistedActivationStrategy,
-}
-
-#[derive(Debug, Serialize)]
-struct PersistedRegistryConfig {
-    auto_update: bool,
 }
 
 #[derive(Debug, Serialize)]

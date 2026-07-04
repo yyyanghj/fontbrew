@@ -3,8 +3,7 @@ pub mod json;
 
 use fontbrew_core::{
     ConfigReport, InfoReport, InstallBatchReport, InstallReport, ListReport, OutdatedReport,
-    ProgressEvent, RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
-    UpdateReport,
+    ProgressEvent, RemoveReport, SearchReport, UpdateReport,
 };
 
 use crate::exit::{CliError, CliResult};
@@ -27,8 +26,6 @@ pub trait Reporter {
     fn render_update_report(&mut self, report: UpdateReport) -> CliResult<()>;
     fn render_config_get_report(&mut self, report: ConfigReport) -> CliResult<()>;
     fn render_config_set_report(&mut self, report: ConfigReport) -> CliResult<()>;
-    fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()>;
-    fn render_registry_status_report(&mut self, report: RegistryStatusReport) -> CliResult<()>;
     fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()>;
     fn render_error(&mut self, error: &CliError) -> CliResult<()>;
     #[allow(dead_code)]

@@ -49,10 +49,7 @@ impl ProviderSource {
             });
         }
 
-        input.strip_prefix("google:").map(|id| Self {
-            provider: ProviderKind::Google,
-            id: id.to_string(),
-        })
+        None
     }
 }
 
@@ -120,7 +117,7 @@ fn validate_segment_edges(segment: &str, full_input: &str, label: &str) -> Resul
 }
 
 fn invalid_github_repo<T>(input: &str, reason: &str) -> Result<T> {
-    Err(FontbrewError::RegistryValidationFailed {
+    Err(FontbrewError::InvalidSource {
         message: format!("invalid GitHub repository {input:?}: {reason}"),
     })
 }
@@ -169,11 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_source_parse_accepts_google_prefix() {
-        let source = ProviderSource::parse_prefixed("google:source-sans-3")
-            .expect("google source should parse");
-
-        assert_eq!(source.provider, crate::ProviderKind::Google);
-        assert_eq!(source.id, "source-sans-3");
+    fn provider_source_parse_ignores_unknown_prefix() {
+        assert!(ProviderSource::parse_prefixed("unknown:source-sans-3").is_none());
     }
 }

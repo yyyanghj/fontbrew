@@ -1,10 +1,9 @@
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     fs::{self, File, FileTimes},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -12,9 +11,9 @@ use fontbrew_core::{
     fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
-    registry::{RegistrySnapshotStore, RegistrySnapshotV1},
     CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InfoRequest, InstallRequest,
-    InstallSource, PackageId, ProgressEvent, ProgressSink, ProviderKind, SearchRequest,
+    InstallSource, OutdatedRequest, PackageId, ProgressEvent, ProgressSink, ProviderKind,
+    SearchRequest, UpdateRequest,
 };
 
 struct NoProgress;
@@ -181,21 +180,6 @@ fn package_id(id: &str) -> PackageId {
     PackageId::parse(id).expect("test package id should be valid")
 }
 
-fn write_empty_registry_snapshot(paths: &FontbrewPaths) {
-    let snapshot = RegistrySnapshotV1::parse(
-        r#"{
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-04T00:00:00Z",
-  "packages": {}
-}"#,
-    )
-    .expect("parse empty registry snapshot");
-
-    RegistrySnapshotStore::new(paths.clone())
-        .write_snapshot(&snapshot)
-        .expect("write registry snapshot");
-}
-
 fn fixture_font_bytes(filename: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/fonts")
@@ -212,14 +196,6 @@ fn fontsource_list_url() -> String {
 
 fn fontsource_detail_url(id: &str) -> String {
     format!("https://api.fontsource.org/v1/fonts/{id}")
-}
-
-fn google_webfonts_url(family: &str, key: &str) -> String {
-    format!("https://www.googleapis.com/webfonts/v1/webfonts?family={family}&key={key}")
-}
-
-fn google_webfonts_all_url(key: &str) -> String {
-    format!("https://www.googleapis.com/webfonts/v1/webfonts?key={key}")
 }
 
 fn provider_metadata_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
@@ -284,49 +260,10 @@ fn assert_provider_metadata_has_no_font_binaries(paths: &FontbrewPaths) {
     }
 }
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    original: Option<OsString>,
-    _guard: MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set_google_fonts_api_key(value: Option<&str>) -> Self {
-        let guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let key = "GOOGLE_FONTS_API_KEY";
-        let original = std::env::var_os(key);
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-
-        Self {
-            key,
-            original,
-            _guard: guard,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.original {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 #[test]
 fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_snapshots() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(None);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
         &fontsource_list_url(),
@@ -339,7 +276,7 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     "styles": ["normal"],
     "lastModified": "2025-05-30",
     "license": "OFL-1.1",
-    "type": "google"
+    "type": "fontsource"
   },
   {
     "id": "abel-web-only",
@@ -349,7 +286,7 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     "styles": ["normal"],
     "lastModified": "2025-05-30",
     "license": "OFL-1.1",
-    "type": "google"
+    "type": "fontsource"
   }
 ]"#,
     );
@@ -445,301 +382,9 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
 }
 
 #[test]
-fn google_search_returns_installable_ttf_result_with_provider_source() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(Some("test-google-key"));
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &google_webfonts_all_url("test-google-key"),
-        r#"{
-  "kind": "webfonts#webfontList",
-  "items": [
-    {
-      "family": "Source Sans 3",
-      "variants": ["regular"],
-      "subsets": ["latin"],
-      "version": "v18",
-      "lastModified": "2025-06-17",
-      "files": {
-        "regular": "https://fonts.gstatic.com/s/sourcesans3/v18/source-sans-3-regular.ttf"
-      }
-    }
-  ]
-}"#,
-    );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
-
-    let report = app
-        .search(SearchRequest {
-            query: "google:sorce-sans-3".to_string(),
-            limit: None,
-        })
-        .expect("search Google Fonts");
-
-    assert_eq!(report.results.len(), 1);
-    assert_eq!(report.results[0].package_id, package_id("source-sans-3"));
-    assert_eq!(report.results[0].display_name, "Source Sans 3");
-    assert_eq!(report.results[0].source, "google:source-sans-3");
-    assert_eq!(
-        report.results[0]
-            .version
-            .as_ref()
-            .expect("version")
-            .as_str(),
-        "v18"
-    );
-    assert_eq!(
-        fake_http.requested_urls(),
-        vec![google_webfonts_all_url("test-google-key"),]
-    );
-    assert!(!provider_metadata_files(&paths).is_empty());
-    assert_provider_metadata_has_no_font_binaries(&paths);
-}
-
-#[test]
-fn google_search_filters_results_without_desktop_font_files() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(Some("test-google-key"));
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &google_webfonts_all_url("test-google-key"),
-        r#"{
-  "kind": "webfonts#webfontList",
-  "items": [
-    {
-      "family": "Web Only",
-      "variants": ["regular"],
-      "subsets": ["latin"],
-      "version": "v1",
-      "lastModified": "2025-06-17",
-      "files": {
-        "regular": "https://fonts.gstatic.com/s/webonly/v1/web-only.woff2",
-        "700": "https://fonts.gstatic.com/s/webonly/v1/web-only.woff"
-      }
-    }
-  ]
-}"#,
-    );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
-
-    let report = app
-        .search(SearchRequest {
-            query: "google:web-only".to_string(),
-            limit: None,
-        })
-        .expect("search Google Fonts");
-
-    assert!(report.results.is_empty());
-}
-
-#[test]
-fn explicit_google_search_without_api_key_returns_actionable_error() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(None);
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
-
-    let error = app
-        .search(SearchRequest {
-            query: "google:source-sans-3".to_string(),
-            limit: None,
-        })
-        .expect_err("missing Google Fonts API key should fail explicit Google search");
-
-    assert!(error.to_string().contains("GOOGLE_FONTS_API_KEY"));
-    assert!(error.to_string().contains("Google Fonts API"));
-    assert!(fake_http.requested_urls().is_empty());
-}
-
-#[test]
-fn google_rate_limit_returns_actionable_error() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(Some("test-google-key"));
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_status(
-        &google_webfonts_all_url("test-google-key"),
-        429,
-        r#"{"error":{"code":429,"message":"quota exceeded"}}"#,
-    );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
-
-    let error = app
-        .search(SearchRequest {
-            query: "google:source-sans-3".to_string(),
-            limit: None,
-        })
-        .expect_err("rate-limited Google Fonts search should fail");
-
-    assert!(error.to_string().contains("Google Fonts rate limit"));
-    assert!(error.to_string().contains("GOOGLE_FONTS_API_KEY"));
-}
-
-#[test]
-fn google_transport_error_does_not_expose_api_key() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(Some("test-google-key"));
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.fail_gets_with_transport_error();
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
-
-    let error = app
-        .search(SearchRequest {
-            query: "google:source-sans-3".to_string(),
-            limit: None,
-        })
-        .expect_err("transport failure should be reported");
-    let message = error.to_string();
-
-    assert!(!message.contains("test-google-key"));
-    assert!(message.contains("key=<redacted>"));
-}
-
-#[test]
-fn google_install_downloads_ttf_and_records_provider_manifest_source() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(Some("test-google-key"));
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &google_webfonts_url("Source%20Sans%203", "test-google-key"),
-        r#"{
-  "kind": "webfonts#webfontList",
-  "items": [
-    {
-      "family": "Source Sans 3",
-      "variants": ["regular"],
-      "subsets": ["latin"],
-      "version": "v18",
-      "lastModified": "2025-06-17",
-      "files": {
-        "regular": "https://fonts.gstatic.com/s/sourcesans3/v18/source-sans-3-regular.ttf",
-        "700": "https://fonts.gstatic.com/s/sourcesans3/v18/source-sans-3-700.woff2"
-      }
-    }
-  ]
-}"#,
-    );
-    fake_http.with_download_bytes(
-        "https://fonts.gstatic.com/s/sourcesans3/v18/source-sans-3-regular.ttf",
-        fixture_font_bytes("SourceCodePro-Regular.ttf"),
-    );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
-
-    let plan = app
-        .install_plan(InstallRequest {
-            source: InstallSource::Provider {
-                provider: ProviderKind::Google,
-                id: "source-sans-3".to_string(),
-            },
-            package_id_override: None,
-            format_preference: Vec::new(),
-            asset_selector: None,
-            selected_families: Vec::new(),
-            reinstall: false,
-        })
-        .expect("plan Google Fonts install");
-
-    assert_eq!(plan.package_id, package_id("source-sans-3"));
-    assert_eq!(
-        plan.target_version
-            .as_ref()
-            .expect("target version")
-            .as_str(),
-        "v18"
-    );
-    assert_eq!(
-        fake_http.requested_urls(),
-        vec![
-            google_webfonts_url("Source%20Sans%203", "test-google-key"),
-            "https://fonts.gstatic.com/s/sourcesans3/v18/source-sans-3-regular.ttf".to_string(),
-        ]
-    );
-
-    let report = app
-        .apply_install(
-            plan,
-            ExecutionPolicy::SafeOnly,
-            &mut NoProgress,
-            &NeverCancelled,
-        )
-        .expect("apply Google Fonts install");
-
-    assert_eq!(report.package_id, package_id("source-sans-3"));
-    assert_eq!(report.installed_version.as_str(), "v18");
-    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
-    let record = manifest
-        .get_package(&package_id("source-sans-3"))
-        .expect("manifest record");
-    assert_eq!(
-        record.source,
-        ManifestSource::Provider {
-            provider: ProviderKind::Google,
-            id: "source-sans-3".to_string(),
-        }
-    );
-    assert_eq!(record.update_source, None);
-    let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-sans-3"),
-        })
-        .expect("read Google Fonts package info");
-    assert_eq!(info.package.source, "google:source-sans-3");
-    assert!(record.font_files.iter().all(|font_file| font_file
-        .path
-        .starts_with(paths.managed_store_dir().join("packages"))));
-    assert_provider_metadata_has_no_font_binaries(&paths);
-    assert!(
-        !paths.staging_dir().exists()
-            || fs::read_dir(paths.staging_dir())
-                .expect("read staging dir")
-                .next()
-                .is_none()
-    );
-}
-
-#[test]
-fn explicit_google_install_without_api_key_returns_actionable_error() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(None);
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
-
-    let error = app
-        .install_plan(InstallRequest {
-            source: InstallSource::Provider {
-                provider: ProviderKind::Google,
-                id: "source-sans-3".to_string(),
-            },
-            package_id_override: None,
-            format_preference: Vec::new(),
-            asset_selector: None,
-            selected_families: Vec::new(),
-            reinstall: false,
-        })
-        .expect_err("missing Google Fonts API key should fail Google install");
-
-    assert!(error.to_string().contains("GOOGLE_FONTS_API_KEY"));
-    assert!(error.to_string().contains("Google Fonts API"));
-    assert!(fake_http.requested_urls().is_empty());
-}
-
-#[test]
 fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(None);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
         &fontsource_list_url(),
@@ -751,7 +396,7 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
   "styles": ["normal"],
   "lastModified": "2025-05-30",
   "license": "OFL-1.1",
-  "type": "google"
+  "type": "fontsource"
 }]"#,
     );
     fake_http.with_text(
@@ -824,10 +469,8 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
 
 #[test]
 fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() {
-    let _env = EnvVarGuard::set_google_fonts_api_key(None);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    write_empty_registry_snapshot(&paths);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
         &fontsource_list_url(),
@@ -839,7 +482,7 @@ fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() 
   "styles": ["normal"],
   "lastModified": "2025-05-30",
   "license": "OFL-1.1",
-  "type": "google"
+  "type": "fontsource"
 }]"#,
     );
     fake_http.with_text(
@@ -1022,6 +665,152 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
                 .expect("read staging dir")
                 .next()
                 .is_none()
+    );
+}
+
+#[test]
+fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let install_http = Arc::new(FakeHttpClient::default());
+    install_http.with_text(
+        &fontsource_detail_url("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v1",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/source-code-pro-v1.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    install_http.with_download_bytes(
+        "https://cdn.example/source-code-pro-v1.ttf",
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), install_http);
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .expect("plan initial Fontsource install");
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut NoProgress,
+        &NeverCancelled,
+    )
+    .expect("apply initial Fontsource install");
+
+    let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+    set_file_modified_time(
+        &fontsource_detail_snapshot_path(&paths, "source-code-pro"),
+        stale_time,
+    );
+
+    let update_http = Arc::new(FakeHttpClient::default());
+    update_http.with_text(
+        &fontsource_detail_url("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-06-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/source-code-pro-v2.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    update_http.with_download_bytes(
+        "https://cdn.example/source-code-pro-v2.ttf",
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http.clone());
+
+    let outdated = app
+        .outdated(OutdatedRequest {
+            package_ids: vec![package_id("source-code-pro")],
+        })
+        .expect("check Fontsource outdated");
+    assert_eq!(outdated.packages.len(), 1);
+    assert_eq!(outdated.packages[0].latest_version.as_str(), "v2");
+    assert!(outdated.not_updatable.is_empty());
+
+    let plan = app
+        .update_plan(
+            UpdateRequest {
+                package_ids: vec![package_id("source-code-pro")],
+                jobs: Some(1),
+            },
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect("plan Fontsource update");
+    assert_eq!(plan.prepared.len(), 1);
+    assert_eq!(plan.prepared[0].target_version.as_str(), "v2");
+
+    let report = app
+        .apply_update(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            &NeverCancelled,
+        )
+        .expect("apply Fontsource update");
+
+    assert_eq!(report.updated.len(), 1);
+    assert_eq!(report.updated[0].installed_version.as_str(), "v2");
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("source-code-pro"))
+        .expect("manifest record");
+    assert_eq!(record.version.as_str(), "v2");
+    assert_eq!(
+        record.source,
+        ManifestSource::Provider {
+            provider: ProviderKind::Fontsource,
+            id: "source-code-pro".to_string(),
+        }
+    );
+    assert_eq!(
+        update_http.requested_urls(),
+        vec![
+            fontsource_detail_url("source-code-pro"),
+            "https://cdn.example/source-code-pro-v2.ttf".to_string(),
+        ]
     );
 }
 

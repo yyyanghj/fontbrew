@@ -47,8 +47,8 @@ pub enum FontbrewError {
     )]
     FamilySelectionRequired { families: Vec<FamilyName> },
 
-    #[error("registry validation failed: {message}")]
-    RegistryValidationFailed { message: String },
+    #[error("invalid source: {message}")]
+    InvalidSource { message: String },
 
     #[error("invalid package id {input:?}: {reason}")]
     InvalidPackageId { input: String, reason: String },

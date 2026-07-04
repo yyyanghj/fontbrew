@@ -61,7 +61,6 @@ pub struct ManifestPackageRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManifestSource {
-    Registry { id: String },
     GitHub { owner: String, repo: String },
     Provider { provider: ProviderKind, id: String },
     LocalArchive { path: PathBuf },

@@ -6,8 +6,7 @@ use std::{
 use fontbrew_core::{
     config::ActivationStrategy, ConfigReport, ConfigValue, FamilyName, FontFormat, InfoReport,
     InstallReport, ListReport, ManagedActivationArtifact, ManagedFontFile, OutdatedReport,
-    ProgressEvent, RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
-    UpdateReport,
+    ProgressEvent, RemoveReport, SearchReport, UpdateReport,
 };
 
 use crate::{
@@ -305,47 +304,6 @@ impl Reporter for HumanReporter {
             report.key,
             config_value_label(&report.value)
         )?;
-
-        Ok(())
-    }
-
-    fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()> {
-        let mut stdout = self.stdout.lock();
-
-        writeln!(stdout, "Updated registry snapshot.")?;
-        writeln!(stdout, "Source: {}", report.registry_url)?;
-        writeln!(stdout, "Snapshot: {}", report.snapshot_path.display())?;
-        writeln!(
-            stdout,
-            "Registry updated at: {}",
-            report.registry_updated_at
-        )?;
-        writeln!(stdout, "Packages: {}", report.package_count)?;
-
-        Ok(())
-    }
-
-    fn render_registry_status_report(&mut self, report: RegistryStatusReport) -> CliResult<()> {
-        let mut stdout = self.stdout.lock();
-
-        if !report.available {
-            writeln!(stdout, "Registry snapshot: missing")?;
-            writeln!(stdout, "Path: {}", report.snapshot_path.display())?;
-            return Ok(());
-        }
-
-        writeln!(stdout, "Registry snapshot: available")?;
-        writeln!(stdout, "Path: {}", report.snapshot_path.display())?;
-        if let Some(schema_version) = report.schema_version {
-            writeln!(stdout, "Schema version: {schema_version}")?;
-        }
-        if let Some(updated_at) = report.registry_updated_at {
-            writeln!(stdout, "Registry updated at: {updated_at}")?;
-        }
-        if let Some(modified_at) = report.snapshot_modified_at {
-            writeln!(stdout, "Snapshot refreshed at: {modified_at}")?;
-        }
-        writeln!(stdout, "Packages: {}", report.package_count)?;
 
         Ok(())
     }

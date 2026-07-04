@@ -17,7 +17,10 @@ fn package_record(id: &str, version: &str) -> ManifestPackageRecord {
     ManifestPackageRecord {
         package_id: package_id(id),
         version: PackageVersion::new(version),
-        source: ManifestSource::Registry { id: id.to_string() },
+        source: ManifestSource::GitHub {
+            owner: "font-owner".to_string(),
+            repo: "font-repo".to_string(),
+        },
         update_source: Some(ManifestSource::GitHub {
             owner: "font-owner".to_string(),
             repo: "font-repo".to_string(),
@@ -145,16 +148,13 @@ fn manifest_insert_replace_remove_and_lookup_package_records() {
 #[test]
 fn manifest_source_shapes_are_explicit_and_serializable() {
     let sources = vec![
-        ManifestSource::Registry {
-            id: "inter".to_string(),
-        },
         ManifestSource::GitHub {
             owner: "rsms".to_string(),
             repo: "inter".to_string(),
         },
         ManifestSource::Provider {
-            provider: ProviderKind::Google,
-            id: "Inter".to_string(),
+            provider: ProviderKind::Fontsource,
+            id: "inter".to_string(),
         },
         ManifestSource::LocalArchive {
             path: PathBuf::from("/tmp/inter.zip"),
@@ -174,7 +174,8 @@ fn manifest_source_json_shape_is_stable() {
 
     let json = serde_json::to_value(&record).expect("record should serialize");
 
-    assert_eq!(json["source"]["Registry"]["id"], "inter");
+    assert_eq!(json["source"]["GitHub"]["owner"], "font-owner");
+    assert_eq!(json["source"]["GitHub"]["repo"], "font-repo");
     assert_eq!(json["updateSource"]["GitHub"]["owner"], "font-owner");
     assert_eq!(json["updateSource"]["GitHub"]["repo"], "font-repo");
     assert_eq!(
@@ -234,7 +235,7 @@ fn manifest_store_rejects_package_key_record_mismatch_on_read() {
                 "inter": {
                     "packageId": "jetbrains-mono",
                     "version": "1.0.0",
-                    "source": { "Registry": { "id": "inter" } },
+                    "source": { "GitHub": { "owner": "rsms", "repo": "inter" } },
                     "updateSource": null,
                     "families": [],
                     "fontFiles": [],
@@ -265,7 +266,7 @@ fn manifest_store_rejects_invalid_package_map_key() {
                 "../bad": {
                     "packageId": "inter",
                     "version": "1.0.0",
-                    "source": { "Registry": { "id": "inter" } },
+                    "source": { "GitHub": { "owner": "rsms", "repo": "inter" } },
                     "updateSource": null,
                     "families": [],
                     "fontFiles": [],

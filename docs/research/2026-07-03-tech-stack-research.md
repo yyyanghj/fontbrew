@@ -13,23 +13,23 @@ Rust is a strong fit for a macOS font package manager because it produces native
 The mature Rust dependency set for Fontbrew's general CLI needs is strong:
 
 - `clap` for command parsing: https://docs.rs/clap/
-- `serde`, `serde_json`, and `toml` for manifest, registry, and config data: https://serde.rs/
+- `serde`, `serde_json`, and `toml` for manifest, provider metadata, and config data: https://serde.rs/
 - `reqwest` for HTTP calls, including blocking clients and JSON support: https://docs.rs/reqwest/
 - `zip` for ZIP archive reading: https://docs.rs/zip/latest/zip/
 - `tempfile` for staging and cleanup-safe temporary files: https://docs.rs/tempfile/
 - `directories` for OS-specific config/data paths: https://docs.rs/directories/latest/directories/
-- `globset` for registry asset include/exclude matching: https://docs.rs/globset/latest/globset/
+- `globset` for GitHub asset selector matching: https://docs.rs/globset/latest/globset/
 
 The main Rust dependency decision is font parsing. Two serious options exist:
 
 - `ttf-parser`: high-level, safe, zero-allocation parser for TrueType, OpenType, and AAT fonts. Source: https://docs.rs/ttf-parser/
-- `skrifa` / `read-fonts`: Google Fonts-backed Fontations crates for OpenType metadata and lower-level font parsing. Sources: https://docs.rs/skrifa/latest/skrifa/, https://docs.rs/read-fonts/latest/read_fonts/, and https://github.com/googlefonts/fontations.
+- `skrifa` / `read-fonts`: Fontations crates for OpenType metadata and lower-level font parsing. Sources: https://docs.rs/skrifa/latest/skrifa/ and https://docs.rs/read-fonts/latest/read_fonts/.
 
 Go is viable for the CLI and filesystem work. Its standard library covers HTTP, JSON, and ZIP well, and Cobra is mature for CLI structure. Sources: https://pkg.go.dev/net/http, https://pkg.go.dev/encoding/json, https://pkg.go.dev/archive/zip, and https://pkg.go.dev/github.com/spf13/cobra. The weaker point is font metadata parsing depth: `golang.org/x/image/font/sfnt` can decode TTF/OTF, but its docs describe it as low-level. Source: https://pkg.go.dev/golang.org/x/image/font/sfnt.
 
 Node.js is viable for rapid development and has mature font libraries. `fontkit` supports TTF, OTF, WOFF, WOFF2, TTC, metadata properties, variations, and more; `opentype.js` is also a widely used parser/writer. Sources: https://github.com/foliojs/fontkit and https://opentype.js.org/. The weaker point is distribution: Node's official single executable application feature exists, but introduces a packaging layer and runtime embedding complexity compared with Rust or Go native binaries. Source: https://nodejs.org/api/single-executable-applications.html.
 
-Provider integration is not language-specific. Google Fonts exposes a REST JSON Developer API with family metadata, variants, version, last modified date, and file URLs, but requires an API key. Source: https://developers.google.com/fonts/docs/developer_api. Fontsource exposes a read-only HTTP API with documented rate-limit behavior. Source: https://fontsource.org/docs/api/introduction.
+Provider integration is not language-specific. Fontsource exposes a read-only HTTP API with metadata and file URL details for open-source font packages. Source: https://fontsource.org/docs/api/introduction.
 
 ## Recommendation
 

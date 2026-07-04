@@ -1,23 +1,19 @@
-use std::{fmt, fs, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use crate::config::FontbrewConfig;
-use crate::error::{FontbrewError, Result};
-use crate::fetch::{HttpClient, HttpHeader, HttpRequest, ReqwestHttpClient};
+use crate::error::Result;
+use crate::fetch::{HttpClient, ReqwestHttpClient};
 use crate::fs::GlobalFileLock;
 use crate::install;
 use crate::model::{
     ensure_not_cancelled, CancellationToken, ConfigGetRequest, ConfigReport, ConfigSetRequest,
     ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport, InstallRequest,
     ListReport, NoCancellation, NoProgress, OutdatedReport, OutdatedRequest, ProgressSink,
-    RegistryStatusReport, RegistryUpdateReport, RemovePlan, RemoveReport, RemoveRequest,
-    SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
+    RemovePlan, RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
+    UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
-use crate::providers::{FontsourceProvider, GoogleProvider, ProviderSearchRequest};
-use crate::registry::{
-    registry_url_from_env, registry_url_not_configured_error, RegistryHttpClient,
-    RegistrySnapshotStore, ReqwestRegistryHttpClient,
-};
+use crate::providers::{FontsourceProvider, ProviderSearchRequest};
 use crate::sources::ProviderSource;
 use crate::update;
 
@@ -78,21 +74,6 @@ impl FontbrewApp {
             crate::InstallSource::LocalPath(_) => {
                 install::install_plan_with_progress(&paths, request, progress, cancellation)
             }
-            crate::InstallSource::RegistryName(short_name) => {
-                self.refresh_registry_snapshot(&paths)?;
-                ensure_not_cancelled(cancellation)?;
-                let recipe =
-                    RegistrySnapshotStore::new(paths.clone()).resolve_short_name(&short_name)?;
-                ensure_not_cancelled(cancellation)?;
-                install::registry_recipe_install_plan(
-                    &paths,
-                    recipe,
-                    request,
-                    progress,
-                    self.http_client()?.as_ref(),
-                    cancellation,
-                )
-            }
             crate::InstallSource::GitHubRepo { owner, repo } => {
                 let github_repo = crate::sources::GitHubRepo::parse(format!("{owner}/{repo}"))?;
                 install::github_repo_install_plan(
@@ -108,17 +89,6 @@ impl FontbrewApp {
                 provider: crate::ProviderKind::Fontsource,
                 id,
             } => install::fontsource_install_plan(
-                &paths,
-                id,
-                request,
-                progress,
-                self.http_client()?.as_ref(),
-                cancellation,
-            ),
-            crate::InstallSource::Provider {
-                provider: crate::ProviderKind::Google,
-                id,
-            } => install::google_install_plan(
                 &paths,
                 id,
                 request,
@@ -213,38 +183,13 @@ impl FontbrewApp {
             return Ok(SearchReport { results });
         }
 
-        let mut results = self.search_registry_snapshot(&paths, &request)?;
-
-        let remaining_limit = request
-            .limit
-            .map(|limit| limit.saturating_sub(results.len()));
-        if remaining_limit != Some(0) {
-            let http_client = self.http_client()?;
-            let fontsource_results = FontsourceProvider::new(&paths, http_client.as_ref()).search(
-                ProviderSearchRequest {
-                    query: &request.query,
-                    limit: remaining_limit,
-                },
-            )?;
-            results.extend(fontsource_results);
-        }
-
-        let remaining_limit = request
-            .limit
-            .map(|limit| limit.saturating_sub(results.len()));
-        if remaining_limit != Some(0) && GoogleProvider::api_key_is_configured() {
-            let google_results = GoogleProvider::new(&paths, self.http_client()?.as_ref()).search(
-                ProviderSearchRequest {
-                    query: &request.query,
-                    limit: remaining_limit,
-                },
-            )?;
-            results.extend(google_results);
-        }
-
-        if let Some(limit) = request.limit {
-            results.truncate(limit);
-        }
+        let http_client = self.http_client()?;
+        let results = FontsourceProvider::new(&paths, http_client.as_ref()).search(
+            ProviderSearchRequest {
+                query: &request.query,
+                limit: request.limit,
+            },
+        )?;
 
         Ok(SearchReport { results })
     }
@@ -258,19 +203,6 @@ impl FontbrewApp {
         let _lock = GlobalFileLock::try_exclusive(&install::write_lock_path(&paths))?;
 
         FontbrewConfig::set(&paths.config_path(), request)
-    }
-
-    pub fn registry_update(&self) -> Result<RegistryUpdateReport> {
-        let paths = self.paths()?;
-        let store = RegistrySnapshotStore::new(paths);
-        let client = ReqwestRegistryHttpClient::default();
-        let registry_url = registry_url_from_env().ok_or_else(registry_url_not_configured_error)?;
-
-        store.update_from_client(&client, &registry_url)
-    }
-
-    pub fn registry_status(&self) -> Result<RegistryStatusReport> {
-        RegistrySnapshotStore::new(self.paths()?).status()
     }
 
     fn paths(&self) -> Result<FontbrewPaths> {
@@ -288,51 +220,6 @@ impl FontbrewApp {
         Ok(Arc::new(ReqwestHttpClient::try_new()?))
     }
 
-    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<()> {
-        let store = RegistrySnapshotStore::new(paths.clone());
-        store.ensure_snapshot_exists()?;
-
-        let Some(registry_url) = registry_url_from_env() else {
-            return Ok(());
-        };
-
-        if let Some(http_client) = &self.http_client {
-            let client = AppRegistryHttpClient {
-                http_client: http_client.as_ref(),
-            };
-            store.update_from_client(&client, &registry_url)?;
-            return Ok(());
-        }
-
-        let client = ReqwestRegistryHttpClient::default();
-        store.update_from_client(&client, &registry_url)?;
-        Ok(())
-    }
-
-    fn search_registry_snapshot(
-        &self,
-        paths: &FontbrewPaths,
-        request: &SearchRequest,
-    ) -> Result<Vec<crate::SearchResult>> {
-        match self.refresh_registry_snapshot(paths) {
-            Ok(()) => {}
-            Err(FontbrewError::Network { .. }) => {}
-            Err(error) => return Err(error),
-        }
-
-        Ok(RegistrySnapshotStore::new(paths.clone())
-            .search(&request.query, None)?
-            .into_iter()
-            .map(|recipe| crate::SearchResult {
-                package_id: recipe.package_id.clone(),
-                display_name: recipe.name,
-                source: format!("registry:{}", recipe.package_id.as_str()),
-                version: None,
-                families: recipe.families,
-            })
-            .collect())
-    }
-
     fn search_provider_source(
         &self,
         paths: &FontbrewPaths,
@@ -347,53 +234,7 @@ impl FontbrewApp {
                     query: &provider_source.id,
                     limit: request.limit,
                 }),
-            crate::ProviderKind::Google => {
-                GoogleProvider::new(paths, http_client.as_ref()).search(ProviderSearchRequest {
-                    query: &provider_source.id,
-                    limit: request.limit,
-                })
-            }
         }
-    }
-}
-
-struct AppRegistryHttpClient<'a> {
-    http_client: &'a dyn HttpClient,
-}
-
-impl RegistryHttpClient for AppRegistryHttpClient<'_> {
-    fn get_text(&self, url: &str) -> Result<String> {
-        if let Some(path) = url.strip_prefix("file://") {
-            return fs::read_to_string(path).map_err(FontbrewError::from);
-        }
-
-        let response = self.http_client.get(HttpRequest {
-            url: url.to_string(),
-            display_url: None,
-            headers: vec![
-                HttpHeader {
-                    name: "User-Agent".to_string(),
-                    value: "fontbrew".to_string(),
-                },
-                HttpHeader {
-                    name: "Accept".to_string(),
-                    value: "application/json".to_string(),
-                },
-            ],
-        })?;
-
-        if !(200..300).contains(&response.status) {
-            return Err(FontbrewError::Network {
-                message: format!(
-                    "registry request failed with HTTP {} for {url}",
-                    response.status
-                ),
-            });
-        }
-
-        String::from_utf8(response.body).map_err(|source| FontbrewError::Network {
-            message: format!("could not read registry response from {url}: {source}"),
-        })
     }
 }
 

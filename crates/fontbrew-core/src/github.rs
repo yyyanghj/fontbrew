@@ -1,4 +1,4 @@
-use globset::{Glob, GlobSetBuilder};
+use globset::Glob;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -6,7 +6,6 @@ use crate::{
     error::{FontbrewError, Result},
     fetch::{HttpClient, HttpHeader, HttpRequest},
     model::{CancellationToken, PackageId, PackageVersion},
-    registry::RegistryAssetSelection,
     sources::GitHubRepo,
 };
 
@@ -23,13 +22,12 @@ pub(crate) struct ResolvedGitHubAsset {
 pub(crate) fn resolve_release_asset(
     http_client: &dyn HttpClient,
     repo: &GitHubRepo,
-    recipe_asset: Option<&RegistryAssetSelection>,
     asset_selector: Option<&str>,
     package_id: &PackageId,
 ) -> Result<ResolvedGitHubAsset> {
     let release = fetch_latest_stable_release(http_client, repo)?;
     let version = release_version(&release)?;
-    let asset = select_release_asset(&release, recipe_asset, asset_selector, package_id)?;
+    let asset = select_release_asset(&release, asset_selector, package_id)?;
 
     Ok(ResolvedGitHubAsset {
         version,
@@ -114,7 +112,6 @@ fn release_version(release: &GitHubRelease) -> Result<PackageVersion> {
 
 fn select_release_asset(
     release: &GitHubRelease,
-    recipe_asset: Option<&RegistryAssetSelection>,
     asset_selector: Option<&str>,
     package_id: &PackageId,
 ) -> Result<GitHubReleaseAsset> {
@@ -124,10 +121,6 @@ fn select_release_asset(
         .filter(|asset| is_installable_archive_asset(&asset.name))
         .cloned()
         .collect::<Vec<_>>();
-
-    if let Some(recipe_asset) = recipe_asset {
-        candidates = filter_assets_by_recipe(candidates, recipe_asset)?;
-    }
 
     if let Some(selector) = asset_selector {
         let mut selected = Vec::new();
@@ -154,23 +147,6 @@ fn select_release_asset(
     }
 }
 
-fn filter_assets_by_recipe(
-    assets: Vec<GitHubReleaseAsset>,
-    recipe_asset: &RegistryAssetSelection,
-) -> Result<Vec<GitHubReleaseAsset>> {
-    let include = compile_glob_set(&recipe_asset.include)?;
-    let exclude = compile_glob_set(&recipe_asset.exclude)?;
-
-    Ok(assets
-        .into_iter()
-        .filter(|asset| {
-            let included = recipe_asset.include.is_empty() || include.is_match(&asset.name);
-            let excluded = !recipe_asset.exclude.is_empty() && exclude.is_match(&asset.name);
-            included && !excluded
-        })
-        .collect())
-}
-
 fn asset_matches_selector(asset_name: &str, selector: &str) -> Result<bool> {
     if asset_name == selector {
         return Ok(true);
@@ -183,23 +159,6 @@ fn asset_matches_selector(asset_name: &str, selector: &str) -> Result<bool> {
         .compile_matcher();
 
     Ok(matcher.is_match(asset_name))
-}
-
-fn compile_glob_set(patterns: &[String]) -> Result<globset::GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(
-            Glob::new(pattern).map_err(|source| FontbrewError::ArchiveRejected {
-                reason: format!("invalid asset glob {pattern:?}: {source}"),
-            })?,
-        );
-    }
-
-    builder
-        .build()
-        .map_err(|source| FontbrewError::ArchiveRejected {
-            reason: format!("could not compile asset globs: {source}"),
-        })
 }
 
 fn is_installable_archive_asset(name: &str) -> bool {

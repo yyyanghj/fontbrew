@@ -51,10 +51,6 @@ impl FontbrewPaths {
         self.data_root.join("manifest.json")
     }
 
-    pub fn registry_snapshot_path(&self) -> PathBuf {
-        self.data_root.join("registry.json")
-    }
-
     pub fn provider_metadata_dir(&self) -> PathBuf {
         self.data_root.join("providers")
     }

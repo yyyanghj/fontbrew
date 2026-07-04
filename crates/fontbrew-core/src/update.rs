@@ -14,11 +14,11 @@ use crate::{
     },
     model::{NotUpdatablePackage, OutdatedPackage, OutdatedReport, OutdatedRequest},
     platform::FontbrewPaths,
-    registry::{normalize_family_boundary_name, RegistryPackageRecipe, RegistrySnapshotStore},
+    providers::FontsourceProvider,
     sources::GitHubRepo,
     tasks,
     version::{compare_versions, VersionComparison},
-    FamilyName, PackageId, PlanRisk,
+    FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
 use std::{
     fs,
@@ -39,12 +39,11 @@ pub fn outdated(
     let mut not_updatable = Vec::new();
 
     for record in records {
-        let Some(repo) = github_update_repo(&record)? else {
-            not_updatable.push(not_updatable_package(&record, "no GitHub update source"));
+        let Some(latest_version) = latest_update_version(paths, &record, http_client)? else {
+            not_updatable.push(not_updatable_package(&record, "no update source"));
             continue;
         };
 
-        let latest_version = github::resolve_latest_stable_release_version(http_client, &repo)?;
         match compare_versions(&record.version, &latest_version) {
             VersionComparison::CandidateIsNewer => packages.push(OutdatedPackage {
                 package_id: record.package_id.clone(),
@@ -67,6 +66,29 @@ pub fn outdated(
         packages,
         not_updatable,
     })
+}
+
+fn latest_update_version(
+    paths: &FontbrewPaths,
+    record: &ManifestPackageRecord,
+    http_client: &dyn HttpClient,
+) -> Result<Option<PackageVersion>> {
+    if let Some(provider_id) = fontsource_provider_id(record) {
+        return Ok(Some(
+            FontsourceProvider::new(paths, http_client)
+                .resolve_install_package(provider_id)?
+                .version,
+        ));
+    }
+
+    let Some(repo) = github_update_repo(record)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(github::resolve_latest_stable_release_version(
+        http_client,
+        &repo,
+    )?))
 }
 
 fn selected_records(
@@ -202,23 +224,24 @@ fn prepare_update_package_inner(
     cancellation: &dyn CancellationToken,
 ) -> Result<Option<PreparedUpdatePackage>> {
     ensure_not_cancelled(cancellation)?;
+    if let Some(provider_id) = fontsource_provider_id(record) {
+        return prepare_fontsource_update_package_inner(
+            paths,
+            record,
+            provider_id,
+            http_client,
+            cancellation,
+        );
+    }
+
     let Some(repo) = github_update_repo(record)? else {
         return Err(FontbrewError::NoUpdateSource {
             package_id: record.package_id.clone(),
         });
     };
 
-    let registry_recipe = registry_recipe_for_record(paths, record)?;
     ensure_not_cancelled(cancellation)?;
-    let asset = github::resolve_release_asset(
-        http_client,
-        &repo,
-        registry_recipe
-            .as_ref()
-            .and_then(|recipe| recipe.asset.as_ref()),
-        None,
-        &record.package_id,
-    )?;
+    let asset = github::resolve_release_asset(http_client, &repo, None, &record.package_id)?;
     ensure_not_cancelled(cancellation)?;
     match compare_versions(&record.version, &asset.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
@@ -234,17 +257,10 @@ fn prepare_update_package_inner(
         VersionComparison::CandidateIsNewer => {}
     }
 
-    let source = prepared_source_for_update(record, &repo)?;
+    let source = prepared_source_for_update(record)?;
     let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());
-    if let Some(recipe) = &registry_recipe {
-        options.recipe_format_preference = recipe.format_preference.clone();
-        options.family_boundary = Some(install::InstallFamilyBoundary::from_registry(
-            recipe.family_boundary.clone(),
-        ));
-    } else {
-        options.family_boundary =
-            install::InstallFamilyBoundary::from_selected_families(record.families.clone());
-    }
+    options.family_boundary =
+        install::InstallFamilyBoundary::from_selected_families(record.families.clone());
     let mut prepared = install::prepare_resolved_github_release_archive(
         paths,
         asset,
@@ -258,11 +274,63 @@ fn prepare_update_package_inner(
         return Err(error);
     }
 
-    let expected_families = registry_recipe
-        .as_ref()
-        .map(|recipe| recipe.family_boundary.expected_families())
-        .unwrap_or(&record.families);
-    if let Err(error) = validate_update_identity(record, &prepared, expected_families) {
+    if let Err(error) = validate_update_identity(record, &prepared, &record.families) {
+        install::cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
+    prepared.activation_risks = update_activation_risks(record, &prepared.activation_risks);
+
+    Ok(Some(PreparedUpdatePackage {
+        summary: UpdatePlanPackage {
+            package_id: record.package_id.clone(),
+            current_version: record.version.clone(),
+            target_version: prepared.version.clone(),
+        },
+        prepared,
+    }))
+}
+
+fn prepare_fontsource_update_package_inner(
+    paths: &FontbrewPaths,
+    record: &ManifestPackageRecord,
+    provider_id: &str,
+    http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
+) -> Result<Option<PreparedUpdatePackage>> {
+    ensure_not_cancelled(cancellation)?;
+    let resolved =
+        FontsourceProvider::new(paths, http_client).resolve_install_package(provider_id)?;
+    ensure_not_cancelled(cancellation)?;
+    match compare_versions(&record.version, &resolved.version) {
+        VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
+        VersionComparison::Unknown => {
+            return Err(FontbrewError::Manifest {
+                message: format!(
+                    "could not compare current version {} with latest version {}",
+                    record.version.as_str(),
+                    resolved.version.as_str()
+                ),
+            });
+        }
+        VersionComparison::CandidateIsNewer => {}
+    }
+
+    let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());
+    options.family_boundary =
+        install::InstallFamilyBoundary::from_selected_families(record.families.clone());
+    let mut prepared = install::prepare_resolved_provider_package(
+        paths,
+        resolved,
+        options,
+        http_client,
+        cancellation,
+    )?;
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        install::cleanup_staging(&prepared.staging_dir);
+        return Err(error);
+    }
+
+    if let Err(error) = validate_update_identity(record, &prepared, &record.families) {
         install::cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }
@@ -300,19 +368,11 @@ fn update_activation_risks(record: &ManifestPackageRecord, risks: &[PlanRisk]) -
         .collect()
 }
 
-fn prepared_source_for_update(
-    record: &ManifestPackageRecord,
-    repo: &GitHubRepo,
-) -> Result<PreparedInstallSource> {
+fn prepared_source_for_update(record: &ManifestPackageRecord) -> Result<PreparedInstallSource> {
     match &record.source {
         ManifestSource::GitHub { owner, repo } => Ok(PreparedInstallSource::GitHub {
             owner: owner.clone(),
             repo: repo.clone(),
-        }),
-        ManifestSource::Registry { id } => Ok(PreparedInstallSource::Registry {
-            id: id.clone(),
-            github_owner: repo.owner.clone(),
-            github_repo: repo.repo.clone(),
         }),
         ManifestSource::Provider { .. } | ManifestSource::LocalArchive { .. } => {
             Err(FontbrewError::NoUpdateSource {
@@ -320,19 +380,6 @@ fn prepared_source_for_update(
             })
         }
     }
-}
-
-fn registry_recipe_for_record(
-    paths: &FontbrewPaths,
-    record: &ManifestPackageRecord,
-) -> Result<Option<RegistryPackageRecipe>> {
-    let ManifestSource::Registry { id } = &record.source else {
-        return Ok(None);
-    };
-
-    let recipe = RegistrySnapshotStore::new(paths.clone()).resolve_short_name(id)?;
-
-    Ok(Some(recipe))
 }
 
 fn validate_update_identity(
@@ -366,7 +413,8 @@ fn validate_update_identity(
 }
 
 fn family_names_match(left: &FamilyName, right: &FamilyName) -> bool {
-    normalize_family_boundary_name(left.as_str()) == normalize_family_boundary_name(right.as_str())
+    install::normalize_family_boundary_name(left.as_str())
+        == install::normalize_family_boundary_name(right.as_str())
 }
 
 fn first_family(families: &[FamilyName]) -> FamilyName {
@@ -746,7 +794,7 @@ fn remove_package_store(paths: &FontbrewPaths, package_store_dir: &std::path::Pa
 
 fn prepare_failure_reason(error: &FontbrewError) -> String {
     match error {
-        FontbrewError::NoUpdateSource { .. } => "no GitHub update source".to_string(),
+        FontbrewError::NoUpdateSource { .. } => "no update source".to_string(),
         FontbrewError::ArchiveRejected { reason }
             if reason.contains("missing selected font families") =>
         {
@@ -783,6 +831,16 @@ fn new_operation_id() -> Result<OperationId> {
     Ok(OperationId::new(format!("update-{timestamp}-{counter}")))
 }
 
+fn fontsource_provider_id(record: &ManifestPackageRecord) -> Option<&str> {
+    match &record.source {
+        ManifestSource::Provider {
+            provider: ProviderKind::Fontsource,
+            id,
+        } => Some(id),
+        _ => None,
+    }
+}
+
 fn github_update_repo(record: &ManifestPackageRecord) -> Result<Option<GitHubRepo>> {
     match record.update_source.as_ref().unwrap_or(&record.source) {
         ManifestSource::GitHub { owner, repo } => GitHubRepo::parse(format!("{owner}/{repo}"))
@@ -793,9 +851,7 @@ fn github_update_repo(record: &ManifestPackageRecord) -> Result<Option<GitHubRep
                     record.package_id
                 ),
             }),
-        ManifestSource::Registry { .. }
-        | ManifestSource::Provider { .. }
-        | ManifestSource::LocalArchive { .. } => Ok(None),
+        ManifestSource::Provider { .. } | ManifestSource::LocalArchive { .. } => Ok(None),
     }
 }
 

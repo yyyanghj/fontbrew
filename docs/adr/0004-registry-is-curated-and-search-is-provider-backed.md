@@ -1,3 +1,0 @@
-# Registry is curated and search is provider-backed
-
-Fontbrew's first-party registry is a curated, remotely updateable recipe index stored by the CLI as a local registry snapshot, not a complete catalog of every available font. It should contain stable recipes and short names for well-known packages, while search can also query approved third-party providers such as Google Fonts or Fontsource. Search only returns installable candidates and does not perform arbitrary GitHub repository search, which keeps common installs reliable without requiring Fontbrew to maintain thousands of package recipes by hand.

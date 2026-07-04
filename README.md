@@ -7,7 +7,7 @@
 
 A macOS font manager for the terminal.
 
-Fontbrew installs, activates, updates, and removes open-source fonts from Fontsource, Google Fonts, GitHub Releases, local archives, and registries.
+Fontbrew installs, activates, updates, and removes open-source fonts from Fontsource, GitHub Releases, and local archives.
 
 ## Installation
 
@@ -26,7 +26,7 @@ fontbrew search inter
 Install and activate it:
 
 ```bash
-fontbrew install fontsource:inter
+fontbrew install inter
 ```
 
 See what Fontbrew manages:
@@ -54,14 +54,11 @@ fontbrew remove inter
 Install from Fontsource:
 
 ```bash
+fontbrew install inter
 fontbrew install fontsource:inter
 ```
 
-Install from Google Fonts:
-
-```bash
-GOOGLE_FONTS_API_KEY=... fontbrew install google:roboto
-```
+Unprefixed names are exact Fontsource IDs. Use `fontsource:<id>` when you want to be explicit.
 
 Install from a GitHub Release:
 
@@ -75,17 +72,13 @@ Install from a local archive:
 fontbrew install ./SomeFont.zip
 ```
 
-Install short names from a registry:
-
-```bash
-FONTBREW_REGISTRY_URL=https://example.com/registry.json fontbrew install inter
-```
-
-Use a registry when you want a shared catalog of package names such as `inter`.
-
 ## Safety
 
 Fontbrew does not modify system fonts. Updates and removals only apply to fonts installed through Fontbrew.
+
+## Credits
+
+Fontsource discovery and metadata are powered by [Fontsource](https://fontsource.org/), a collection of open-source fonts packaged for self-hosting.
 
 ## License
 

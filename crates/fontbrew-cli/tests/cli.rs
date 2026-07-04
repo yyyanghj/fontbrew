@@ -6,7 +6,6 @@ use std::{
 };
 
 use assert_cmd::Command;
-use fontbrew_core::registry::REGISTRY_URL_ENV_VAR;
 use predicates::prelude::*;
 use serde_json::Value;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -71,58 +70,34 @@ fn staging_is_empty_or_absent(home: &Path) -> bool {
     }
 }
 
-fn write_registry_snapshot(path: &Path) {
+fn write_fontsource_metadata(home: &Path) {
+    let metadata_dir = home.join(".local/share/fontbrew/providers");
+    fs::create_dir_all(&metadata_dir).expect("create provider metadata dir");
     fs::write(
-        path,
+        metadata_dir.join("fontsource-list-all.json"),
+        r#"[{"id":"source-code-pro","family":"Source Code Pro"}]"#,
+    )
+    .expect("write Fontsource list metadata");
+    fs::write(
+        metadata_dir.join("fontsource-detail-source-code-pro.json"),
         r#"{
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-03T00:00:00Z",
-  "packages": {
-    "inter": {
-      "name": "Inter",
-      "source": {
-        "type": "github",
-        "repo": "rsms/inter"
-      },
-      "families": ["Inter"],
-      "asset": {
-        "include": ["*Inter*.zip"],
-        "exclude": ["*web*", "*.woff2"]
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "version": "1.0.0",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://example.test/source-code-pro.ttf"
+          }
+        }
       }
     }
   }
 }"#,
     )
-    .expect("write registry snapshot fixture");
-}
-
-fn write_search_registry_snapshot(path: &Path) {
-    fs::write(
-        path,
-        r#"{
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-03T00:00:00Z",
-  "packages": {
-    "inter": {
-      "name": "Inter",
-      "source": {
-        "type": "github",
-        "repo": "rsms/inter"
-      },
-      "families": ["Inter"]
-    },
-    "source-code-pro": {
-      "name": "Source Code Pro",
-      "source": {
-        "type": "github",
-        "repo": "adobe/source-code-pro"
-      },
-      "families": ["Source Code Pro"]
-    }
-  }
-}"#,
-    )
-    .expect("write search registry snapshot fixture");
+    .expect("write Fontsource detail metadata");
 }
 
 #[test]
@@ -419,7 +394,6 @@ fn install_rejects_package_id_override_for_non_local_sources() {
         "source-code-pro",
         "adobe/source-code-pro",
         "fontsource:source-code-pro",
-        "google:source-sans-3",
     ] {
         fontbrew(&home)
             .args(["install", source, "--id", "custom-local"])
@@ -935,117 +909,12 @@ fn json_self_update_rejects_development_build_on_stdout_only() {
 }
 
 #[test]
-fn registry_update_uses_env_url_and_writes_metadata_only() {
+fn json_search_uses_fontsource_metadata_and_reports_matches_on_stdout_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
-    let registry_path = temp.path().join("registry.json");
-    write_registry_snapshot(&registry_path);
+    write_fontsource_metadata(&home);
 
     let output = fontbrew(&home)
-        .env(
-            REGISTRY_URL_ENV_VAR,
-            format!("file://{}", registry_path.display()),
-        )
-        .args(["--json", "registry", "update"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .clone();
-    let json = stdout_json(&output);
-
-    assert_eq!(json["schemaVersion"], 1);
-    assert_eq!(json["command"], "registry_update");
-    assert_eq!(json["report"]["package_count"], 1);
-    assert!(home.join(".local/share/fontbrew/registry.json").exists());
-    assert!(!home.join(".local/share/fontbrew/packages").exists());
-    assert!(!home.join(".local/share/fontbrew/staging").exists());
-}
-
-#[test]
-fn registry_status_seeds_default_snapshot_and_reports_updated_snapshot() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = temp.path().join("home");
-    let registry_path = temp.path().join("registry.json");
-
-    fontbrew(&home)
-        .args(["registry", "status"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Registry snapshot: available"))
-        .stdout(predicate::str::contains("Schema version: 1"))
-        .stdout(predicate::str::contains("Packages: 0"))
-        .stderr(predicate::str::is_empty());
-    assert!(home.join(".local/share/fontbrew/registry.json").exists());
-
-    let default_output = fontbrew(&home)
-        .args(["--json", "registry", "status"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .clone();
-    let default_json = stdout_json(&default_output);
-
-    assert_eq!(default_json["command"], "registry_status");
-    assert_eq!(default_json["report"]["available"], true);
-    assert_eq!(default_json["report"]["schemaVersion"], 1);
-    assert_eq!(default_json["report"]["package_count"], 0);
-    assert_eq!(
-        default_json["report"]["registry_updated_at"],
-        "1970-01-01T00:00:00Z"
-    );
-
-    write_registry_snapshot(&registry_path);
-    fontbrew(&home)
-        .env(
-            REGISTRY_URL_ENV_VAR,
-            format!("file://{}", registry_path.display()),
-        )
-        .args(["registry", "update"])
-        .assert()
-        .success();
-
-    fontbrew(&home)
-        .args(["registry", "status"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Registry snapshot: available"))
-        .stdout(predicate::str::contains("Schema version: 1"))
-        .stderr(predicate::str::is_empty());
-
-    let output = fontbrew(&home)
-        .args(["--json", "registry", "status"])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .clone();
-    let json = stdout_json(&output);
-
-    assert_eq!(json["schemaVersion"], 1);
-    assert_eq!(json["command"], "registry_status");
-    assert_eq!(json["report"]["available"], true);
-    assert_eq!(json["report"]["schemaVersion"], 1);
-    assert_eq!(json["report"]["package_count"], 1);
-    assert_eq!(
-        json["report"]["registry_updated_at"],
-        "2026-07-03T00:00:00Z"
-    );
-}
-
-#[test]
-fn json_search_refreshes_registry_snapshot_and_reports_matches_on_stdout_only() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let home = temp.path().join("home");
-    let registry_path = temp.path().join("registry.json");
-    write_search_registry_snapshot(&registry_path);
-
-    let output = fontbrew(&home)
-        .env(
-            REGISTRY_URL_ENV_VAR,
-            format!("file://{}", registry_path.display()),
-        )
         .args(["--json", "search", "code", "--limit", "1"])
         .assert()
         .success()
@@ -1064,21 +933,20 @@ fn json_search_refreshes_registry_snapshot_and_reports_matches_on_stdout_only() 
         json["report"]["results"][0]["display_name"],
         "Source Code Pro"
     );
+    assert_eq!(
+        json["report"]["results"][0]["source"],
+        "fontsource:source-code-pro"
+    );
     assert!(stderr_text(&output).is_empty());
 }
 
 #[test]
-fn human_search_reports_registry_result_fields_on_stdout_only() {
+fn human_search_reports_fontsource_result_fields_on_stdout_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
-    let registry_path = temp.path().join("registry.json");
-    write_search_registry_snapshot(&registry_path);
+    write_fontsource_metadata(&home);
 
     let output = fontbrew(&home)
-        .env(
-            REGISTRY_URL_ENV_VAR,
-            format!("file://{}", registry_path.display()),
-        )
         .args(["search", "code", "--limit", "1"])
         .assert()
         .success()
@@ -1095,7 +963,7 @@ fn human_search_reports_registry_result_fields_on_stdout_only() {
     }));
     assert!(stdout.contains("source-code-pro"));
     assert!(stdout.contains("Source Code Pro"));
-    assert!(stdout.contains("registry:source-code-pro"));
+    assert!(stdout.contains("fontsource:source-code-pro"));
 }
 
 #[test]
@@ -1130,7 +998,7 @@ fn json_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
     assert!(json["report"]["not_updatable"][0]["reason"]
         .as_str()
         .unwrap()
-        .contains("no GitHub update source"));
+        .contains("no update source"));
     assert!(stderr_text(&output).is_empty());
 }
 
@@ -1201,7 +1069,7 @@ fn json_update_dry_run_reports_local_package_as_failed_without_prompting() {
     assert!(json["report"]["skipped"][0]["reason"]
         .as_str()
         .unwrap()
-        .contains("no GitHub update source"));
+        .contains("no update source"));
     assert!(stderr_text(&output).is_empty());
 }
 

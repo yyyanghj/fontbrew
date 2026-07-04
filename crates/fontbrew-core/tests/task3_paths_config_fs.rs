@@ -40,10 +40,6 @@ fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
         temp.path().join("data/manifest.json")
     );
     assert_eq!(
-        paths.registry_snapshot_path(),
-        temp.path().join("data/registry.json")
-    );
-    assert_eq!(
         paths.provider_metadata_dir(),
         temp.path().join("data/providers")
     );
@@ -76,7 +72,6 @@ fn missing_config_file_uses_deterministic_v1_defaults() {
         ]
     );
     assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
-    assert!(config.registry_auto_update);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
 }
@@ -94,9 +89,6 @@ schema_version = 1
 format_preference = ["ttf", "otf"]
 activation_strategy = "symlink"
 
-[registry]
-auto_update = false
-
 [network]
 metadata_ttl_hours = 6
 update_concurrency = 2
@@ -111,7 +103,6 @@ update_concurrency = 2
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
     assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
-    assert!(!config.registry_auto_update);
     assert_eq!(config.metadata_ttl, Duration::from_secs(6 * 60 * 60));
     assert_eq!(config.update_concurrency, 2);
 }
@@ -165,8 +156,8 @@ fn unknown_grouped_config_fields_are_structured_config_errors() {
         r#"
 schema_version = 1
 
-[registry]
-auto_udpate = true
+[provider]
+metadata_ttl = 12
 "#,
     )
     .expect("write config");
@@ -174,28 +165,6 @@ auto_udpate = true
     let error = FontbrewConfig::load(&config_path).expect_err("typo should be rejected");
 
     assert!(matches!(error, FontbrewError::Config { .. }));
-}
-
-#[test]
-fn google_fonts_api_key_is_not_accepted_in_persisted_config() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let config_path = temp.path().join("config.toml");
-    fs::write(
-        &config_path,
-        r#"
-schema_version = 1
-
-[google]
-api_key = "secret"
-"#,
-    )
-    .expect("write config");
-
-    let error = FontbrewConfig::load(&config_path)
-        .expect_err("Google Fonts API key belongs in GOOGLE_FONTS_API_KEY, not config");
-
-    assert!(matches!(error, FontbrewError::Config { .. }));
-    assert!(error.to_string().contains("google"));
 }
 
 #[test]
@@ -224,7 +193,6 @@ fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
     assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
-    assert!(config.registry_auto_update);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
 
@@ -252,7 +220,6 @@ fn config_set_and_get_support_all_known_scalar_keys() {
             "symlink",
             ConfigValue::String("symlink".to_string()),
         ),
-        ("registry.auto_update", "false", ConfigValue::Bool(false)),
         ("network.metadata_ttl_hours", "6", ConfigValue::Integer(6)),
         ("network.update_concurrency", "2", ConfigValue::Integer(2)),
     ] {
@@ -307,8 +274,8 @@ fn config_set_uses_global_write_lock() {
 
     let error = app
         .config_set(ConfigSetRequest {
-            key: "registry.auto_update".to_string(),
-            value: "false".to_string(),
+            key: "network.metadata_ttl_hours".to_string(),
+            value: "6".to_string(),
         })
         .expect_err("config set should fail while global lock is held");
 

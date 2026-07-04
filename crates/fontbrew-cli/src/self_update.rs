@@ -1504,18 +1504,6 @@ mod tests {
         ) -> CliResult<()> {
             Ok(())
         }
-        fn render_registry_update_report(
-            &mut self,
-            _report: fontbrew_core::RegistryUpdateReport,
-        ) -> CliResult<()> {
-            Ok(())
-        }
-        fn render_registry_status_report(
-            &mut self,
-            _report: fontbrew_core::RegistryStatusReport,
-        ) -> CliResult<()> {
-            Ok(())
-        }
         fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()> {
             self.self_update_reports.push(report);
             Ok(())

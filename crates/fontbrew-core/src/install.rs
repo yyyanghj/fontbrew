@@ -30,11 +30,7 @@ use crate::{
         RemoveRequest,
     },
     platform::FontbrewPaths,
-    providers::{self, FontsourceProvider, GoogleProvider, ResolvedProviderPackage},
-    registry::{
-        normalize_family_boundary_name, RegistryAssetSelection, RegistryFamilyBoundary,
-        RegistryPackageRecipe,
-    },
+    providers::{self, FontsourceProvider, ResolvedProviderPackage},
     sources::GitHubRepo,
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
@@ -162,72 +158,12 @@ pub fn github_repo_install_plan(
     let prepared = prepare_github_release_archive(
         paths,
         &repo,
-        None,
         package_id.clone(),
         PreparedInstallSource::GitHub {
             owner: repo.owner.clone(),
             repo: repo.repo.clone(),
         },
         options,
-        progress,
-        http_client,
-        cancellation,
-    )?;
-    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
-
-    install_plan_from_prepared(paths, prepared)
-}
-
-pub fn registry_recipe_install_plan(
-    paths: &FontbrewPaths,
-    recipe: RegistryPackageRecipe,
-    request: InstallRequest,
-    progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
-) -> Result<InstallPlan> {
-    ensure_not_cancelled(cancellation)?;
-    cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
-
-    let mut options = RemoteInstallOptions::from_request(request)?;
-    let repo = recipe.github_repo.clone();
-    let package_id = recipe.package_id.clone();
-    options.recipe_format_preference = dedupe_formats(recipe.format_preference.clone());
-    options.family_boundary = Some(InstallFamilyBoundary::from_registry(
-        recipe.family_boundary.clone(),
-    ));
-    let requested_source = ManifestSource::Registry {
-        id: package_id.as_str().to_string(),
-    };
-    let requested_update_source = Some(ManifestSource::GitHub {
-        owner: repo.owner.clone(),
-        repo: repo.repo.clone(),
-    });
-    if let Some(plan) = already_installed_plan(
-        paths,
-        &package_id,
-        options.reinstall,
-        &requested_source,
-        requested_update_source.as_ref(),
-    )? {
-        return Ok(plan);
-    }
-
-    progress.emit(ProgressEvent::ResolvingSource {
-        source: format!("registry:{}", package_id.as_str()),
-    });
-    let prepared = prepare_github_release_archive(
-        paths,
-        &repo,
-        recipe.asset.as_ref(),
-        package_id.clone(),
-        PreparedInstallSource::Registry {
-            id: package_id.as_str().to_string(),
-            github_owner: repo.owner.clone(),
-            github_repo: repo.repo.clone(),
-        },
-        options.with_package_id(package_id),
         progress,
         http_client,
         cancellation,
@@ -276,57 +212,6 @@ pub fn fontsource_install_plan(
     });
     let resolved =
         FontsourceProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
-    let prepared = prepare_provider_package(
-        paths,
-        resolved,
-        options,
-        progress,
-        http_client,
-        cancellation,
-    )?;
-    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
-
-    install_plan_from_prepared(paths, prepared)
-}
-
-pub fn google_install_plan(
-    paths: &FontbrewPaths,
-    provider_id: String,
-    request: InstallRequest,
-    progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
-) -> Result<InstallPlan> {
-    ensure_not_cancelled(cancellation)?;
-    cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
-
-    let options = RemoteInstallOptions::from_request(request)?;
-    let package_id = PackageId::parse(&provider_id)?;
-    let requested_source = ManifestSource::Provider {
-        provider: ProviderKind::Google,
-        id: provider_id.clone(),
-    };
-    if let Some(plan) = already_installed_plan(
-        paths,
-        &package_id,
-        options.reinstall,
-        &requested_source,
-        None,
-    )? {
-        return Ok(plan);
-    }
-
-    if options.asset_selector.is_some() {
-        return Err(FontbrewError::Config {
-            message: "--asset is not supported for Google Fonts provider sources".to_string(),
-        });
-    }
-
-    progress.emit(ProgressEvent::ResolvingSource {
-        source: format!("google:{provider_id}"),
-    });
-    let resolved = GoogleProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
     let prepared = prepare_provider_package(
         paths,
         resolved,
@@ -804,7 +689,6 @@ fn prepare_local_archive(
         reinstall,
         ArchiveFormatPreference {
             explicit_format_preference: format_preference,
-            recipe_format_preference: Vec::new(),
         },
         InstallFamilyBoundary::from_selected_families(selected_families),
         progress,
@@ -824,7 +708,6 @@ pub(crate) struct RemoteInstallOptions {
     pub(crate) package_id: Option<PackageId>,
     pub(crate) reinstall: bool,
     pub(crate) explicit_format_preference: Vec<FontFormat>,
-    pub(crate) recipe_format_preference: Vec<FontFormat>,
     pub(crate) family_boundary: Option<InstallFamilyBoundary>,
 }
 
@@ -839,7 +722,6 @@ impl RemoteInstallOptions {
             package_id: None,
             reinstall: request.reinstall,
             explicit_format_preference: dedupe_formats(request.format_preference),
-            recipe_format_preference: Vec::new(),
             family_boundary: InstallFamilyBoundary::from_selected_families(
                 request.selected_families,
             ),
@@ -857,7 +739,6 @@ impl RemoteInstallOptions {
             package_id: Some(package_id),
             reinstall: false,
             explicit_format_preference: Vec::new(),
-            recipe_format_preference: Vec::new(),
             family_boundary: None,
         }
     }
@@ -873,16 +754,6 @@ pub(crate) struct InstallFamilyBoundary {
 }
 
 impl InstallFamilyBoundary {
-    pub(crate) fn from_registry(boundary: RegistryFamilyBoundary) -> Self {
-        Self {
-            expected_families: boundary.expected_families().to_vec(),
-            include_families: boundary.include_families().to_vec(),
-            exclude_families: boundary.exclude_families().to_vec(),
-            allows_extra_archive_families: boundary.has_explicit_include_families(),
-            family_label: "expected registry recipe",
-        }
-    }
-
     pub(crate) fn from_selected_families(families: Vec<FamilyName>) -> Option<Self> {
         let families = dedupe_family_names(families);
         if families.is_empty() {
@@ -928,7 +799,6 @@ fn package_id_override_unsupported_source_error() -> FontbrewError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArchiveFormatPreference {
     explicit_format_preference: Vec<FontFormat>,
-    recipe_format_preference: Vec<FontFormat>,
 }
 
 struct StagingCleanupGuard {
@@ -965,7 +835,6 @@ impl Drop for StagingCleanupGuard {
 fn prepare_github_release_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
-    recipe_asset: Option<&RegistryAssetSelection>,
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
@@ -980,7 +849,6 @@ fn prepare_github_release_archive(
     let result = download_and_parse_github_archive(
         paths,
         repo,
-        recipe_asset,
         fallback_package_id,
         source,
         options,
@@ -1024,6 +892,24 @@ fn prepare_provider_package(
     }
 
     result
+}
+
+pub(crate) fn prepare_resolved_provider_package(
+    paths: &FontbrewPaths,
+    resolved: ResolvedProviderPackage,
+    options: RemoteInstallOptions,
+    http_client: &dyn HttpClient,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    let mut progress = NoProgress;
+    prepare_provider_package(
+        paths,
+        resolved,
+        options,
+        &mut progress,
+        http_client,
+        cancellation,
+    )
 }
 
 fn download_and_parse_provider_fonts(
@@ -1108,7 +994,6 @@ fn download_and_parse_provider_fonts(
         options.reinstall,
         ArchiveFormatPreference {
             explicit_format_preference: options.explicit_format_preference,
-            recipe_format_preference: options.recipe_format_preference,
         },
         options.family_boundary,
         cancellation,
@@ -1119,7 +1004,6 @@ fn download_and_parse_provider_fonts(
 fn download_and_parse_github_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
-    recipe_asset: Option<&RegistryAssetSelection>,
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
@@ -1134,7 +1018,6 @@ fn download_and_parse_github_archive(
     let asset = github::resolve_release_asset(
         http_client,
         repo,
-        recipe_asset,
         options.asset_selector.as_deref(),
         &fallback_package_id,
     )?;
@@ -1221,7 +1104,6 @@ fn download_and_parse_resolved_github_archive(
         options.reinstall,
         ArchiveFormatPreference {
             explicit_format_preference: options.explicit_format_preference,
-            recipe_format_preference: options.recipe_format_preference,
         },
         options.family_boundary,
         progress,
@@ -1363,7 +1245,7 @@ fn parse_staged_font_files(
     let Some(package_family) = boundary_families.first() else {
         cleanup_staging(&staging_dir);
         return Err(FontbrewError::ArchiveRejected {
-            reason: "registry recipe family boundary selected no font files".to_string(),
+            reason: "selected family boundary matched no font files".to_string(),
         });
     };
 
@@ -1492,7 +1374,7 @@ fn validate_archive_family_boundary(
 
     Err(FontbrewError::ArchiveRejected {
         reason: format!(
-            "archive contains unexpected registry recipe font families: {}",
+            "archive contains unexpected font families: {}",
             family_list_label(&unexpected)
         ),
     })
@@ -1586,6 +1468,13 @@ fn dedupe_family_names(families: Vec<FamilyName>) -> Vec<FamilyName> {
     deduped
 }
 
+pub(crate) fn normalize_family_boundary_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn family_list_label(families: &[FamilyName]) -> String {
     families
         .iter()
@@ -1646,18 +1535,6 @@ fn format_selection(
     if has_config_format_preference {
         return FormatSelection {
             preference: preference_with_builtin_fallback(config_format_preference),
-            explicit: false,
-        };
-    }
-
-    if !archive_format_preference
-        .recipe_format_preference
-        .is_empty()
-    {
-        return FormatSelection {
-            preference: preference_with_builtin_fallback(
-                &archive_format_preference.recipe_format_preference,
-            ),
             explicit: false,
         };
     }
@@ -2152,7 +2029,6 @@ fn manifest_source_from_prepared(source: &PreparedInstallSource) -> ManifestSour
             owner: owner.clone(),
             repo: repo.clone(),
         },
-        PreparedInstallSource::Registry { id, .. } => ManifestSource::Registry { id: id.clone() },
         PreparedInstallSource::Provider { provider, id } => ManifestSource::Provider {
             provider: provider.clone(),
             id: id.clone(),
@@ -2166,14 +2042,6 @@ fn manifest_update_source_from_prepared(source: &PreparedInstallSource) -> Optio
         PreparedInstallSource::GitHub { owner, repo } => Some(ManifestSource::GitHub {
             owner: owner.clone(),
             repo: repo.clone(),
-        }),
-        PreparedInstallSource::Registry {
-            github_owner,
-            github_repo,
-            ..
-        } => Some(ManifestSource::GitHub {
-            owner: github_owner.clone(),
-            repo: github_repo.clone(),
         }),
         PreparedInstallSource::Provider { .. } => None,
     }
@@ -2320,16 +2188,11 @@ fn conflict_error_from_risk(default_package_id: &PackageId, risk: &PlanRisk) -> 
 
 fn source_label(source: &ManifestSource) -> String {
     match source {
-        ManifestSource::Registry { id } => format!("registry:{id}"),
         ManifestSource::GitHub { owner, repo } => format!("github:{owner}/{repo}"),
         ManifestSource::Provider {
             provider: ProviderKind::Fontsource,
             id,
         } => format!("fontsource:{id}"),
-        ManifestSource::Provider {
-            provider: ProviderKind::Google,
-            id,
-        } => format!("google:{id}"),
         ManifestSource::LocalArchive { path } => format!("local archive:{}", path.display()),
     }
 }
@@ -2761,29 +2624,9 @@ fn package_not_installed_error(package_id: &PackageId) -> FontbrewError {
 mod tests {
     use super::*;
 
-    fn boundary_from_registry_json() -> InstallFamilyBoundary {
-        let snapshot = crate::registry::RegistrySnapshotStore::parse(
-            r#"{
-  "schemaVersion": 1,
-  "updatedAt": "2026-07-03T00:00:00Z",
-  "packages": {
-    "source-code-pro": {
-      "name": "Source Code Pro",
-      "source": { "type": "github", "repo": "adobe/source-code-pro" },
-      "families": ["Source Code Pro"],
-      "install": { "includeFamilies": ["Source Code Pro"] }
-    }
-  }
-}"#,
-        )
-        .expect("registry snapshot should parse");
-
-        let registry_boundary = snapshot
-            .resolve_short_name("source-code-pro")
-            .expect("recipe should resolve")
-            .family_boundary;
-
-        InstallFamilyBoundary::from_registry(registry_boundary)
+    fn selected_family_boundary() -> InstallFamilyBoundary {
+        InstallFamilyBoundary::from_selected_families(vec![FamilyName::new("Source Code Pro")])
+            .expect("selected family should create a boundary")
     }
 
     fn face(family: &str) -> FontFaceMetadata {
@@ -2802,7 +2645,7 @@ mod tests {
 
     #[test]
     fn family_boundary_filter_rejects_mixed_family_font_file() {
-        let boundary = boundary_from_registry_json();
+        let boundary = selected_family_boundary();
         let files = vec![ParsedFontFile {
             staging_path: PathBuf::from("Mixed.ttc"),
             faces: vec![face("Source Code Pro"), face("Inter")],
@@ -2822,7 +2665,7 @@ mod tests {
 
     #[test]
     fn family_boundary_filter_discards_whole_nonincluded_files() {
-        let boundary = boundary_from_registry_json();
+        let boundary = selected_family_boundary();
         let files = vec![
             ParsedFontFile {
                 staging_path: PathBuf::from("SourceCodePro-Collection.ttc"),

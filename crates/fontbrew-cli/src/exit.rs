@@ -128,7 +128,7 @@ fn core_error_kind(error: &FontbrewError) -> &'static str {
         FontbrewError::Cancelled => "cancelled",
         FontbrewError::ArchiveRejected { .. } => "archive_rejected",
         FontbrewError::FamilySelectionRequired { .. } => "family_selection_required",
-        FontbrewError::RegistryValidationFailed { .. } => "registry_validation_failed",
+        FontbrewError::InvalidSource { .. } => "invalid_source",
         FontbrewError::InvalidPackageId { .. } => "invalid_package_id",
         FontbrewError::Config { .. } => "config",
         FontbrewError::PathResolution { .. } => "path_resolution",

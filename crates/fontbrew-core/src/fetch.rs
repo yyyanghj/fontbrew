@@ -231,18 +231,16 @@ mod tests {
     #[test]
     fn request_error_source_uses_redacted_display_url() {
         let request = HttpRequest {
-            url: "https://www.googleapis.com/webfonts/v1/webfonts?family=Inter&key=test-google-key"
-                .to_string(),
+            url: "https://api.example.test/fonts?family=Inter&key=test-api-key".to_string(),
             display_url: Some(
-                "https://www.googleapis.com/webfonts/v1/webfonts?family=Inter&key=<redacted>"
-                    .to_string(),
+                "https://api.example.test/fonts?family=Inter&key=<redacted>".to_string(),
             ),
             headers: Vec::new(),
         };
 
         let message = request_error_source(&request, format!("request failed for {}", request.url));
 
-        assert!(!message.contains("test-google-key"));
+        assert!(!message.contains("test-api-key"));
         assert!(message.contains("key=<redacted>"));
     }
 }
