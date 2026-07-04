@@ -584,9 +584,7 @@ If multiple installable assets exist and neither recipe nor user selector resolv
 
 ## 20. Registry Trust
 
-MVP uses a fixed official registry URL.
-
-Development and CI can override it through an environment variable such as:
+MVP does not assume an official registry domain. Registry refresh uses an explicit environment variable:
 
 ```text
 FONTBREW_REGISTRY_URL

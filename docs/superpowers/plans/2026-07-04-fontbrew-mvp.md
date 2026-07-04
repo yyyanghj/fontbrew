@@ -319,7 +319,7 @@ tests/
 - [ ] Define `registry.json` v1 persistence structs separate from report models.
 - [ ] Implement schema validation for package IDs, source types, GitHub repo syntax, glob patterns, required fields, and unknown required behavior.
 - [ ] Implement registry snapshot read and write.
-- [ ] Add a fixed official registry URL constant and `FONTBREW_REGISTRY_URL` development override.
+- [ ] Add explicit registry URL configuration through `FONTBREW_REGISTRY_URL`.
 - [ ] Add `fontbrew registry update` and `fontbrew registry status`.
 - [ ] Resolve registry short names to recipes.
 - [ ] Add tests for registry validation, snapshot update using a fake HTTP adapter, short-name resolution, and invalid registry rejection.

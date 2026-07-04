@@ -54,13 +54,14 @@ impl<'a> FontsourceProvider<'a> {
     }
 
     pub(crate) fn search(&self, request: ProviderSearchRequest<'_>) -> Result<Vec<SearchResult>> {
-        let query = request.query.trim();
-        if query.is_empty() {
+        let raw_query = request.query.trim();
+        if raw_query.is_empty() {
             return Ok(Vec::new());
         }
+        let query = fontsource_family_query(raw_query);
 
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
-        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, query)?;
+        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, &query)?;
 
         let mut results = Vec::new();
         for record in list_records {
@@ -186,7 +187,7 @@ impl<'a> GoogleProvider<'a> {
     ) -> Result<GoogleResolvedPackage> {
         let package_id = PackageId::parse(provider_id)?;
         let snapshot_store = GoogleSnapshotStore::new(self.paths);
-        let family_query = google_family_query_from_provider_id(provider_id);
+        let family_query = provider_id_to_family_query(provider_id);
         let response = fetch_google_family(self.http_client, &snapshot_store, &family_query)?;
         let detail = response
             .items
@@ -552,7 +553,7 @@ fn font_format_extension(format: FontFormat) -> &'static str {
     }
 }
 
-fn google_family_query_from_provider_id(provider_id: &str) -> String {
+fn provider_id_to_family_query(provider_id: &str) -> String {
     provider_id
         .split('-')
         .filter(|component| !component.is_empty())
@@ -563,7 +564,15 @@ fn google_family_query_from_provider_id(provider_id: &str) -> String {
 
 fn google_family_query(query: &str) -> String {
     if PackageId::parse(query).is_ok() {
-        return google_family_query_from_provider_id(query);
+        return provider_id_to_family_query(query);
+    }
+
+    query.to_string()
+}
+
+fn fontsource_family_query(query: &str) -> String {
+    if PackageId::parse(query).is_ok() {
+        return provider_id_to_family_query(query);
     }
 
     query.to_string()

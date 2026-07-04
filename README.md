@@ -46,11 +46,18 @@ fontbrew info some-font
 fontbrew remove some-font
 ```
 
-Search and install a registry package:
+Search provider packages:
 
 ```bash
 fontbrew search inter
-fontbrew install inter --format ttf
+fontbrew install fontsource:inter
+```
+
+Use a registry package when a registry URL is configured:
+
+```bash
+FONTBREW_REGISTRY_URL=file:///path/to/registry.json fontbrew registry update
+FONTBREW_REGISTRY_URL=file:///path/to/registry.json fontbrew install inter --format ttf
 ```
 
 Install from explicit sources:
@@ -86,7 +93,7 @@ Google Fonts requires `GOOGLE_FONTS_API_KEY` in the environment for `google:<id>
 
 GitHub API requests can use `GITHUB_TOKEN` from the environment when available. The token is not persisted.
 
-For registry development and tests, `FONTBREW_REGISTRY_URL` can override the registry URL for the current process. The override is not a persisted config value.
+For registry development and tests, `FONTBREW_REGISTRY_URL` sets the registry URL for the current process. It can be an HTTP(S) URL or a `file://` path, and it is not persisted.
 
 ## Filesystem Layout
 

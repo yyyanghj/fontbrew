@@ -250,8 +250,25 @@ fn registry_url_uses_environment_override() {
 
     assert_eq!(
         registry_url_from_env(),
-        "https://example.test/registry.json"
+        Some("https://example.test/registry.json".to_string())
     );
+
+    match original {
+        Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),
+        None => std::env::remove_var(REGISTRY_URL_ENV_VAR),
+    }
+}
+
+#[test]
+fn registry_url_has_no_default_when_environment_is_unset_or_blank() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
+    std::env::remove_var(REGISTRY_URL_ENV_VAR);
+
+    assert_eq!(registry_url_from_env(), None);
+
+    std::env::set_var(REGISTRY_URL_ENV_VAR, " ");
+    assert_eq!(registry_url_from_env(), None);
 
     match original {
         Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),

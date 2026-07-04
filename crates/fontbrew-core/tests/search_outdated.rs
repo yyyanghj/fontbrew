@@ -1,30 +1,89 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use fontbrew_core::{
     fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    registry::OFFICIAL_REGISTRY_URL,
+    registry::{RegistrySnapshotStore, REGISTRY_URL_ENV_VAR},
     CancellationToken, FamilyName, FontbrewApp, FontbrewError, OutdatedRequest, PackageId,
     PackageVersion, SearchRequest,
 };
 
+const TEST_REGISTRY_URL: &str = "https://registry.example.test/registry.json";
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct RegistryUrlGuard {
+    original: Option<OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl RegistryUrlGuard {
+    fn set(url: &str) -> Self {
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
+        std::env::set_var(REGISTRY_URL_ENV_VAR, url);
+
+        Self {
+            original,
+            _guard: guard,
+        }
+    }
+
+    fn unset() -> Self {
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
+        std::env::remove_var(REGISTRY_URL_ENV_VAR);
+
+        Self {
+            original,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for RegistryUrlGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),
+            None => std::env::remove_var(REGISTRY_URL_ENV_VAR),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum FakeHttpRoute {
+    Response(Vec<u8>),
+    NetworkError(String),
+}
+
 #[derive(Default)]
 struct FakeHttpClient {
-    routes: Mutex<BTreeMap<String, Vec<u8>>>,
+    routes: Mutex<BTreeMap<String, FakeHttpRoute>>,
     requests: Mutex<Vec<HttpRequest>>,
 }
 
 impl FakeHttpClient {
     fn with_text(&self, url: &str, body: impl Into<String>) {
+        self.routes.lock().expect("routes lock").insert(
+            url.to_string(),
+            FakeHttpRoute::Response(body.into().into_bytes()),
+        );
+    }
+
+    fn with_network_error(&self, url: &str, message: impl Into<String>) {
         self.routes
             .lock()
             .expect("routes lock")
-            .insert(url.to_string(), body.into().into_bytes());
+            .insert(url.to_string(), FakeHttpRoute::NetworkError(message.into()));
     }
 
     fn requested_urls(&self) -> Vec<String> {
@@ -51,7 +110,10 @@ impl HttpClient for FakeHttpClient {
             .cloned()
             .unwrap_or_else(|| panic!("unexpected HTTP request: {}", request.url));
 
-        Ok(HttpResponse { status: 200, body })
+        match body {
+            FakeHttpRoute::Response(body) => Ok(HttpResponse { status: 200, body }),
+            FakeHttpRoute::NetworkError(message) => Err(FontbrewError::Network { message }),
+        }
     }
 
     fn download_to_file(
@@ -149,10 +211,11 @@ fn write_manifest(paths: &FontbrewPaths, records: Vec<ManifestPackageRecord>) {
 
 #[test]
 fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_snapshot_json());
+    fake_http.with_text(TEST_REGISTRY_URL, registry_snapshot_json());
     fake_http.with_text(
         &fontsource_list_url("Abel"),
         r#"[
@@ -207,7 +270,7 @@ fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
     assert_eq!(
         fake_http.requested_urls(),
         vec![
-            OFFICIAL_REGISTRY_URL.to_string(),
+            TEST_REGISTRY_URL.to_string(),
             fontsource_list_url("Abel"),
             fontsource_detail_url("abel"),
         ]
@@ -215,11 +278,172 @@ fn unprefixed_search_refreshes_registry_then_fetches_fontsource_fallback() {
 }
 
 #[test]
-fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit() {
+fn unprefixed_search_skips_registry_when_registry_url_is_not_configured() {
+    let _registry_url = RegistryUrlGuard::unset();
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_snapshot_json());
+    fake_http.with_text(
+        &fontsource_list_url("Inter"),
+        r#"[
+  {
+    "id": "inter",
+    "family": "Inter",
+    "subsets": ["latin"],
+    "weights": [400],
+    "styles": ["normal"],
+    "lastModified": "2025-05-30",
+    "license": "OFL-1.1",
+    "type": "google"
+  }
+]"#,
+    );
+    fake_http.with_text(
+        &fontsource_detail_url("inter"),
+        r#"{
+  "id": "inter",
+  "family": "Inter",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v4",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/inter.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+
+    let report = app
+        .search(SearchRequest {
+            query: "inter".to_string(),
+            limit: Some(1),
+        })
+        .expect("search should skip registry when registry URL is not configured");
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].package_id, package_id("inter"));
+    assert_eq!(report.results[0].source, "fontsource:inter");
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![fontsource_list_url("Inter"), fontsource_detail_url("inter")]
+    );
+}
+
+#[test]
+fn unprefixed_search_uses_provider_fallback_when_registry_refresh_fails_without_snapshot() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_network_error(TEST_REGISTRY_URL, "registry unavailable");
+    fake_http.with_text(
+        &fontsource_list_url("Inter"),
+        r#"[
+  {
+    "id": "inter",
+    "family": "Inter",
+    "subsets": ["latin"],
+    "weights": [400],
+    "styles": ["normal"],
+    "lastModified": "2025-05-30",
+    "license": "OFL-1.1",
+    "type": "google"
+  }
+]"#,
+    );
+    fake_http.with_text(
+        &fontsource_detail_url("inter"),
+        r#"{
+  "id": "inter",
+  "family": "Inter",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v4",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "https://cdn.example/inter.ttf"
+          }
+        }
+      }
+    }
+  }
+}"#,
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+
+    let report = app
+        .search(SearchRequest {
+            query: "Inter".to_string(),
+            limit: Some(1),
+        })
+        .expect("search should use provider fallback when registry refresh fails");
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].package_id, package_id("inter"));
+    assert_eq!(report.results[0].source, "fontsource:inter");
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![
+            TEST_REGISTRY_URL.to_string(),
+            fontsource_list_url("Inter"),
+            fontsource_detail_url("inter"),
+        ]
+    );
+}
+
+#[test]
+fn unprefixed_search_uses_cached_registry_snapshot_when_refresh_fails() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let snapshot = RegistrySnapshotStore::parse(registry_snapshot_json()).expect("parse snapshot");
+    RegistrySnapshotStore::new(paths.clone())
+        .write_snapshot(&snapshot)
+        .expect("write cached registry snapshot");
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_network_error(TEST_REGISTRY_URL, "registry unavailable");
+    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+
+    let report = app
+        .search(SearchRequest {
+            query: "inter".to_string(),
+            limit: Some(1),
+        })
+        .expect("search should use cached registry snapshot when refresh fails");
+
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].package_id, package_id("inter"));
+    assert_eq!(report.results[0].source, "registry:inter");
+    assert_eq!(
+        fake_http.requested_urls(),
+        vec![TEST_REGISTRY_URL.to_string()]
+    );
+}
+
+#[test]
+fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(TEST_REGISTRY_URL, registry_snapshot_json());
     let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
 
     let report = app
@@ -258,20 +482,21 @@ fn search_refreshes_registry_snapshot_with_case_insensitive_matching_and_limit()
     assert_eq!(
         fake_http.requested_urls(),
         vec![
-            OFFICIAL_REGISTRY_URL.to_string(),
-            OFFICIAL_REGISTRY_URL.to_string(),
-            OFFICIAL_REGISTRY_URL.to_string(),
+            TEST_REGISTRY_URL.to_string(),
+            TEST_REGISTRY_URL.to_string(),
+            TEST_REGISTRY_URL.to_string(),
         ]
     );
 }
 
 #[test]
 fn search_rejects_invalid_refreshed_registry_snapshot_before_use() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let fake_http = Arc::new(FakeHttpClient::default());
     fake_http.with_text(
-        OFFICIAL_REGISTRY_URL,
+        TEST_REGISTRY_URL,
         r#"{"schemaVersion": 1, "updatedAt": "2026-07-03T00:00:00Z", "packages": {"bad": {"name": "Bad", "source": {"type": "github", "repo": "owner//repo"}, "families": ["Bad"]}}}"#,
     );
     let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);

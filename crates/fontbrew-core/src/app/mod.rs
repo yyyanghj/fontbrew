@@ -15,7 +15,8 @@ use crate::model::{
 use crate::platform::FontbrewPaths;
 use crate::providers::{FontsourceProvider, GoogleProvider, ProviderSearchRequest};
 use crate::registry::{
-    registry_url_from_env, RegistryHttpClient, RegistrySnapshotStore, ReqwestRegistryHttpClient,
+    registry_url_from_env, registry_url_not_configured_error, RegistryHttpClient,
+    RegistrySnapshotStore, ReqwestRegistryHttpClient,
 };
 use crate::sources::ProviderSource;
 use crate::update;
@@ -68,8 +69,12 @@ impl FontbrewApp {
                 install::install_plan(&paths, request, cancellation)
             }
             crate::InstallSource::RegistryName(short_name) => {
-                self.refresh_registry_snapshot(&paths)?;
+                let refreshed_registry = self.refresh_registry_snapshot(&paths)?;
                 ensure_not_cancelled(cancellation)?;
+                if !refreshed_registry && !paths.registry_snapshot_path().exists() {
+                    return Err(registry_url_not_configured_error());
+                }
+
                 let recipe =
                     RegistrySnapshotStore::new(paths.clone()).resolve_short_name(&short_name)?;
                 ensure_not_cancelled(cancellation)?;
@@ -198,18 +203,7 @@ impl FontbrewApp {
             return Ok(SearchReport { results });
         }
 
-        self.refresh_registry_snapshot(&paths)?;
-        let mut results = RegistrySnapshotStore::new(paths.clone())
-            .search(&request.query, None)?
-            .into_iter()
-            .map(|recipe| crate::SearchResult {
-                package_id: recipe.package_id.clone(),
-                display_name: recipe.name,
-                source: format!("registry:{}", recipe.package_id.as_str()),
-                version: None,
-                families: recipe.families,
-            })
-            .collect::<Vec<_>>();
+        let mut results = self.search_registry_snapshot(&paths, &request)?;
 
         let remaining_limit = request
             .limit
@@ -260,7 +254,7 @@ impl FontbrewApp {
         let paths = self.paths()?;
         let store = RegistrySnapshotStore::new(paths);
         let client = ReqwestRegistryHttpClient::default();
-        let registry_url = registry_url_from_env();
+        let registry_url = registry_url_from_env().ok_or_else(registry_url_not_configured_error)?;
 
         store.update_from_client(&client, &registry_url)
     }
@@ -284,21 +278,54 @@ impl FontbrewApp {
         Ok(Arc::new(ReqwestHttpClient::try_new()?))
     }
 
-    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<()> {
+    fn refresh_registry_snapshot(&self, paths: &FontbrewPaths) -> Result<bool> {
         let store = RegistrySnapshotStore::new(paths.clone());
-        let registry_url = registry_url_from_env();
+        let Some(registry_url) = registry_url_from_env() else {
+            return Ok(false);
+        };
 
         if let Some(http_client) = &self.http_client {
             let client = AppRegistryHttpClient {
                 http_client: http_client.as_ref(),
             };
             store.update_from_client(&client, &registry_url)?;
-            return Ok(());
+            return Ok(true);
         }
 
         let client = ReqwestRegistryHttpClient::default();
         store.update_from_client(&client, &registry_url)?;
-        Ok(())
+        Ok(true)
+    }
+
+    fn search_registry_snapshot(
+        &self,
+        paths: &FontbrewPaths,
+        request: &SearchRequest,
+    ) -> Result<Vec<crate::SearchResult>> {
+        match self.refresh_registry_snapshot(paths) {
+            Ok(_) => {}
+            Err(FontbrewError::Network { .. }) if !paths.registry_snapshot_path().exists() => {
+                return Ok(Vec::new());
+            }
+            Err(FontbrewError::Network { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        if !paths.registry_snapshot_path().exists() {
+            return Ok(Vec::new());
+        }
+
+        Ok(RegistrySnapshotStore::new(paths.clone())
+            .search(&request.query, None)?
+            .into_iter()
+            .map(|recipe| crate::SearchResult {
+                package_id: recipe.package_id.clone(),
+                display_name: recipe.name,
+                source: format!("registry:{}", recipe.package_id.as_str()),
+                version: None,
+                families: recipe.families,
+            })
+            .collect())
     }
 
     fn search_provider_source(

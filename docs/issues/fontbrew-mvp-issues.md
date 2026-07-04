@@ -207,7 +207,7 @@ Implement `registry.json` v1 validation, local snapshot handling, `registry upda
 - [ ] Registry snapshot has `schemaVersion`.
 - [ ] Invalid registry entries are rejected before use.
 - [ ] Short names come only from the first-party registry.
-- [ ] `FONTBREW_REGISTRY_URL` can override the registry URL for development and tests.
+- [ ] `FONTBREW_REGISTRY_URL` can set the registry URL for development and tests.
 - [ ] Registry update stores metadata only, not downloaded fonts.
 
 ## Issue 12: Install fonts from GitHub releases

@@ -23,7 +23,6 @@ use crate::{
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
 const SUPPORTED_REQUIRED_BEHAVIORS: &[&str] = &["github", "asset-globs"];
 
-pub const OFFICIAL_REGISTRY_URL: &str = "https://fontbrew.dev/registry.json";
 pub const REGISTRY_URL_ENV_VAR: &str = "FONTBREW_REGISTRY_URL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,11 +156,18 @@ impl RegistryHttpClient for ReqwestRegistryHttpClient {
     }
 }
 
-pub fn registry_url_from_env() -> String {
+pub fn registry_url_from_env() -> Option<String> {
     std::env::var(REGISTRY_URL_ENV_VAR)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| OFFICIAL_REGISTRY_URL.to_string())
+}
+
+pub fn registry_url_not_configured_error() -> FontbrewError {
+    FontbrewError::Config {
+        message: format!(
+            "{REGISTRY_URL_ENV_VAR} is not configured; set it to a registry JSON URL or file:// path"
+        ),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

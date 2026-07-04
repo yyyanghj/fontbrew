@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -13,11 +14,43 @@ use fontbrew_core::{
     fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
-    registry::OFFICIAL_REGISTRY_URL,
+    registry::REGISTRY_URL_ENV_VAR,
     CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InstallRequest, InstallSource,
     PackageId, ProgressEvent, ProgressSink,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+const TEST_REGISTRY_URL: &str = "https://registry.example.test/registry.json";
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct RegistryUrlGuard {
+    original: Option<OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl RegistryUrlGuard {
+    fn set(url: &str) -> Self {
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::var_os(REGISTRY_URL_ENV_VAR);
+        std::env::set_var(REGISTRY_URL_ENV_VAR, url);
+
+        Self {
+            original,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for RegistryUrlGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var(REGISTRY_URL_ENV_VAR, value),
+            None => std::env::remove_var(REGISTRY_URL_ENV_VAR),
+        }
+    }
+}
 
 struct NoProgress;
 
@@ -663,6 +696,7 @@ fn direct_github_install_plan_is_noop_without_network_when_package_is_already_ma
 
 #[test]
 fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_managed() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -685,7 +719,7 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
 }"#;
 
     let first_http = Arc::new(FakeHttpClient::default());
-    first_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    first_http.with_text(TEST_REGISTRY_URL, registry_json);
     first_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -713,7 +747,7 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
     apply_plan(&app, first_plan);
 
     let no_route_http = Arc::new(FakeHttpClient::default());
-    no_route_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    no_route_http.with_text(TEST_REGISTRY_URL, registry_json);
     let app = FontbrewApp::with_paths_and_http_client(paths, no_route_http.clone());
     let plan = app
         .install_plan(registry_request("source-code-pro"))
@@ -723,7 +757,7 @@ fn registry_recipe_install_plan_is_noop_without_github_when_package_is_already_m
     assert!(plan.changes.is_empty());
     assert_eq!(
         no_route_http.requested_urls(),
-        vec![OFFICIAL_REGISTRY_URL.to_string()]
+        vec![TEST_REGISTRY_URL.to_string()]
     );
 }
 
@@ -865,10 +899,9 @@ fn github_asset_selector_resolves_asset_ambiguity() {
     );
 }
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_source() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -891,7 +924,7 @@ fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_sou
 }"#;
 
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(TEST_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -946,6 +979,7 @@ fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_sou
 
 #[test]
 fn registry_recipe_format_preference_does_not_override_user_config() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -983,7 +1017,7 @@ format_preference = ["ttf", "otf"]
     .expect("write config");
 
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(TEST_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -1026,6 +1060,7 @@ format_preference = ["ttf", "otf"]
 
 #[test]
 fn registry_recipe_include_families_filter_extra_archive_families() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -1051,7 +1086,7 @@ fn registry_recipe_include_families_filter_extra_archive_families() {
 }"#;
 
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(TEST_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -1111,6 +1146,7 @@ fn registry_recipe_include_families_filter_extra_archive_families() {
 
 #[test]
 fn registry_recipe_include_families_cannot_weaken_expected_identity() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -1136,7 +1172,7 @@ fn registry_recipe_include_families_cannot_weaken_expected_identity() {
 }"#;
 
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(TEST_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
@@ -1176,6 +1212,7 @@ fn registry_recipe_include_families_cannot_weaken_expected_identity() {
 
 #[test]
 fn registry_recipe_requires_all_expected_families() {
+    let _registry_url = RegistryUrlGuard::set(TEST_REGISTRY_URL);
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let registry_json = r#"{
@@ -1198,7 +1235,7 @@ fn registry_recipe_requires_all_expected_families() {
 }"#;
 
     let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(OFFICIAL_REGISTRY_URL, registry_json);
+    fake_http.with_text(TEST_REGISTRY_URL, registry_json);
     fake_http.with_text(
         &github_releases_url("adobe", "source-code-pro"),
         r#"[
