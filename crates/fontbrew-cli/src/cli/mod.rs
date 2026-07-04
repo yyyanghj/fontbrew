@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
-    sources::GitHubRepo, CancellationToken, FontFormat, FontbrewApp, InfoRequest, InstallRequest,
-    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest, UpdateRequest,
+    sources::GitHubRepo, CancellationToken, ConfigGetRequest, ConfigSetRequest, FontFormat,
+    FontbrewApp, InfoRequest, InstallRequest, InstallSource, OutdatedRequest, PackageId,
+    RemoveRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
@@ -60,6 +61,8 @@ enum Command {
     Outdated(OutdatedArgs),
     /// Update managed packages.
     Update(UpdateArgs),
+    /// Read and update Fontbrew configuration.
+    Config(ConfigArgs),
     /// Manage the local first-party registry snapshot.
     Registry(RegistryArgs),
 }
@@ -150,6 +153,31 @@ struct UpdateArgs {
 }
 
 #[derive(Debug, Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print a known config key.
+    Get(ConfigGetArgs),
+    /// Persist a known config key.
+    Set(ConfigSetArgs),
+}
+
+#[derive(Debug, Args)]
+struct ConfigGetArgs {
+    key: String,
+}
+
+#[derive(Debug, Args)]
+struct ConfigSetArgs {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Args)]
 struct RegistryArgs {
     #[command(subcommand)]
     command: RegistryCommand,
@@ -216,6 +244,7 @@ fn execute(
         Command::Search(args) => search(args, app, reporter),
         Command::Outdated(args) => outdated(args, app, reporter),
         Command::Update(args) => update(args, app, reporter, confirmer),
+        Command::Config(args) => config(args, app, reporter),
         Command::Registry(args) => registry(args, app, reporter),
     }
 }
@@ -355,6 +384,22 @@ fn update(
     reporter.render_update_report(report)
 }
 
+fn config(args: ConfigArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    match args.command {
+        ConfigCommand::Get(args) => {
+            let report = app.config_get(ConfigGetRequest { key: args.key })?;
+            reporter.render_config_get_report(report)
+        }
+        ConfigCommand::Set(args) => {
+            let report = app.config_set(ConfigSetRequest {
+                key: args.key,
+                value: args.value,
+            })?;
+            reporter.render_config_set_report(report)
+        }
+    }
+}
+
 fn registry(args: RegistryArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
     match args.command {
         RegistryCommand::Update => {
@@ -397,26 +442,35 @@ fn looks_like_invalid_local_path(source: &str) -> bool {
 }
 
 fn font_format_preference(args: &InstallArgs) -> Vec<FontFormat> {
-    let mut formats = args
-        .format_preference
-        .iter()
-        .map(|format| match format {
-            CliFontFormat::Otf => FontFormat::Otf,
-            CliFontFormat::Ttf => FontFormat::Ttf,
-            CliFontFormat::Ttc => FontFormat::Ttc,
-            CliFontFormat::Otc => FontFormat::Otc,
-        })
-        .collect::<Vec<_>>();
+    let mut formats = Vec::new();
+
+    for format in &args.format_preference {
+        push_unique_format(
+            &mut formats,
+            match format {
+                CliFontFormat::Otf => FontFormat::Otf,
+                CliFontFormat::Ttf => FontFormat::Ttf,
+                CliFontFormat::Ttc => FontFormat::Ttc,
+                CliFontFormat::Otc => FontFormat::Otc,
+            },
+        );
+    }
 
     if args.otf {
-        formats.push(FontFormat::Otf);
+        push_unique_format(&mut formats, FontFormat::Otf);
     }
 
     if args.ttf {
-        formats.push(FontFormat::Ttf);
+        push_unique_format(&mut formats, FontFormat::Ttf);
     }
 
     formats
+}
+
+fn push_unique_format(formats: &mut Vec<FontFormat>, format: FontFormat) {
+    if !formats.contains(&format) {
+        formats.push(format);
+    }
 }
 
 struct NeverCancelled;
@@ -454,5 +508,26 @@ mod tests {
             install_source_from_arg("downloads/fonts.zip"),
             InstallSource::LocalPath(_)
         ));
+    }
+
+    #[test]
+    fn font_format_preference_deduplicates_cli_overrides_in_order() {
+        let args = InstallArgs {
+            source: "source-code-pro.zip".to_string(),
+            reinstall: false,
+            yes: false,
+            dry_run: false,
+            refresh: false,
+            offline: false,
+            asset_selector: None,
+            format_preference: vec![CliFontFormat::Otf, CliFontFormat::Ttf, CliFontFormat::Otf],
+            otf: true,
+            ttf: true,
+        };
+
+        assert_eq!(
+            font_format_preference(&args),
+            vec![FontFormat::Otf, FontFormat::Ttf]
+        );
     }
 }

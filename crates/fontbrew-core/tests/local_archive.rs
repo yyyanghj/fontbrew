@@ -8,8 +8,8 @@ use fontbrew_core::{
     activation::ActivationStrategy,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InfoRequest,
-    InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
+    CancellationToken, ExecutionPolicy, FamilyName, FontFormat, FontbrewApp, FontbrewError,
+    InfoRequest, InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
     ProgressSink, RemovePlan, RemoveRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -47,9 +47,17 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
 }
 
 fn local_archive_request(archive_path: &Path, reinstall: bool) -> InstallRequest {
+    local_archive_request_with_formats(archive_path, reinstall, Vec::new())
+}
+
+fn local_archive_request_with_formats(
+    archive_path: &Path,
+    reinstall: bool,
+    format_preference: Vec<FontFormat>,
+) -> InstallRequest {
     InstallRequest {
         source: InstallSource::LocalPath(archive_path.to_path_buf()),
-        format_preference: Vec::new(),
+        format_preference,
         asset_selector: None,
         reinstall,
         refresh: false,
@@ -267,6 +275,182 @@ activation_strategy = "copy"
             &PackageVersion::new("local"),
         )
         .exists());
+    assert!(!paths.manifest_path().exists());
+}
+
+#[test]
+fn local_archive_install_uses_global_format_preference_when_formats_have_equivalent_coverage() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        ],
+    );
+    let config_path = paths.config_path();
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = 1
+
+[install]
+format_preference = ["ttf", "otf"]
+"#,
+    )
+    .expect("write config");
+
+    apply_install(&app, &archive_path).expect("install preferred ttf");
+
+    let package_dir = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("local"),
+    );
+    assert!(package_dir.join("files/SourceCodePro-Regular.ttf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Regular.otf").exists());
+}
+
+#[test]
+fn local_archive_request_format_preference_overrides_global_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        ],
+    );
+    let config_path = paths.config_path();
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = 1
+
+[install]
+format_preference = ["ttf", "otf"]
+"#,
+    )
+    .expect("write config");
+
+    let plan = app
+        .install_plan(local_archive_request_with_formats(
+            &archive_path,
+            false,
+            vec![FontFormat::Otf],
+        ))
+        .expect("plan otf override");
+    let mut progress = NoProgress;
+    let cancellation = NeverCancelled;
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut progress,
+        &cancellation,
+    )
+    .expect("install preferred otf");
+
+    let package_dir = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("local"),
+    );
+    assert!(package_dir.join("files/SourceCodePro-Regular.otf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Regular.ttf").exists());
+}
+
+#[test]
+fn local_archive_install_rejects_implicit_format_coverage_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
+        ],
+    );
+
+    let error = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .expect_err("format coverage mismatch should fail conservatively");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert!(format!("{error}").contains("format coverage differs"));
+    assert!(!paths.manifest_path().exists());
+}
+
+#[test]
+fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
+        ],
+    );
+
+    let plan = app
+        .install_plan(local_archive_request_with_formats(
+            &archive_path,
+            false,
+            vec![FontFormat::Otf],
+        ))
+        .expect("explicit format preference should select requested format");
+    let mut progress = NoProgress;
+    let cancellation = NeverCancelled;
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut progress,
+        &cancellation,
+    )
+    .expect("install requested otf subset");
+
+    let package_dir = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("local"),
+    );
+    assert!(package_dir.join("files/SourceCodePro-Regular.otf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Regular.ttf").exists());
+    assert!(!package_dir.join("files/SourceCodePro-Bold.ttf").exists());
+}
+
+#[test]
+fn local_archive_explicit_unavailable_format_fails_without_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+
+    let error = app
+        .install_plan(local_archive_request_with_formats(
+            &archive_path,
+            false,
+            vec![FontFormat::Otf],
+        ))
+        .expect_err("explicit unavailable format should not fall back silently");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert!(format!("{error}").contains("requested font formats are not available"));
     assert!(!paths.manifest_path().exists());
 }
 

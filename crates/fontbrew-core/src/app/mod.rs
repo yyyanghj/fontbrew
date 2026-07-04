@@ -1,13 +1,16 @@
 use std::{fmt, sync::Arc};
 
+use crate::config::FontbrewConfig;
 use crate::error::{FontbrewError, Result};
 use crate::fetch::{HttpClient, ReqwestHttpClient};
+use crate::fs::GlobalFileLock;
 use crate::install;
 use crate::model::{
-    CancellationToken, ExecutionPolicy, InfoReport, InfoRequest, InstallPlan, InstallReport,
-    InstallRequest, ListReport, OutdatedReport, OutdatedRequest, ProgressSink,
-    RegistryStatusReport, RegistryUpdateReport, RemovePlan, RemoveReport, RemoveRequest,
-    SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
+    CancellationToken, ConfigGetRequest, ConfigReport, ConfigSetRequest, ExecutionPolicy,
+    InfoReport, InfoRequest, InstallPlan, InstallReport, InstallRequest, ListReport,
+    OutdatedReport, OutdatedRequest, ProgressSink, RegistryStatusReport, RegistryUpdateReport,
+    RemovePlan, RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
+    UpdateRequest,
 };
 use crate::platform::FontbrewPaths;
 use crate::registry::{registry_url_from_env, RegistrySnapshotStore, ReqwestRegistryHttpClient};
@@ -159,6 +162,17 @@ impl FontbrewApp {
             .collect();
 
         Ok(SearchReport { results })
+    }
+
+    pub fn config_get(&self, request: ConfigGetRequest) -> Result<ConfigReport> {
+        FontbrewConfig::get(&self.paths()?.config_path(), request)
+    }
+
+    pub fn config_set(&self, request: ConfigSetRequest) -> Result<ConfigReport> {
+        let paths = self.paths()?;
+        let _lock = GlobalFileLock::try_exclusive(&install::write_lock_path(&paths))?;
+
+        FontbrewConfig::set(&paths.config_path(), request)
     }
 
     pub fn registry_update(&self) -> Result<RegistryUpdateReport> {

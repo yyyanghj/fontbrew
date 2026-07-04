@@ -24,20 +24,30 @@ fn fixture_font_path(filename: &str) -> PathBuf {
 }
 
 fn write_fixture_archive(archive_path: &Path) {
+    write_fixture_archive_entries(
+        archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+}
+
+fn write_fixture_archive_entries(archive_path: &Path, entries: &[(&str, &str)]) {
     let file = File::create(archive_path).expect("create archive");
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(0o100644);
 
-    zip.start_file("SourceCodePro-Regular.ttf", options)
-        .expect("start archive entry");
+    for (entry_name, fixture_name) in entries {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o100644);
 
-    let mut fixture =
-        File::open(fixture_font_path("SourceCodePro-Regular.ttf")).expect("open fixture font");
-    let mut bytes = Vec::new();
-    fixture.read_to_end(&mut bytes).expect("read fixture font");
-    zip.write_all(&bytes).expect("write archive entry");
+        zip.start_file(entry_name, options)
+            .expect("start archive entry");
+
+        let mut fixture = File::open(fixture_font_path(fixture_name)).expect("open fixture font");
+        let mut bytes = Vec::new();
+        fixture.read_to_end(&mut bytes).expect("read fixture font");
+        zip.write_all(&bytes).expect("write archive entry");
+    }
+
     zip.finish().expect("finish archive");
 }
 
@@ -239,6 +249,76 @@ fn json_install_and_list_write_parseable_stdout_only() {
         "source-code-pro"
     );
     assert!(stderr_text(&list_output).is_empty());
+}
+
+#[test]
+fn config_set_and_get_report_human_and_json_values() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    fontbrew(&home)
+        .args(["config", "set", "install.format_preference", "ttf,otf"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "install.format_preference = [\"ttf\", \"otf\"]",
+        ))
+        .stderr(predicate::str::is_empty());
+
+    fontbrew(&home)
+        .args(["config", "get", "install.format_preference"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "install.format_preference = [\"ttf\", \"otf\"]",
+        ))
+        .stderr(predicate::str::is_empty());
+
+    let output = fontbrew(&home)
+        .args(["--json", "config", "get", "install.format_preference"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["schemaVersion"], 1);
+    assert_eq!(json["command"], "config_get");
+    assert_eq!(json["report"]["key"], "install.format_preference");
+    assert_eq!(json["report"]["value"][0], "ttf");
+    assert_eq!(json["report"]["value"][1], "otf");
+}
+
+#[test]
+fn install_otf_flag_overrides_global_ttf_format_preference() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        ],
+    );
+
+    fontbrew(&home)
+        .args(["config", "set", "install.format_preference", "ttf,otf"])
+        .assert()
+        .success();
+
+    fontbrew(&home)
+        .args(["install", "--otf"])
+        .arg(&archive_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed source-code-pro"))
+        .stderr(predicate::str::is_empty());
+
+    let package_dir = home.join(".local/share/fontbrew/packages/source-code-pro/local/files");
+    assert!(package_dir.join("SourceCodePro-Regular.otf").exists());
+    assert!(!package_dir.join("SourceCodePro-Regular.ttf").exists());
 }
 
 #[test]

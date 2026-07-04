@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    FamilyName, InfoReport, InstallReport, ListReport, OutdatedReport, ProgressEvent,
-    RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport, UpdateReport,
+    ConfigReport, ConfigValue, FamilyName, InfoReport, InstallReport, ListReport, OutdatedReport,
+    ProgressEvent, RegistryStatusReport, RegistryUpdateReport, RemoveReport, SearchReport,
+    UpdateReport,
 };
 
 use crate::{
@@ -213,6 +214,32 @@ impl Reporter for HumanReporter {
         Ok(())
     }
 
+    fn render_config_get_report(&mut self, report: ConfigReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        writeln!(
+            stdout,
+            "{} = {}",
+            report.key,
+            config_value_label(&report.value)
+        )?;
+
+        Ok(())
+    }
+
+    fn render_config_set_report(&mut self, report: ConfigReport) -> CliResult<()> {
+        let mut stdout = self.stdout.lock();
+
+        writeln!(
+            stdout,
+            "{} = {}",
+            report.key,
+            config_value_label(&report.value)
+        )?;
+
+        Ok(())
+    }
+
     fn render_registry_update_report(&mut self, report: RegistryUpdateReport) -> CliResult<()> {
         let mut stdout = self.stdout.lock();
 
@@ -330,4 +357,20 @@ fn families_label(families: &[FamilyName]) -> String {
         .map(FamilyName::as_str)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn config_value_label(value: &ConfigValue) -> String {
+    match value {
+        ConfigValue::List(values) => {
+            let quoted = values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{quoted}]")
+        }
+        ConfigValue::String(value) => value.clone(),
+        ConfigValue::Bool(value) => value.to_string(),
+        ConfigValue::Integer(value) => value.to_string(),
+    }
 }

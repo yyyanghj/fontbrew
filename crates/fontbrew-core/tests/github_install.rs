@@ -241,18 +241,25 @@ fn github_releases_url(owner: &str, repo: &str) -> String {
 }
 
 fn zip_with_fixture_font(entry_name: &str, fixture_name: &str) -> Vec<u8> {
+    zip_with_fixture_fonts(&[(entry_name, fixture_name)])
+}
+
+fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(0o100644);
 
-    zip.start_file(entry_name, options)
-        .expect("start archive entry");
+    for (entry_name, fixture_name) in entries {
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .unix_permissions(0o100644);
 
-    let mut fixture = File::open(fixture_font_path(fixture_name)).expect("open fixture font");
-    let mut bytes = Vec::new();
-    fixture.read_to_end(&mut bytes).expect("read fixture font");
-    zip.write_all(&bytes).expect("write archive entry");
+        zip.start_file(entry_name, options)
+            .expect("start archive entry");
+
+        let mut fixture = File::open(fixture_font_path(fixture_name)).expect("open fixture font");
+        let mut bytes = Vec::new();
+        fixture.read_to_end(&mut bytes).expect("read fixture font");
+        zip.write_all(&bytes).expect("write archive entry");
+    }
 
     zip.finish().expect("finish zip").into_inner()
 }
@@ -747,4 +754,89 @@ fn registry_recipe_include_exclude_selects_github_asset_and_records_registry_sou
             repo: "source-code-pro".to_string(),
         })
     );
+}
+
+#[test]
+fn registry_recipe_format_preference_does_not_override_user_config() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let snapshot = RegistrySnapshotV1::parse(
+        r#"{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-03T00:00:00Z",
+  "packages": {
+    "source-code-pro": {
+      "name": "Source Code Pro",
+      "source": {
+        "type": "github",
+        "repo": "adobe/source-code-pro"
+      },
+      "families": ["Source Code Pro"],
+      "asset": {
+        "include": ["*.zip"],
+        "exclude": []
+      },
+      "install": {
+        "formatPreference": ["otf", "ttf"]
+      }
+    }
+  }
+}"#,
+    )
+    .expect("parse registry snapshot");
+    RegistrySnapshotStore::new(paths.clone())
+        .write_snapshot(&snapshot)
+        .expect("write registry snapshot");
+    let config_path = paths.config_path();
+    fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config dir");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = 1
+
+[install]
+format_preference = ["ttf", "otf"]
+"#,
+    )
+    .expect("write config");
+
+    let fake_http = Arc::new(FakeHttpClient::default());
+    fake_http.with_text(
+        &github_releases_url("adobe", "source-code-pro"),
+        r#"[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {
+        "name": "source-code-pro.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro.zip"
+      }
+    ]
+  }
+]"#,
+    );
+    fake_http.with_download_bytes(
+        "https://downloads.example/source-code-pro.zip",
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.otf", "SourceCodePro-Regular.otf"),
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        ]),
+    );
+    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+
+    let plan = app
+        .install_plan(registry_request("source-code-pro"))
+        .expect("registry recipe should plan install");
+    apply_plan(&app, plan);
+
+    let files_dir = paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &fontbrew_core::PackageVersion::new("v1.2.3"),
+        )
+        .join("files");
+    assert!(files_dir.join("SourceCodePro-Regular.ttf").exists());
+    assert!(!files_dir.join("SourceCodePro-Regular.otf").exists());
 }

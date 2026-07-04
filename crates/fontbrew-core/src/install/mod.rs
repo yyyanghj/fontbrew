@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -11,7 +11,7 @@ use crate::{
         deactivate, ActivationArtifact, ActivationPlan, ActivationPlanner, ActivationRequest,
     },
     archives::{ArchiveExtractionOptions, ZipArchiveExtractor},
-    config::FontbrewConfig,
+    config::{dedupe_formats, font_format_label, FontbrewConfig},
     error::{FontbrewError, Result},
     fetch::HttpClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
@@ -39,11 +39,16 @@ static OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn install_plan(paths: &FontbrewPaths, request: InstallRequest) -> Result<InstallPlan> {
     let InstallRequest {
-        source, reinstall, ..
+        source,
+        format_preference,
+        reinstall,
+        ..
     } = request;
 
     match source {
-        InstallSource::LocalPath(path) => local_archive_install_plan(paths, path, reinstall),
+        InstallSource::LocalPath(path) => {
+            local_archive_install_plan(paths, path, reinstall, format_preference)
+        }
         _ => Err(FontbrewError::NotImplemented {
             operation: "install_source",
         }),
@@ -95,9 +100,10 @@ pub fn registry_recipe_install_plan(
     request: InstallRequest,
     http_client: &dyn HttpClient,
 ) -> Result<InstallPlan> {
-    let options = RemoteInstallOptions::from_request(request);
+    let mut options = RemoteInstallOptions::from_request(request);
     let repo = recipe.github_repo.clone();
     let package_id = recipe.package_id.clone();
+    options.recipe_format_preference = dedupe_formats(recipe.format_preference.clone());
     let requested_source = ManifestSource::Registry {
         id: package_id.as_str().to_string(),
     };
@@ -393,9 +399,10 @@ fn local_archive_install_plan(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
     reinstall: bool,
+    format_preference: Vec<FontFormat>,
 ) -> Result<InstallPlan> {
     let archive_path = resolve_local_archive_path(&archive_path)?;
-    let prepared = prepare_local_archive(paths, archive_path, reinstall)?;
+    let prepared = prepare_local_archive(paths, archive_path, reinstall, format_preference)?;
     install_plan_from_prepared(paths, prepared)
 }
 
@@ -495,6 +502,7 @@ fn prepare_local_archive(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
     reinstall: bool,
+    format_preference: Vec<FontFormat>,
 ) -> Result<PreparedInstallPackage> {
     let staging_dir = new_staging_dir(paths)?;
     let result = extract_and_parse_archive(
@@ -505,6 +513,10 @@ fn prepare_local_archive(
         PreparedInstallSource::LocalArchive { path: archive_path },
         None,
         reinstall,
+        ArchiveFormatPreference {
+            explicit_format_preference: format_preference,
+            recipe_format_preference: Vec::new(),
+        },
     );
 
     if result.is_err() {
@@ -519,6 +531,8 @@ pub(crate) struct RemoteInstallOptions {
     pub(crate) asset_selector: Option<String>,
     pub(crate) package_id: Option<PackageId>,
     pub(crate) reinstall: bool,
+    pub(crate) explicit_format_preference: Vec<FontFormat>,
+    pub(crate) recipe_format_preference: Vec<FontFormat>,
 }
 
 impl RemoteInstallOptions {
@@ -527,6 +541,8 @@ impl RemoteInstallOptions {
             asset_selector: request.asset_selector,
             package_id: None,
             reinstall: request.reinstall,
+            explicit_format_preference: dedupe_formats(request.format_preference),
+            recipe_format_preference: Vec::new(),
         }
     }
 
@@ -540,8 +556,16 @@ impl RemoteInstallOptions {
             asset_selector: None,
             package_id: Some(package_id),
             reinstall: false,
+            explicit_format_preference: Vec::new(),
+            recipe_format_preference: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveFormatPreference {
+    explicit_format_preference: Vec<FontFormat>,
+    recipe_format_preference: Vec<FontFormat>,
 }
 
 fn prepare_github_release_archive(
@@ -646,6 +670,10 @@ fn download_and_parse_resolved_github_archive(
         source,
         options.package_id,
         options.reinstall,
+        ArchiveFormatPreference {
+            explicit_format_preference: options.explicit_format_preference,
+            recipe_format_preference: options.recipe_format_preference,
+        },
     )
 }
 
@@ -657,6 +685,7 @@ fn extract_and_parse_archive(
     source: PreparedInstallSource,
     package_id_hint: Option<PackageId>,
     reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
 
@@ -670,8 +699,8 @@ fn extract_and_parse_archive(
         });
     }
 
-    let reader = TtfParserMetadataReader::default();
     let mut family_names = BTreeSet::new();
+    let reader = TtfParserMetadataReader::default();
     let mut parsed_files = Vec::with_capacity(extracted_fonts.len());
 
     for extracted_font in extracted_fonts {
@@ -697,7 +726,11 @@ fn extract_and_parse_archive(
             family_names.insert(face.family_name.as_str().to_string());
         }
 
-        parsed_files.push((extracted_font.path, faces));
+        parsed_files.push(ParsedFontFile {
+            staging_path: extracted_font.path,
+            faces,
+            format: font_format_from_reader_format(extracted_font.format),
+        });
     }
 
     let Some(package_family) = family_names.iter().next() else {
@@ -711,45 +744,63 @@ fn extract_and_parse_archive(
         Some(package_id) => package_id,
         None => PackageId::normalize(package_family)?,
     };
-    let package_store_dir = paths.package_store_dir(&package_id, &version);
-    let files_dir = package_store_dir.join("files");
-    let families = family_names.into_iter().map(FamilyName::new).collect();
-    let mut font_files = Vec::with_capacity(parsed_files.len());
-    let mut activation_sources = Vec::with_capacity(parsed_files.len());
-
-    for (staging_path, faces) in parsed_files {
-        let relative_path =
-            staging_path
-                .strip_prefix(&staging_dir)
-                .map_err(|_| FontbrewError::PathResolution {
-                    message: format!(
-                        "staged font path is outside staging directory: {}",
-                        staging_path.display()
-                    ),
-                })?;
-        let stored_path = files_dir.join(relative_path);
-        let prepared_faces = faces.iter().map(prepared_face_from_metadata).collect();
-
-        activation_sources.push(stored_path.clone());
-        font_files.push(PreparedFontFile {
-            staging_path,
-            stored_path,
-            faces: prepared_faces,
-        });
-    }
-
-    let config = match FontbrewConfig::load(&paths.config_path()) {
+    let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
         Ok(config) => config,
         Err(error) => {
             cleanup_staging(&staging_dir);
             return Err(error);
         }
     };
+    let format_selection = format_selection(
+        &archive_format_preference,
+        &loaded_config.config.format_preference,
+        loaded_config.has_format_preference,
+    );
+    let parsed_files =
+        match select_preferred_format_files(&package_id, parsed_files, &format_selection) {
+            Ok(parsed_files) => parsed_files,
+            Err(error) => {
+                cleanup_staging(&staging_dir);
+                return Err(error);
+            }
+        };
+
+    let package_store_dir = paths.package_store_dir(&package_id, &version);
+    let files_dir = package_store_dir.join("files");
+    let families = selected_family_names(&parsed_files);
+    let mut font_files = Vec::with_capacity(parsed_files.len());
+    let mut activation_sources = Vec::with_capacity(parsed_files.len());
+
+    for parsed_file in parsed_files {
+        let relative_path = parsed_file
+            .staging_path
+            .strip_prefix(&staging_dir)
+            .map_err(|_| FontbrewError::PathResolution {
+                message: format!(
+                    "staged font path is outside staging directory: {}",
+                    parsed_file.staging_path.display()
+                ),
+            })?;
+        let stored_path = files_dir.join(relative_path);
+        let prepared_faces = parsed_file
+            .faces
+            .iter()
+            .map(prepared_face_from_metadata)
+            .collect();
+
+        activation_sources.push(stored_path.clone());
+        font_files.push(PreparedFontFile {
+            staging_path: parsed_file.staging_path,
+            stored_path,
+            faces: prepared_faces,
+        });
+    }
+
     let activation_plan = ActivationPlanner::plan(ActivationRequest {
         package_id: package_id.clone(),
         font_files: activation_sources,
         activation_dir: paths.activation_dir(),
-        strategy: config.activation_strategy,
+        strategy: loaded_config.config.activation_strategy,
     })?;
 
     Ok(PreparedInstallPackage {
@@ -767,6 +818,228 @@ fn extract_and_parse_archive(
         package_store_dir,
         reinstall,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ParsedFontFile {
+    staging_path: PathBuf,
+    faces: Vec<FontFaceMetadata>,
+    format: FontFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FaceCoverage {
+    family: String,
+    style: String,
+    weight: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormatSelection {
+    preference: Vec<FontFormat>,
+    explicit: bool,
+}
+
+fn format_selection(
+    archive_format_preference: &ArchiveFormatPreference,
+    config_format_preference: &[FontFormat],
+    has_config_format_preference: bool,
+) -> FormatSelection {
+    if !archive_format_preference
+        .explicit_format_preference
+        .is_empty()
+    {
+        return FormatSelection {
+            preference: dedupe_formats(
+                archive_format_preference
+                    .explicit_format_preference
+                    .iter()
+                    .copied(),
+            ),
+            explicit: true,
+        };
+    }
+
+    if has_config_format_preference {
+        return FormatSelection {
+            preference: preference_with_builtin_fallback(config_format_preference),
+            explicit: false,
+        };
+    }
+
+    if !archive_format_preference
+        .recipe_format_preference
+        .is_empty()
+    {
+        return FormatSelection {
+            preference: preference_with_builtin_fallback(
+                &archive_format_preference.recipe_format_preference,
+            ),
+            explicit: false,
+        };
+    }
+
+    FormatSelection {
+        preference: desktop_format_fallback_order(),
+        explicit: false,
+    }
+}
+
+fn preference_with_builtin_fallback(format_preference: &[FontFormat]) -> Vec<FontFormat> {
+    let mut preference = dedupe_formats(format_preference.iter().copied());
+
+    for fallback in desktop_format_fallback_order() {
+        if !preference.contains(&fallback) {
+            preference.push(fallback);
+        }
+    }
+
+    preference
+}
+
+fn desktop_format_fallback_order() -> Vec<FontFormat> {
+    vec![
+        FontFormat::Otf,
+        FontFormat::Ttf,
+        FontFormat::Ttc,
+        FontFormat::Otc,
+    ]
+}
+
+fn select_preferred_format_files(
+    package_id: &PackageId,
+    parsed_files: Vec<ParsedFontFile>,
+    format_selection: &FormatSelection,
+) -> Result<Vec<ParsedFontFile>> {
+    let coverage_by_format = font_coverage_by_format(&parsed_files);
+    if format_selection.explicit {
+        let selected_format =
+            requested_available_format(package_id, format_selection, &coverage_by_format)?;
+
+        return Ok(parsed_files
+            .into_iter()
+            .filter(|file| file.format == selected_format)
+            .collect());
+    }
+
+    if coverage_by_format.len() <= 1 {
+        return Ok(parsed_files);
+    }
+
+    if formats_have_different_coverage(&coverage_by_format) {
+        return Err(FontbrewError::Conflict {
+            package_id: package_id.clone(),
+            message: format!(
+                "format coverage differs across available desktop formats for {}; refusing to choose a preferred subset ({})",
+                package_id.as_str(),
+                format_coverage_summary(&coverage_by_format)
+            ),
+        });
+    }
+
+    let Some(selected_format) = format_selection
+        .preference
+        .iter()
+        .find(|format| coverage_by_format.contains_key(format))
+        .copied()
+        .or_else(|| coverage_by_format.keys().next().copied())
+    else {
+        return Ok(parsed_files);
+    };
+
+    Ok(parsed_files
+        .into_iter()
+        .filter(|file| file.format == selected_format)
+        .collect())
+}
+
+fn requested_available_format(
+    package_id: &PackageId,
+    format_selection: &FormatSelection,
+    coverage_by_format: &BTreeMap<FontFormat, BTreeSet<FaceCoverage>>,
+) -> Result<FontFormat> {
+    format_selection
+        .preference
+        .iter()
+        .find(|format| coverage_by_format.contains_key(format))
+        .copied()
+        .ok_or_else(|| FontbrewError::Conflict {
+            package_id: package_id.clone(),
+            message: format!(
+                "requested font formats are not available for {}; requested: {}; available: {}",
+                package_id.as_str(),
+                format_list_label(&format_selection.preference),
+                format_list_label(coverage_by_format.keys())
+            ),
+        })
+}
+
+fn font_coverage_by_format(
+    parsed_files: &[ParsedFontFile],
+) -> BTreeMap<FontFormat, BTreeSet<FaceCoverage>> {
+    let mut coverage_by_format = BTreeMap::new();
+
+    for parsed_file in parsed_files {
+        let coverage = coverage_by_format
+            .entry(parsed_file.format)
+            .or_insert_with(BTreeSet::new);
+        for face in &parsed_file.faces {
+            coverage.insert(face_coverage(face));
+        }
+    }
+
+    coverage_by_format
+}
+
+fn face_coverage(face: &FontFaceMetadata) -> FaceCoverage {
+    FaceCoverage {
+        family: face.family_name.as_str().to_string(),
+        style: face_style(face),
+        weight: face.weight.unwrap_or(400),
+    }
+}
+
+fn formats_have_different_coverage(
+    coverage_by_format: &BTreeMap<FontFormat, BTreeSet<FaceCoverage>>,
+) -> bool {
+    let mut coverage_sets = coverage_by_format.values();
+    let Some(first) = coverage_sets.next() else {
+        return false;
+    };
+
+    coverage_sets.any(|coverage| coverage != first)
+}
+
+fn format_coverage_summary(
+    coverage_by_format: &BTreeMap<FontFormat, BTreeSet<FaceCoverage>>,
+) -> String {
+    coverage_by_format
+        .iter()
+        .map(|(format, coverage)| {
+            format!("{}: {} face(s)", font_format_label(format), coverage.len())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_list_label<'a>(formats: impl IntoIterator<Item = &'a FontFormat>) -> String {
+    formats
+        .into_iter()
+        .map(font_format_label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn selected_family_names(parsed_files: &[ParsedFontFile]) -> Vec<FamilyName> {
+    let mut families = BTreeSet::new();
+
+    for parsed_file in parsed_files {
+        for face in &parsed_file.faces {
+            families.insert(face.family_name.as_str().to_string());
+        }
+    }
+
+    families.into_iter().map(FamilyName::new).collect()
 }
 
 fn package_id_from_repo_name(repo: &str) -> Result<PackageId> {

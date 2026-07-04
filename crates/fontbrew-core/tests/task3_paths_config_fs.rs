@@ -5,11 +5,20 @@ use fontbrew_core::{
     config::{ActivationStrategy, FontbrewConfig},
     fs::{write_atomically, GlobalFileLock},
     platform::FontbrewPaths,
-    FontFormat, FontbrewError, PackageId, PackageVersion,
+    ConfigGetRequest, ConfigSetRequest, ConfigValue, FontFormat, FontbrewApp, FontbrewError,
+    PackageId, PackageVersion,
 };
 
 fn package_id(id: &str) -> PackageId {
     PackageId::parse(id).expect("test package id should be valid")
+}
+
+fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
+    FontbrewPaths::for_tests(
+        temp.path().join("data"),
+        temp.path().join("config"),
+        temp.path().join("home"),
+    )
 }
 
 #[test]
@@ -141,6 +150,177 @@ auto_udpate = true
     let error = FontbrewConfig::load(&config_path).expect_err("typo should be rejected");
 
     assert!(matches!(error, FontbrewError::Config { .. }));
+}
+
+#[test]
+fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+
+    let set_report = app
+        .config_set(ConfigSetRequest {
+            key: "install.format_preference".to_string(),
+            value: "ttf,otf".to_string(),
+        })
+        .expect("set format preference");
+
+    assert_eq!(set_report.key, "install.format_preference");
+    assert_eq!(
+        set_report.value,
+        ConfigValue::List(vec!["ttf".to_string(), "otf".to_string()])
+    );
+    assert!(paths.config_path().exists());
+
+    let config = FontbrewConfig::load(&paths.config_path()).expect("load persisted config");
+    assert_eq!(
+        config.format_preference,
+        vec![FontFormat::Ttf, FontFormat::Otf]
+    );
+    assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
+    assert!(config.registry_auto_update);
+    assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
+    assert_eq!(config.update_concurrency, 4);
+
+    let get_report = app
+        .config_get(ConfigGetRequest {
+            key: "install.format_preference".to_string(),
+        })
+        .expect("get format preference");
+
+    assert_eq!(get_report.key, "install.format_preference");
+    assert_eq!(
+        get_report.value,
+        ConfigValue::List(vec!["ttf".to_string(), "otf".to_string()])
+    );
+}
+
+#[test]
+fn config_set_and_get_support_all_known_scalar_keys() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = FontbrewApp::with_paths(test_paths(&temp));
+
+    for (key, raw_value, expected_value) in [
+        (
+            "install.activation_strategy",
+            "copy",
+            ConfigValue::String("copy".to_string()),
+        ),
+        ("registry.auto_update", "false", ConfigValue::Bool(false)),
+        ("network.metadata_ttl_hours", "6", ConfigValue::Integer(6)),
+        ("network.update_concurrency", "2", ConfigValue::Integer(2)),
+    ] {
+        let set_report = app
+            .config_set(ConfigSetRequest {
+                key: key.to_string(),
+                value: raw_value.to_string(),
+            })
+            .expect("set known config key");
+        assert_eq!(set_report.key, key);
+        assert_eq!(set_report.value, expected_value);
+
+        let get_report = app
+            .config_get(ConfigGetRequest {
+                key: key.to_string(),
+            })
+            .expect("get known config key");
+        assert_eq!(get_report.key, key);
+        assert_eq!(get_report.value, expected_value);
+    }
+}
+
+#[test]
+fn config_set_uses_global_write_lock() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = FontbrewApp::with_paths(paths.clone());
+    let _held_lock =
+        GlobalFileLock::try_exclusive(&paths.managed_store_dir().join(".fontbrew.lock"))
+            .expect("hold global write lock");
+
+    let error = app
+        .config_set(ConfigSetRequest {
+            key: "registry.auto_update".to_string(),
+            value: "false".to_string(),
+        })
+        .expect_err("config set should fail while global lock is held");
+
+    assert!(matches!(error, FontbrewError::Lock { .. }));
+    assert!(!paths.config_path().exists());
+}
+
+#[test]
+fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = FontbrewApp::with_paths(test_paths(&temp));
+
+    let unknown_get = app
+        .config_get(ConfigGetRequest {
+            key: "install.unknown".to_string(),
+        })
+        .expect_err("unknown get key should fail");
+    let unknown_set = app
+        .config_set(ConfigSetRequest {
+            key: "install.unknown".to_string(),
+            value: "true".to_string(),
+        })
+        .expect_err("unknown set key should fail");
+    let malformed_set = app
+        .config_set(ConfigSetRequest {
+            key: "network.update_concurrency".to_string(),
+            value: "many".to_string(),
+        })
+        .expect_err("malformed set value should fail");
+
+    assert!(matches!(unknown_get, FontbrewError::Config { .. }));
+    assert!(matches!(unknown_set, FontbrewError::Config { .. }));
+    assert!(matches!(malformed_set, FontbrewError::Config { .. }));
+}
+
+#[test]
+fn persisted_config_rejects_empty_or_zero_values() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (name, content) in [
+        (
+            "empty-format-preference",
+            r#"
+schema_version = 1
+
+[install]
+format_preference = []
+"#,
+        ),
+        (
+            "zero-metadata-ttl",
+            r#"
+schema_version = 1
+
+[network]
+metadata_ttl_hours = 0
+"#,
+        ),
+        (
+            "zero-update-concurrency",
+            r#"
+schema_version = 1
+
+[network]
+update_concurrency = 0
+"#,
+        ),
+    ] {
+        let config_path = temp.path().join(format!("{name}.toml"));
+        fs::write(&config_path, content).expect("write malformed config");
+
+        let error = FontbrewConfig::load(&config_path)
+            .expect_err("malformed persisted config should be rejected");
+
+        assert!(
+            matches!(error, FontbrewError::Config { .. }),
+            "{name} produced {error:?}"
+        );
+    }
 }
 
 #[test]

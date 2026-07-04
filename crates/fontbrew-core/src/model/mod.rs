@@ -286,7 +286,7 @@ pub enum InstallSource {
     LocalPath(PathBuf),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FontFormat {
     Otf,
     Ttf,
@@ -333,6 +333,32 @@ pub struct SearchRequest {
     pub limit: Option<usize>,
     pub refresh: bool,
     pub offline: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigGetRequest {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigSetRequest {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigReport {
+    pub key: String,
+    pub value: ConfigValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConfigValue {
+    List(Vec<String>),
+    String(String),
+    Bool(bool),
+    Integer(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
