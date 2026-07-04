@@ -2,6 +2,11 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.4 - 2026-07-05
+
+- Changed `fontbrew info` human output to show a concise package summary and a per-font status table with weight, italic, installed, and activated state.
+- Removed default long managed file and activation artifact paths from `fontbrew info`; use verbose output when those details are needed.
+
 ## 0.0.3 - 2026-07-05
 
 - Fixed multi-family install progress so repeated planning for the same source reports `Resolving` once.
