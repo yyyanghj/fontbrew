@@ -131,6 +131,7 @@ pub fn update_plan(
     for outcome in outcomes {
         match outcome {
             PrepareOutcome::Prepared(prepared_update) => {
+                let prepared_update = *prepared_update;
                 risks.extend(prepared_update.prepared.activation_risks.clone());
                 prepared.push(prepared_update.summary.clone());
                 prepared_packages.push(prepared_update);
@@ -181,7 +182,7 @@ pub fn update_plan(
 }
 
 enum PrepareOutcome {
-    Prepared(PreparedUpdatePackage),
+    Prepared(Box<PreparedUpdatePackage>),
     Failed(UpdatePlanFailure),
     UpToDate,
 }
@@ -194,7 +195,7 @@ fn prepare_update_package(
     cancellation: &dyn CancellationToken,
 ) -> PrepareOutcome {
     match prepare_update_package_inner(paths, &record, offline, http_client, cancellation) {
-        Ok(Some(prepared)) => PrepareOutcome::Prepared(prepared),
+        Ok(Some(prepared)) => PrepareOutcome::Prepared(Box::new(prepared)),
         Ok(None) => PrepareOutcome::UpToDate,
         Err(error) => PrepareOutcome::Failed(UpdatePlanFailure {
             package_id: record.package_id,

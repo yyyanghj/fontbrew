@@ -60,8 +60,7 @@ impl RegistrySnapshotStore {
 
     pub fn write_snapshot(&self, snapshot: &RegistrySnapshotV1) -> Result<()> {
         snapshot.validate()?;
-        let content =
-            serde_json::to_vec_pretty(snapshot).map_err(|source| registry_validation(source))?;
+        let content = serde_json::to_vec_pretty(snapshot).map_err(registry_validation)?;
         write_atomically(&self.paths.registry_snapshot_path(), &content)
     }
 
@@ -177,8 +176,7 @@ pub struct RegistrySnapshotV1 {
 impl RegistrySnapshotV1 {
     pub fn parse(content: &str) -> Result<Self> {
         validate_schema_version(content)?;
-        let snapshot: Self =
-            serde_json::from_str(content).map_err(|source| registry_validation(source))?;
+        let snapshot: Self = serde_json::from_str(content).map_err(registry_validation)?;
         snapshot.validate()?;
 
         Ok(snapshot)
@@ -457,8 +455,7 @@ impl<'de> Visitor<'de> for PackageMapVisitor {
 }
 
 fn validate_schema_version(content: &str) -> Result<()> {
-    let value: serde_json::Value =
-        serde_json::from_str(content).map_err(|source| registry_validation(source))?;
+    let value: serde_json::Value = serde_json::from_str(content).map_err(registry_validation)?;
     let found = value
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64);

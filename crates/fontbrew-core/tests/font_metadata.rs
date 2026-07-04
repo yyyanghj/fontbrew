@@ -10,7 +10,7 @@ fn fixture_path(filename: &str) -> PathBuf {
 
 #[test]
 fn fonts_read_ttf_metadata_for_grouping_and_style() {
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
 
     let faces = reader
         .read_file(&fixture_path("SourceCodePro-It.ttf"))
@@ -31,7 +31,7 @@ fn fonts_read_ttf_metadata_for_grouping_and_style() {
 
 #[test]
 fn fonts_read_otf_metadata() {
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
 
     let faces = reader
         .read_file(&fixture_path("SourceCodePro-Regular.otf"))
@@ -53,7 +53,7 @@ fn fonts_read_otf_metadata() {
 
 #[test]
 fn fonts_read_variable_ttf_metadata() {
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
 
     let faces = reader
         .read_file(&fixture_path("Inter-Variable.ttf"))
@@ -71,7 +71,7 @@ fn fonts_read_variable_ttf_metadata() {
 
 #[test]
 fn fonts_read_ttc_metadata_for_each_face() {
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
 
     let faces = reader
         .read_file(&fixture_path("SourceCodePro-Collection.ttc"))

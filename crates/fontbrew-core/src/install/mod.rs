@@ -782,6 +782,7 @@ impl Drop for StagingCleanupGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_github_release_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
@@ -917,6 +918,7 @@ fn download_and_parse_provider_fonts(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn download_and_parse_github_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
@@ -1016,6 +1018,7 @@ fn download_and_parse_resolved_github_archive(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_and_parse_archive(
     paths: &FontbrewPaths,
     archive_path: PathBuf,
@@ -1047,6 +1050,7 @@ fn extract_and_parse_archive(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_staged_font_files(
     paths: &FontbrewPaths,
     staged_fonts: Vec<ExtractedFontFile>,
@@ -1066,7 +1070,7 @@ fn parse_staged_font_files(
     }
 
     let mut family_names = BTreeSet::new();
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
     let mut parsed_files = Vec::with_capacity(staged_fonts.len());
 
     for staged_font in staged_fonts {
@@ -2043,7 +2047,7 @@ fn unmanaged_same_family_overlap_risks(
         scan_dirs.insert(user_fonts_dir.to_path_buf());
     }
 
-    let reader = TtfParserMetadataReader::default();
+    let reader = TtfParserMetadataReader;
     let mut risks = Vec::new();
     let mut seen = BTreeSet::new();
 
