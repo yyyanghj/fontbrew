@@ -141,18 +141,17 @@ fn run_with_http_client(
     confirmer: &mut dyn Confirmer,
     cancellation: &dyn CancellationToken,
 ) -> CliResult<()> {
-    let target = current_target()?;
-
-    run_with_http_client_for_target(
+    run_with_http_client_with_target_override(
         request,
         http_client,
         reporter,
         confirmer,
         cancellation,
-        target,
+        None,
     )
 }
 
+#[cfg(test)]
 fn run_with_http_client_for_target(
     request: SelfUpdateRequest,
     http_client: &dyn HttpClient,
@@ -161,10 +160,32 @@ fn run_with_http_client_for_target(
     cancellation: &dyn CancellationToken,
     target: &str,
 ) -> CliResult<()> {
+    run_with_http_client_with_target_override(
+        request,
+        http_client,
+        reporter,
+        confirmer,
+        cancellation,
+        Some(target),
+    )
+}
+
+fn run_with_http_client_with_target_override(
+    request: SelfUpdateRequest,
+    http_client: &dyn HttpClient,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: &dyn CancellationToken,
+    target_override: Option<&str>,
+) -> CliResult<()> {
     ensure_not_cancelled(cancellation)?;
     let _lock = GlobalFileLock::try_exclusive(&request.lock_path)?;
 
     let install_method = detect_install_method(&request.current_executable, home_dir().as_deref())?;
+    let target = match target_override {
+        Some(target) => target,
+        None => current_target()?,
+    };
     reporter.self_update_progress("Checking latest fontbrew release...")?;
     let release = resolve_latest_release(http_client, &request.repo, target)?;
     let current_version = parse_current_version(&request.current_version)?;
