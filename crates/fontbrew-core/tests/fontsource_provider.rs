@@ -70,6 +70,42 @@ fn fixture_font_bytes(filename: &str) -> Vec<u8> {
     bytes
 }
 
+fn font_bytes_with_renamed_source_code_pro_family() -> Vec<u8> {
+    let mut bytes = fixture_font_bytes("SourceCodePro-Regular.ttf");
+    let from = utf16be("Source Code Pro");
+    let to = utf16be("Source Code Foo");
+    let replacements = replace_all_same_length(&mut bytes, &from, &to);
+
+    assert!(replacements > 0, "fixture should contain family name bytes");
+
+    bytes
+}
+
+fn utf16be(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect::<Vec<_>>()
+}
+
+fn replace_all_same_length(bytes: &mut [u8], from: &[u8], to: &[u8]) -> usize {
+    assert_eq!(from.len(), to.len());
+
+    let mut replacements = 0;
+    let mut offset = 0;
+    while offset + from.len() <= bytes.len() {
+        if &bytes[offset..offset + from.len()] == from {
+            bytes[offset..offset + to.len()].copy_from_slice(to);
+            replacements += 1;
+            offset += from.len();
+        } else {
+            offset += 1;
+        }
+    }
+
+    replacements
+}
+
 fn fontsource_list_path() -> String {
     "/fonts".to_string()
 }
@@ -668,6 +704,90 @@ async fn fontsource_install_records_provider_variant_weight_for_downloaded_font(
 }
 
 #[tokio::test]
+async fn fontsource_install_records_provider_family_when_font_metadata_is_style_linked() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&font_download_path("source-code-pro-regular.ttf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "__DOWNLOAD_URL__"
+          }
+        }
+      }
+    }
+  }
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_download),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro-regular.ttf"),
+        font_bytes_with_renamed_source_code_pro_family(),
+    );
+    let app = app_with_server(paths.clone(), &server);
+
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .await
+        .expect("plan Fontsource install");
+
+    let report = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("apply Fontsource install");
+
+    assert_eq!(report.families, vec![FamilyName::new("Source Code Pro")]);
+
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("source-code-pro"))
+        .expect("manifest record");
+    assert_eq!(record.families, vec![FamilyName::new("Source Code Pro")]);
+
+    let info = app
+        .package_info(InfoRequest {
+            package_id: package_id("source-code-pro"),
+        })
+        .await
+        .expect("read Fontsource package info");
+
+    assert_eq!(
+        info.package.families,
+        vec![FamilyName::new("Source Code Pro")]
+    );
+}
+
+#[tokio::test]
 async fn fontsource_info_recovers_provider_variant_weight_from_legacy_manifest_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -709,6 +829,63 @@ async fn fontsource_info_recovers_provider_variant_weight_from_legacy_manifest_p
 
     assert_eq!(info.package.font_files.len(), 1);
     assert_eq!(info.package.font_files[0].weight, 200);
+}
+
+#[tokio::test]
+async fn fontsource_info_uses_cached_provider_family_for_legacy_manifest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let package_id = package_id("source-code-pro");
+    let version = PackageVersion::parse("v2").expect("version");
+    let font_path = paths
+        .package_store_dir(&package_id, &version)
+        .join("files/source-code-pro-latin-400-normal.ttf");
+    let mut manifest = ManifestV1::empty();
+    manifest
+        .insert_package(ManifestPackageRecord {
+            package_id: package_id.clone(),
+            version: version.clone(),
+            source: ManifestSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            update_source: None,
+            families: vec![FamilyName::new("Source Code Foo")],
+            font_files: vec![ManifestFontFileRecord {
+                path: font_path,
+                family: FamilyName::new("Source Code Foo"),
+                style: "Regular".to_string(),
+                weight: 400,
+                format: ManifestFontFileFormat::Ttf,
+            }],
+            activation_artifacts: Vec::new(),
+            installed_at: "2026-07-05T00:00:00Z".to_string(),
+            active_version: Some(version),
+        })
+        .expect("insert manifest record");
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+    fs::create_dir_all(paths.provider_metadata_dir()).expect("create provider metadata dir");
+    fs::write(
+        fontsource_detail_snapshot_path(&paths, "source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "version": "v2",
+  "variants": {}
+}"#,
+    )
+    .expect("write provider metadata");
+    let app = FontbrewApp::with_paths(paths);
+
+    let info = app
+        .package_info(InfoRequest { package_id })
+        .await
+        .expect("read Fontsource package info");
+
+    assert_eq!(
+        info.package.families,
+        vec![FamilyName::new("Source Code Pro")]
+    );
 }
 
 #[tokio::test]
@@ -772,6 +949,14 @@ async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version()
     .await
     .expect("apply initial Fontsource install");
 
+    let mut manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .packages
+        .get_mut(&package_id("source-code-pro"))
+        .expect("manifest record");
+    record.families = vec![FamilyName::new("Source Code Foo")];
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write legacy manifest");
+
     let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
     set_file_modified_time(
         &fontsource_detail_snapshot_path(&paths, "source-code-pro"),
@@ -808,7 +993,7 @@ async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version()
     );
     update_server.respond_bytes(
         &font_download_path("source-code-pro-v2.ttf"),
-        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+        font_bytes_with_renamed_source_code_pro_family(),
     );
     let app = app_with_server(paths.clone(), &update_server);
 

@@ -400,7 +400,7 @@ pub fn list_packages(paths: &FontbrewPaths) -> Result<ListReport> {
         .map(|record| ListPackage {
             package_id: record.package_id.clone(),
             version: record.version.clone(),
-            families: record.families.clone(),
+            families: package_families_for_report(paths, record),
             activated: record.active_version.is_some(),
         })
         .collect();
@@ -418,7 +418,7 @@ pub fn package_info(paths: &FontbrewPaths, request: InfoRequest) -> Result<InfoR
         package: PackageInfo {
             package_id: record.package_id.clone(),
             version: record.version.clone(),
-            families: record.families.clone(),
+            families: package_families_for_report(paths, record),
             source: source_label(&record.source),
             activated: record.active_version.is_some(),
             update_source: record.update_source.as_ref().map(source_label),
@@ -428,6 +428,23 @@ pub fn package_info(paths: &FontbrewPaths, request: InfoRequest) -> Result<InfoR
             activation_artifacts: managed_activation_artifacts_from_record(record),
         },
     })
+}
+
+fn package_families_for_report(
+    paths: &FontbrewPaths,
+    record: &ManifestPackageRecord,
+) -> Vec<FamilyName> {
+    if let ManifestSource::Provider {
+        provider: ProviderKind::Fontsource,
+        id,
+    } = &record.source
+    {
+        if let Some(family) = providers::cached_fontsource_family(paths, id) {
+            return vec![family];
+        }
+    }
+
+    record.families.clone()
 }
 
 pub fn remove_plan(paths: &FontbrewPaths, request: RemoveRequest) -> Result<RemovePlan> {
@@ -1000,6 +1017,7 @@ async fn download_and_parse_provider_fonts(
             provider: resolved.provider,
             id: resolved.provider_id,
         },
+        package_families: Some(resolved.families),
         package_id_hint: Some(resolved.package_id),
         reinstall: options.reinstall,
         archive_format_preference: ArchiveFormatPreference {
@@ -1162,6 +1180,7 @@ struct RemoteFontParseInput {
     staging_dir: PathBuf,
     version: PackageVersion,
     source: PreparedInstallSource,
+    package_families: Option<Vec<FamilyName>>,
     package_id_hint: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
@@ -1236,6 +1255,7 @@ async fn parse_staged_provider_fonts_blocking(
             input.reinstall,
             input.archive_format_preference,
             input.family_boundary,
+            input.package_families,
             input.cancellation.as_ref(),
         );
         Ok((result, progress.events))
@@ -1293,6 +1313,7 @@ fn extract_and_parse_archive(
         reinstall,
         archive_format_preference,
         family_boundary,
+        None,
         cancellation,
     )
 }
@@ -1308,6 +1329,7 @@ fn parse_staged_font_files(
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<InstallFamilyBoundary>,
+    package_families: Option<Vec<FamilyName>>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     if staged_fonts.is_empty() {
@@ -1434,7 +1456,7 @@ fn parse_staged_font_files(
 
     let package_store_dir = paths.package_store_dir(&package_id, &version);
     let files_dir = package_store_dir.join("files");
-    let families = selected_family_names(&parsed_files);
+    let families = package_families.unwrap_or_else(|| selected_family_names(&parsed_files));
     let mut font_files = Vec::with_capacity(parsed_files.len());
     let mut activation_sources = Vec::with_capacity(parsed_files.len());
 

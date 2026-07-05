@@ -32,6 +32,7 @@ pub(crate) struct ResolvedProviderPackage {
     pub(crate) provider: ProviderKind,
     pub(crate) provider_id: String,
     pub(crate) version: PackageVersion,
+    pub(crate) families: Vec<FamilyName>,
     pub(crate) assets: Vec<ProviderFontAsset>,
 }
 
@@ -165,8 +166,30 @@ impl<'a> FontsourceProvider<'a> {
             provider: ProviderKind::Fontsource,
             provider_id: provider_id.to_string(),
             version,
+            families: vec![FamilyName::new(detail.family.clone())],
             assets,
         })
+    }
+}
+
+pub(crate) fn cached_fontsource_family(
+    paths: &FontbrewPaths,
+    provider_id: &str,
+) -> Option<FamilyName> {
+    let path = paths
+        .provider_metadata_dir()
+        .join(format!("fontsource-detail-{provider_id}.json"));
+    let body = fs::read(path).ok()?;
+    let detail: FontsourceFamilySnapshot = serde_json::from_slice(&body).ok()?;
+    if detail.id != provider_id {
+        return None;
+    }
+
+    let family = detail.family.trim();
+    if family.is_empty() {
+        None
+    } else {
+        Some(FamilyName::new(family.to_string()))
     }
 }
 
@@ -200,6 +223,12 @@ struct FontsourceDetailRecord {
 struct FontsourceVariantRecord {
     #[serde(default)]
     url: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FontsourceFamilySnapshot {
+    id: String,
+    family: String,
 }
 
 #[derive(Debug, Clone, Copy)]

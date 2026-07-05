@@ -348,7 +348,7 @@ fn install_local_archive_with_family_selection_installs_selected_package() {
 }
 
 #[test]
-fn install_local_archive_with_all_families_installs_each_package() {
+fn install_local_archive_with_all_flag_installs_each_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
     let archive_path = temp.path().join("mixed-families.zip");
@@ -363,7 +363,7 @@ fn install_local_archive_with_all_families_installs_each_package() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
-        .arg("--all-families")
+        .arg("--all")
         .assert()
         .success()
         .stdout(
@@ -386,7 +386,7 @@ fn install_local_archive_with_all_families_installs_each_package() {
 }
 
 #[test]
-fn install_local_archive_with_all_families_reports_source_resolution_once() {
+fn install_local_archive_with_all_flag_reports_source_resolution_once() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
     let archive_path = temp.path().join("mixed-families.zip");
@@ -401,7 +401,7 @@ fn install_local_archive_with_all_families_reports_source_resolution_once() {
     let output = fontbrew(&home)
         .args(["-v", "install"])
         .arg(&archive_path)
-        .arg("--all-families")
+        .arg("-a")
         .assert()
         .success()
         .get_output()
@@ -442,6 +442,32 @@ fn json_install_reports_family_selection_required_for_multi_family_source() {
     assert_eq!(json["error"]["kind"], "family_selection_required");
     assert_eq!(json["error"]["families"][0], "Inter");
     assert_eq!(json["error"]["families"][1], "Source Code Pro");
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
+fn human_install_family_selection_error_points_to_all_flag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("mixed-families.zip");
+    write_fixture_archive_entries(
+        &archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ],
+    );
+
+    fontbrew(&home)
+        .arg("install")
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("--all").and(predicate::str::contains("--all-families").not()),
+        );
+
     assert!(staging_is_empty_or_absent(&home));
 }
 
@@ -662,7 +688,7 @@ fn config_set_rejects_reserved_copy_activation_strategy() {
 }
 
 #[test]
-fn install_otf_flag_overrides_global_ttf_format_preference() {
+fn install_format_flag_overrides_global_ttf_format_preference() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
     let archive_path = temp.path().join("source-code-pro.zip");
@@ -680,7 +706,7 @@ fn install_otf_flag_overrides_global_ttf_format_preference() {
         .success();
 
     fontbrew(&home)
-        .args(["install", "--otf"])
+        .args(["install", "--format", "otf"])
         .arg(&archive_path)
         .assert()
         .success()

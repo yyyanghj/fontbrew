@@ -63,7 +63,7 @@ Fontbrew manages packages, not loose font files. By default, package identity co
 For multi-family GitHub and local archives:
 
 - Interactive human mode may ask the user to select one or more families.
-- Non-interactive and JSON mode require explicit `--family` or `--all-families`.
+- Non-interactive and JSON mode require explicit `--family` or `--all`.
 - `--yes` approves risk prompts but does not silently choose a family boundary.
 
 ## Supported Formats

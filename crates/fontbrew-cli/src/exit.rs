@@ -150,6 +150,6 @@ fn family_selection_message(families: &[FamilyName]) -> String {
         .join(", ");
 
     format!(
-        "source contains multiple font families; select one or more with --family, or install all with --all-families: {family_list}"
+        "source contains multiple font families; select one or more with --family, or install all with --all: {family_list}"
     )
 }

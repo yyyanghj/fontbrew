@@ -327,9 +327,8 @@ async fn prepare_fontsource_update_package_inner(
         VersionComparison::CandidateIsNewer => {}
     }
 
-    let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());
-    options.family_boundary =
-        install::InstallFamilyBoundary::from_selected_families(record.families.clone());
+    let options = install::RemoteInstallOptions::for_update(record.package_id.clone());
+    let expected_families = resolved.families.clone();
     let mut prepared = install::prepare_resolved_provider_package(
         paths,
         resolved,
@@ -343,7 +342,7 @@ async fn prepare_fontsource_update_package_inner(
         return Err(error);
     }
 
-    if let Err(error) = validate_update_identity(record, &prepared, &record.families) {
+    if let Err(error) = validate_update_identity(record, &prepared, &expected_families) {
         install::cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }

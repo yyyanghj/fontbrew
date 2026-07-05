@@ -124,17 +124,12 @@ struct InstallArgs {
     families: Vec<String>,
 
     #[arg(
-        long = "all-families",
+        short = 'a',
+        long = "all",
         conflicts_with = "families",
         help = "Install every font family discovered in a multi-family source"
     )]
     all_families: bool,
-
-    #[arg(long, help = "Prefer OTF files")]
-    otf: bool,
-
-    #[arg(long, help = "Prefer TTF files")]
-    ttf: bool,
 }
 
 #[derive(Debug, Args)]
@@ -684,32 +679,19 @@ fn font_format_preference(args: &InstallArgs) -> Vec<FontFormat> {
     let mut formats = Vec::new();
 
     for format in &args.format_preference {
-        push_unique_format(
-            &mut formats,
-            match format {
-                CliFontFormat::Otf => FontFormat::Otf,
-                CliFontFormat::Ttf => FontFormat::Ttf,
-                CliFontFormat::Ttc => FontFormat::Ttc,
-                CliFontFormat::Otc => FontFormat::Otc,
-            },
-        );
-    }
+        let format = match format {
+            CliFontFormat::Otf => FontFormat::Otf,
+            CliFontFormat::Ttf => FontFormat::Ttf,
+            CliFontFormat::Ttc => FontFormat::Ttc,
+            CliFontFormat::Otc => FontFormat::Otc,
+        };
 
-    if args.otf {
-        push_unique_format(&mut formats, FontFormat::Otf);
-    }
-
-    if args.ttf {
-        push_unique_format(&mut formats, FontFormat::Ttf);
+        if !formats.contains(&format) {
+            formats.push(format);
+        }
     }
 
     formats
-}
-
-fn push_unique_format(formats: &mut Vec<FontFormat>, format: FontFormat) {
-    if !formats.contains(&format) {
-        formats.push(format);
-    }
 }
 
 #[derive(Clone)]
@@ -798,6 +780,43 @@ mod tests {
     }
 
     #[test]
+    fn install_help_exposes_current_install_flags_only() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("install")
+            .expect("install subcommand")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("-a"));
+        assert!(help.contains("--all"));
+        assert!(help.contains("--format"));
+        assert!(!help.contains("--all-families"));
+        assert!(!help.contains("--otf"));
+        assert!(!help.contains("--ttf"));
+    }
+
+    #[test]
+    fn install_all_flag_accepts_short_and_long_forms() {
+        for flag in ["--all", "-a"] {
+            let cli = Cli::try_parse_from(["fontbrew", "install", "source-code-pro", flag])
+                .expect("parse install all flag");
+            let Command::Install(args) = cli.command else {
+                panic!("expected install command");
+            };
+
+            assert!(args.all_families);
+        }
+    }
+
+    #[test]
+    fn install_legacy_flags_are_not_accepted() {
+        for flag in ["--all-families", "--otf", "--ttf"] {
+            assert!(Cli::try_parse_from(["fontbrew", "install", "source-code-pro", flag]).is_err());
+        }
+    }
+
+    #[test]
     fn install_source_parses_owner_repo_as_github_repo() {
         let source = install_source_from_arg("adobe/source-code-pro");
 
@@ -873,8 +892,6 @@ mod tests {
             format_preference: vec![CliFontFormat::Otf, CliFontFormat::Ttf, CliFontFormat::Otf],
             families: Vec::new(),
             all_families: false,
-            otf: true,
-            ttf: true,
         };
 
         assert_eq!(
@@ -904,8 +921,6 @@ mod tests {
             format_preference: Vec::new(),
             families: Vec::new(),
             all_families: false,
-            otf: false,
-            ttf: false,
         })
         .consumes_cancellation());
         assert!(Command::Remove(RemoveArgs {
