@@ -2,6 +2,15 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.7 - 2026-07-05
+
+- Added header separators to human-readable tables for easier scanning.
+- Improved `fontbrew self-update` so downloads and verification happen before
+  taking the replacement lock, then re-checks the installed version before
+  replacing the binary.
+- Fixed Fontsource installs to preserve provider variant weights in managed font
+  metadata.
+
 ## 0.0.6 - 2026-07-05
 
 - Fixed `fontbrew list` human output so packages with many recorded families
