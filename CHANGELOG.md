@@ -2,6 +2,16 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.8 - 2026-07-05
+
+- Changed the multi-family install flag from `--all-families` to `--all` with
+  short form `-a`.
+- Removed legacy `--otf` and `--ttf` install flags; use repeated `--format`
+  values instead.
+- Fixed Fontsource package family reporting so provider installs and updates
+  preserve the provider family name even when font metadata uses a different
+  style-linked family.
+
 ## 0.0.7 - 2026-07-05
 
 - Added header separators to human-readable tables for easier scanning.
