@@ -16,8 +16,8 @@ fn write_font(path: &Path) {
     fs::write(path, b"font bytes").expect("write font");
 }
 
-#[tokio::test]
-async fn symlink_activation_creates_tracked_artifacts_in_activation_dir() {
+#[test]
+fn symlink_activation_creates_tracked_artifacts_in_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("package-fonts");
     let activation_dir = temp.path().join("activation");
@@ -51,8 +51,8 @@ async fn symlink_activation_creates_tracked_artifacts_in_activation_dir() {
     );
 }
 
-#[tokio::test]
-async fn deactivation_removes_only_tracked_artifacts_in_activation_dir() {
+#[test]
+fn deactivation_removes_only_tracked_artifacts_in_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("package-fonts");
     let activation_dir = temp.path().join("activation");
@@ -77,8 +77,8 @@ async fn deactivation_removes_only_tracked_artifacts_in_activation_dir() {
     assert!(activation_dir.exists());
 }
 
-#[tokio::test]
-async fn deactivation_rejects_and_preserves_plain_file_at_tracked_symlink_path() {
+#[test]
+fn deactivation_rejects_and_preserves_plain_file_at_tracked_symlink_path() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let source_path = temp.path().join("source.ttf");
@@ -103,8 +103,8 @@ async fn deactivation_rejects_and_preserves_plain_file_at_tracked_symlink_path()
     );
 }
 
-#[tokio::test]
-async fn deactivation_rejects_and_preserves_symlink_to_different_source() {
+#[test]
+fn deactivation_rejects_and_preserves_symlink_to_different_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let source_path = temp.path().join("source.ttf");
@@ -134,8 +134,8 @@ async fn deactivation_rejects_and_preserves_symlink_to_different_source() {
     );
 }
 
-#[tokio::test]
-async fn symlink_activation_reports_unmanaged_conflict_without_overwriting() {
+#[test]
+fn symlink_activation_reports_unmanaged_conflict_without_overwriting() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("package-fonts");
     let activation_dir = temp.path().join("activation");
@@ -169,8 +169,8 @@ async fn symlink_activation_reports_unmanaged_conflict_without_overwriting() {
     );
 }
 
-#[tokio::test]
-async fn deactivation_rejects_artifacts_outside_activation_dir() {
+#[test]
+fn deactivation_rejects_artifacts_outside_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let outside_path = temp.path().join("outside.ttf");
@@ -190,8 +190,8 @@ async fn deactivation_rejects_artifacts_outside_activation_dir() {
     assert!(outside_path.exists());
 }
 
-#[tokio::test]
-async fn activation_apply_rejects_artifacts_outside_activation_dir() {
+#[test]
+fn activation_apply_rejects_artifacts_outside_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let source_path = temp.path().join("source.ttf");
@@ -220,8 +220,8 @@ async fn activation_apply_rejects_artifacts_outside_activation_dir() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn activation_apply_rejects_symlink_directory_component_under_activation_dir() {
+#[test]
+fn activation_apply_rejects_symlink_directory_component_under_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let outside_dir = temp.path().join("outside");
@@ -256,8 +256,8 @@ async fn activation_apply_rejects_symlink_directory_component_under_activation_d
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn deactivation_rejects_symlink_directory_component_under_activation_dir() {
+#[test]
+fn deactivation_rejects_symlink_directory_component_under_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let activation_dir = temp.path().join("activation");
     let outside_dir = temp.path().join("outside");

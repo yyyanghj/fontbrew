@@ -40,6 +40,7 @@ pub(crate) struct ProviderFontAsset {
     pub(crate) url: String,
     pub(crate) format: FontFormat,
     pub(crate) file_name: String,
+    pub(crate) weight: Option<u16>,
 }
 
 pub(crate) type FontsourceResolvedPackage = ResolvedProviderPackage;
@@ -488,6 +489,7 @@ fn desktop_assets(detail: &FontsourceDetailRecord) -> Vec<FontsourceFontAsset> {
                             safe_file_component(style),
                             url_key
                         ),
+                        weight: fontsource_weight(weight),
                     });
                 }
             }
@@ -495,6 +497,13 @@ fn desktop_assets(detail: &FontsourceDetailRecord) -> Vec<FontsourceFontAsset> {
     }
 
     assets
+}
+
+fn fontsource_weight(weight: &str) -> Option<u16> {
+    weight
+        .parse::<u16>()
+        .ok()
+        .filter(|weight| (1..=1000).contains(weight))
 }
 
 fn desktop_url_keys() -> [(&'static str, FontFormat); 4] {

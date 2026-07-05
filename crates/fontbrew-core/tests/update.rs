@@ -341,8 +341,8 @@ fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
     zip.finish().expect("finish zip").into_inner()
 }
 
-#[tokio::test]
-async fn task_runner_respects_bounded_limit_without_tokio() {
+#[test]
+fn task_runner_respects_bounded_limit_without_tokio() {
     let serial_probe = Arc::new(ConcurrencyProbe::new(1));
     tasks::map_bounded(vec![0, 1, 2], 1, {
         let probe = serial_probe.clone();

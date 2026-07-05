@@ -983,9 +983,10 @@ async fn download_and_parse_provider_fonts(
             downloaded: total_downloaded,
             total: None,
         });
-        staged_fonts.push(ExtractedFontFile {
+        staged_fonts.push(StagedFontFile {
             path: destination,
             format: reader_format_from_font_format(asset.format),
+            weight_override: asset.weight,
         });
     }
 
@@ -1157,7 +1158,7 @@ struct RemoteArchiveParseInput {
 
 struct RemoteFontParseInput {
     paths: FontbrewPaths,
-    staged_fonts: Vec<ExtractedFontFile>,
+    staged_fonts: Vec<StagedFontFile>,
     staging_dir: PathBuf,
     version: PackageVersion,
     source: PreparedInstallSource,
@@ -1171,6 +1172,12 @@ struct RemoteFontParseInput {
 #[derive(Default)]
 struct RecordingProgressSink {
     events: Vec<ProgressEvent>,
+}
+
+struct StagedFontFile {
+    path: PathBuf,
+    format: FontFileFormat,
+    weight_override: Option<u16>,
 }
 
 impl ProgressSink for RecordingProgressSink {
@@ -1272,9 +1279,13 @@ fn extract_and_parse_archive(
             package_id: package_id.clone(),
         });
     }
+    let staged_fonts = extracted_fonts
+        .into_iter()
+        .map(StagedFontFile::from_extracted)
+        .collect();
     parse_staged_font_files(
         paths,
-        extracted_fonts,
+        staged_fonts,
         staging_dir,
         version,
         source,
@@ -1289,7 +1300,7 @@ fn extract_and_parse_archive(
 #[allow(clippy::too_many_arguments)]
 fn parse_staged_font_files(
     paths: &FontbrewPaths,
-    staged_fonts: Vec<ExtractedFontFile>,
+    staged_fonts: Vec<StagedFontFile>,
     staging_dir: PathBuf,
     version: PackageVersion,
     source: PreparedInstallSource,
@@ -1319,6 +1330,7 @@ fn parse_staged_font_files(
                 return Err(error);
             }
         };
+        let faces = faces_with_weight_override(faces, staged_font.weight_override);
 
         if faces.is_empty() {
             cleanup_staging(&staging_dir);
@@ -1673,6 +1685,33 @@ fn format_selection(
         preference: desktop_format_fallback_order(),
         explicit: false,
     }
+}
+
+impl StagedFontFile {
+    fn from_extracted(font_file: ExtractedFontFile) -> Self {
+        Self {
+            path: font_file.path,
+            format: font_file.format,
+            weight_override: None,
+        }
+    }
+}
+
+fn faces_with_weight_override(
+    faces: Vec<FontFaceMetadata>,
+    weight_override: Option<u16>,
+) -> Vec<FontFaceMetadata> {
+    let Some(weight) = weight_override else {
+        return faces;
+    };
+
+    faces
+        .into_iter()
+        .map(|mut face| {
+            face.weight = Some(weight);
+            face
+        })
+        .collect()
 }
 
 fn preference_with_builtin_fallback(format_preference: &[FontFormat]) -> Vec<FontFormat> {
@@ -2220,10 +2259,34 @@ fn managed_font_files_from_record(record: &ManifestPackageRecord) -> Vec<Managed
             path: font_file.path.clone(),
             family: font_file.family.clone(),
             style: font_file.style.clone(),
-            weight: font_file.weight,
+            weight: managed_font_weight(record, font_file),
             format: font_format_from_manifest_format(font_file.format),
         })
         .collect()
+}
+
+fn managed_font_weight(record: &ManifestPackageRecord, font_file: &ManifestFontFileRecord) -> u16 {
+    if let ManifestSource::Provider {
+        provider: ProviderKind::Fontsource,
+        id,
+    } = &record.source
+    {
+        if let Some(weight) = fontsource_variant_weight_from_path(id, &font_file.path) {
+            return weight;
+        }
+    }
+
+    font_file.weight
+}
+
+fn fontsource_variant_weight_from_path(provider_id: &str, path: &Path) -> Option<u16> {
+    let stem = path.file_stem()?.to_str()?;
+    let variant_part = stem.strip_prefix(provider_id)?.strip_prefix('-')?;
+    let mut parts = variant_part.rsplit('-');
+    parts.next()?;
+    let weight = parts.next()?.parse::<u16>().ok()?;
+
+    (1..=1000).contains(&weight).then_some(weight)
 }
 
 fn managed_activation_artifacts_from_record(

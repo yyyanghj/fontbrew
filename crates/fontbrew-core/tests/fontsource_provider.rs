@@ -7,11 +7,14 @@ use std::{
 };
 
 use fontbrew_core::{
-    manifest::{ManifestSource, ManifestStore},
+    manifest::{
+        ManifestFontFileFormat, ManifestFontFileRecord, ManifestPackageRecord, ManifestSource,
+        ManifestStore, ManifestV1,
+    },
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InfoRequest, InstallRequest,
-    InstallSource, OutdatedRequest, PackageId, ProgressEvent, ProgressSink, ProviderKind,
-    SearchRequest, UpdateRequest,
+    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InfoRequest,
+    InstallRequest, InstallSource, OutdatedRequest, PackageId, PackageVersion, ProgressEvent,
+    ProgressSink, ProviderKind, SearchRequest, UpdateRequest,
 };
 
 mod support;
@@ -589,6 +592,123 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
                 .next()
                 .is_none()
     );
+}
+
+#[tokio::test]
+async fn fontsource_install_records_provider_variant_weight_for_downloaded_font() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&font_download_path("source-code-pro-200.ttf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [200],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "200": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "__DOWNLOAD_URL__"
+          }
+        }
+      }
+    }
+  }
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_download),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro-200.ttf"),
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    let app = app_with_server(paths.clone(), &server);
+
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .await
+        .expect("plan Fontsource install");
+
+    app.apply_install(
+        plan,
+        ExecutionPolicy::SafeOnly,
+        &mut NoProgress,
+        Arc::new(NeverCancelled),
+    )
+    .await
+    .expect("apply Fontsource install");
+
+    let info = app
+        .package_info(InfoRequest {
+            package_id: package_id("source-code-pro"),
+        })
+        .await
+        .expect("read Fontsource package info");
+
+    assert_eq!(info.package.font_files.len(), 1);
+    assert_eq!(info.package.font_files[0].weight, 200);
+}
+
+#[tokio::test]
+async fn fontsource_info_recovers_provider_variant_weight_from_legacy_manifest_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let package_id = package_id("source-code-pro");
+    let version = PackageVersion::parse("v2").expect("version");
+    let font_path = paths
+        .package_store_dir(&package_id, &version)
+        .join("files/source-code-pro-latin-200-normal.ttf");
+    let mut manifest = ManifestV1::empty();
+    manifest
+        .insert_package(ManifestPackageRecord {
+            package_id: package_id.clone(),
+            version: version.clone(),
+            source: ManifestSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            update_source: None,
+            families: vec![FamilyName::new("Source Code Pro")],
+            font_files: vec![ManifestFontFileRecord {
+                path: font_path,
+                family: FamilyName::new("Source Code Pro"),
+                style: "Regular".to_string(),
+                weight: 400,
+                format: ManifestFontFileFormat::Ttf,
+            }],
+            activation_artifacts: Vec::new(),
+            installed_at: "2026-07-05T00:00:00Z".to_string(),
+            active_version: Some(version),
+        })
+        .expect("insert manifest record");
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+    let app = FontbrewApp::with_paths(paths);
+
+    let info = app
+        .package_info(InfoRequest { package_id })
+        .await
+        .expect("read Fontsource package info");
+
+    assert_eq!(info.package.font_files.len(), 1);
+    assert_eq!(info.package.font_files[0].weight, 200);
 }
 
 #[tokio::test]

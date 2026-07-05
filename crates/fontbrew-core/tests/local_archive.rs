@@ -296,8 +296,8 @@ async fn local_archive_install_plan_error_replays_progress_events() {
     )));
 }
 
-#[tokio::test]
-async fn no_cancellation_token_never_cancels() {
+#[test]
+fn no_cancellation_token_never_cancels() {
     assert!(!NoCancellation.is_cancelled());
 }
 
