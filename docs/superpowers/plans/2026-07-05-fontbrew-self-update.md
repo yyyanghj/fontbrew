@@ -306,7 +306,7 @@ Do not add `FontbrewApp::self_update_*` methods and do not add self-update reque
 
 Allowed reuse from `fontbrew-core`:
 
-- `fontbrew_core::fetch::{ReqwestHttpClient, HttpClient, HttpRequest}`
+- `fontbrew_core::fetch::{NetworkClient, HttpRequest, HttpResponse}`
 - `fontbrew_core::platform::FontbrewPaths`
 - `fontbrew_core::fs::GlobalFileLock`
 - `fontbrew_core::version` helpers when useful

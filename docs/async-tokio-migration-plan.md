@@ -4,13 +4,13 @@ Date: 2026-07-05
 
 ## Status
 
-Proposed implementation plan. This document records the shared design decisions before changing the workspace to async Rust and Tokio.
+Implemented design record. This document started as the migration plan on 2026-07-05 and now records the async/Tokio decisions that the current workspace follows.
 
 ## Context
 
-Fontbrew currently uses synchronous Rust APIs throughout both crates. The CLI entry point is synchronous, `FontbrewApp` exposes synchronous methods, and the remote paths use `reqwest::blocking::Client` behind a generic `HttpClient` trait.
+Fontbrew now uses async Rust APIs across the CLI and app boundary. The CLI entry point owns the Tokio runtime with `#[tokio::main]`, `FontbrewApp` exposes async methods, and remote paths use a concrete async `NetworkClient` built on `reqwest::Client`.
 
-Blocking work is broader than HTTP:
+Blocking work is still broader than HTTP:
 
 - GitHub and Fontsource metadata fetches.
 - Remote font and release asset downloads.
@@ -20,7 +20,7 @@ Blocking work is broader than HTTP:
 - Manifest and config reads and atomic writes.
 - Package store copying, activation, remove, update replacement, self-update replacement, and filesystem locking.
 
-The most important existing safety rule is that planning may prepare staged files, but applying install/update/remove work is transactional and guarded by the global file lock. Async migration must preserve that rule.
+The most important safety rule is that planning may prepare staged files, but applying install/update/remove work is transactional and guarded by the global file lock. The migration preserved that rule.
 
 ## Goals
 
@@ -43,9 +43,9 @@ The most important existing safety rule is that planning may prepare staged file
 
 ### Async-first core
 
-`fontbrew-core` should accept a breaking change. Public app methods become async instead of gaining parallel sync and async variants.
+`fontbrew-core` accepted a breaking change. Public app methods are async instead of keeping parallel sync and async variants.
 
-Example target shape:
+Representative current app shape:
 
 ```rust
 impl FontbrewApp {
@@ -72,25 +72,25 @@ Do not create Tokio runtimes inside library functions. The CLI owns the runtime 
 
 ### Tokio in both crates
 
-Both crates should depend on Tokio. Core needs Tokio for `spawn_blocking`, bounded async orchestration, and limited async filesystem use. CLI needs Tokio for the runtime.
+Both crates depend on Tokio. Core uses Tokio for `spawn_blocking`, bounded async orchestration, and limited async filesystem use. CLI uses Tokio for the runtime.
 
-Suggested workspace dependency shape:
+Workspace dependency shape:
 
 ```toml
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
+tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 ```
 
 `futures` is useful for scoped bounded concurrency with borrowed context, such as `stream::iter(...).buffered(jobs)`, without forcing every prepare task into a `'static` `tokio::spawn`.
 
-`download_to_file` should use `reqwest::Response::chunk().await` instead of `bytes_stream()` in the first migration. That avoids adding reqwest's optional `stream` feature while still streaming downloads in bounded chunks.
+`download_to_file` uses `reqwest::Response::chunk().await` instead of `bytes_stream()`. That avoids adding reqwest's optional `stream` feature while still streaming downloads in bounded chunks.
 
 ### Network module instead of generic HTTP trait
 
-Replace the current generic `HttpClient` trait and `ReqwestHttpClient` wrapper with a concrete network module.
+The old generic HTTP adapter is replaced by a concrete network module.
 
-Target shape:
+Current shape:
 
 ```rust
 pub struct NetworkClient {
@@ -101,11 +101,11 @@ impl NetworkClient {
     pub fn new() -> Result<Self>;
     pub fn with_client(client: reqwest::Client) -> Self;
 
-    pub async fn get(&self, request: NetworkRequest) -> Result<NetworkResponse>;
+    pub async fn get(&self, request: HttpRequest) -> Result<HttpResponse>;
 
     pub async fn download_to_file(
         &self,
-        request: NetworkRequest,
+        request: HttpRequest,
         destination: &Path,
         max_bytes: u64,
         cancellation: Arc<dyn CancellationToken>,
@@ -117,9 +117,7 @@ This keeps one deep module for transport behavior: timeout setup, header applica
 
 Provider and GitHub modules should stay as ordinary business modules that call `NetworkClient`. They should not each create their own `reqwest::Client`.
 
-The external seam is `NetworkClient`, not a public transport trait. Tests may keep temporary internal helpers during migration, but the production caller interface should not depend on fake HTTP adapters.
-
-To keep the first migration bounded, `NetworkClient` may contain a crate-private or test-only transport seam. That seam is an implementation detail of the network module, not part of the production interface. Existing high-level tests can route through it while focused `NetworkClient` tests use a local HTTP server. A later cleanup can replace the remaining high-level fake routes with local-server tests and configurable provider/GitHub endpoints.
+The external seam is `NetworkClient`, not a public transport trait. Tests use local HTTP servers and hidden endpoint overrides instead of production fake HTTP adapters.
 
 ### Blocking filesystem work
 
@@ -140,19 +138,21 @@ No async function should `await` while holding `GlobalFileLock` or while halfway
 
 Blocking helper interfaces must be owned and `Send + 'static`. Do not pass `&mut dyn ProgressSink`, `&dyn CancellationToken`, or borrowed path/request data into `spawn_blocking`. Use owned request structs and `Arc<dyn CancellationToken>`.
 
-Example target shape:
+Representative current blocking bridge shape:
 
 ```rust
-struct ApplyInstallBlockingInput {
-    paths: FontbrewPaths,
-    plan: InstallPlan,
-    policy: ExecutionPolicy,
-    cancellation: Arc<dyn CancellationToken>,
-}
-
-fn apply_install_blocking(
-    input: ApplyInstallBlockingInput,
-) -> Result<(InstallReport, Vec<ProgressEvent>)>;
+let (result, events) = spawn_blocking_result(move || {
+    let mut recording = RecordingProgressSink::default();
+    let result = install::apply_install(
+        &paths,
+        plan,
+        policy,
+        &mut recording,
+        cancellation.as_ref(),
+    );
+    Ok((result, recording.events))
+})
+.await?;
 ```
 
 The async caller awaits the join handle, then emits the returned progress events through the borrowed `ProgressSink`.
@@ -172,7 +172,7 @@ If the current executable changes after prepare and before the locked replace se
 
 Keep the current user-facing meaning of `update --jobs`: the number of packages prepared concurrently.
 
-Implementation should replace `tasks::map_bounded` with bounded async concurrency. Preserve deterministic result ordering by carrying each input index and sorting or collecting in input order after completion.
+Update planning uses bounded async concurrency through `stream::iter(...).buffered(jobs)`. The legacy `tasks::map_bounded` helper remains isolated and is not used by async update preparation.
 
 Package preparation remains sequential inside one package for the first migration:
 
@@ -215,73 +215,71 @@ Blocking closures cannot be preempted by Tokio cancellation. They must be small 
 
 The public async interface is not drop-cancel-safe. Fontbrew's supported cancellation contract is cooperative: set the cancellation token and continue awaiting the future until it returns and cleanup runs. Dropping or aborting a future after it has started `spawn_blocking` may allow detached blocking work to keep running, and cleanup or rollback guarantees are not provided for that usage. CLI commands should always signal cancellation through the token and await command completion.
 
-## Migration Steps
+## Implemented State
 
 ### 1. Dependencies and entry point
 
-- Add Tokio and `futures` workspace dependencies.
-- Change `reqwest` workspace features from `blocking` to async Rustls usage. Do not add the `stream` feature unless the implementation switches from `Response::chunk()` to `bytes_stream()`.
-- Convert `fontbrew-cli/src/main.rs` to `#[tokio::main] async fn main() -> ExitCode`.
-- Convert `cli::run`, `execute`, and command handlers to async.
+- Tokio and `futures` are workspace dependencies.
+- `reqwest` uses async Rustls without the optional `stream` feature.
+- `fontbrew-cli/src/main.rs` uses `#[tokio::main] async fn main() -> ExitCode`.
+- `cli::run`, `execute`, and command handlers are async.
 
 ### 2. Network module
 
-- Replace `fetch::ReqwestHttpClient` with `NetworkClient`.
-- Remove the public generic `HttpClient` trait from production code.
-- Implement async `get` and chunked `download_to_file`.
-- Keep `HttpRequest`/`HttpResponse` names or rename them to `NetworkRequest`/`NetworkResponse`; choose one naming scheme and update callers consistently.
-- Preserve display URL redaction and cleanup-on-failed-download behavior.
-- Add a crate-private or test-only network transport seam for high-level tests that cannot move to local HTTP server tests in the first migration.
+- `fetch.rs` exposes `NetworkClient`.
+- Production code has no public generic HTTP client trait.
+- `NetworkClient` implements async `get` and chunked `download_to_file`.
+- The request and response types are named `HttpRequest` and `HttpResponse`.
+- Display URL redaction and cleanup-on-failed-download behavior are preserved.
+- Tests use local HTTP servers plus hidden endpoint overrides where needed.
 
 ### 3. Async provider and GitHub flows
 
-- Convert Fontsource list/detail fetches and GitHub release lookup to async.
-- Keep parsing and asset selection as pure synchronous helpers.
-- Keep provider metadata snapshot freshness semantics unchanged.
-- Avoid constructing clients inside provider/GitHub functions.
+- Fontsource list/detail fetches and GitHub release lookup are async.
+- Parsing and asset selection remain pure synchronous helpers.
+- Provider metadata snapshot freshness semantics are preserved.
+- Provider and GitHub functions receive `NetworkClient` instead of constructing their own clients.
 
 ### 4. Async app interface
 
-- Convert `FontbrewApp` methods to async.
-- Store an `Arc<NetworkClient>` or lazily create one through a helper.
-- Accept cancellation as `Arc<dyn CancellationToken>` so async and blocking work can receive owned, cloneable cancellation handles.
-- Replace `with_paths_and_http_client` with a testable constructor such as `with_paths_and_network_client`.
-- Remove synchronous app methods instead of adding compatibility wrappers.
+- `FontbrewApp` methods are async.
+- `FontbrewApp` stores an optional `Arc<NetworkClient>` or lazily creates one through a helper.
+- Cancellation is passed as `Arc<dyn CancellationToken>` where async and blocking work need owned, cloneable cancellation handles.
+- The testable constructor is `with_paths_and_network_client`.
+- Synchronous app compatibility wrappers were not added.
 
 ### 5. Plan-stage blocking isolation
 
-- Move archive extraction, font parsing, and local archive reads behind blocking helper calls.
-- Keep staging cleanup behavior identical on prepare errors and cancellation.
-- Keep provider asset downloads serial within one package.
+- Archive extraction, font parsing, and local archive reads are behind blocking helper calls where needed.
+- Staging cleanup behavior is preserved on prepare errors and cancellation.
+- Provider asset downloads remain serial within one package.
 
 ### 6. Apply-stage blocking isolation
 
-- Keep install, update, and remove mutation phases serial.
-- Ensure the global write lock is held only inside blocking code.
-- Avoid `await` between package store copy, activation change, and manifest commit.
-- Preserve rollback behavior for manifest write failure, activation failure, cancellation, and self-update replacement failure.
-- Route blocking apply helpers through owned `Send + 'static` input structs and return `(Report, Vec<ProgressEvent>)` where progress must be emitted after await.
+- Install, update, and remove mutation phases remain serial.
+- The global write lock is held only inside blocking code.
+- There are no `await` points between package store copy, activation change, and manifest commit.
+- Rollback behavior is preserved for manifest write failure, activation failure, cancellation, and self-update replacement failure.
+- Blocking apply helpers return reports plus progress events where progress must be emitted after await.
 
 ### 7. Self-update split
 
-- Move release lookup, confirmation, download, checksum verification, extraction, candidate chmod, and candidate smoke test into async prepare plus short blocking helpers.
-- Limit `GlobalFileLock` to the blocking replace critical section.
-- Revalidate the current executable/version after acquiring the lock and before replacing the executable.
-- Abort if the installed binary changed after prepare and the prepared release no longer matches the planned operation.
+- Release lookup, confirmation, download, checksum verification, extraction, candidate chmod, and candidate smoke test run in async prepare plus short blocking helpers.
+- `GlobalFileLock` is limited to the blocking replace critical section.
+- The current executable/version is revalidated after acquiring the lock and before replacing the executable.
+- Replacement is skipped when the locked revalidation shows the planned operation no longer applies.
 
 ### 8. Async update jobs
 
-- Replace `tasks::map_bounded` with bounded async concurrency.
-- Preserve input-order reporting of prepared, failed, and up-to-date outcomes.
-- Keep `jobs` defaulting to config `update_concurrency`, with a minimum of one.
+- Update prepare uses bounded async concurrency with `buffered(jobs)`.
+- Input-order reporting of prepared, failed, and up-to-date outcomes is preserved by `buffered`.
+- `jobs` defaults to config `update_concurrency`, with a minimum of one.
 
 ### 9. Tests
 
-- Convert affected tests to `#[tokio::test]`.
-- Keep filesystem tests temp-directory based.
-- Preserve current fake-route behavior through migration-local helpers where needed.
-- Add focused `NetworkClient` tests with a local HTTP server for status handling, headers, chunked response reads, size rejection, and failed download cleanup.
-- Defer broad replacement of existing higher-level fake HTTP tests with mock-server tests to a separate cleanup change.
+- Affected async tests use `#[tokio::test]`.
+- Filesystem tests remain temp-directory based.
+- Focused `NetworkClient` tests use local HTTP servers for status handling, headers, chunked response reads, size rejection, and failed download cleanup.
 
 ## Testing Strategy
 

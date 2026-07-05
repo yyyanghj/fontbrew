@@ -29,6 +29,12 @@ Install and activate it:
 fontbrew install inter
 ```
 
+Prefer a format for this install:
+
+```bash
+fontbrew install inter --format ttf
+```
+
 See what Fontbrew manages:
 
 ```bash
@@ -66,10 +72,67 @@ Install from a GitHub Release:
 fontbrew install rsms/inter --format ttf
 ```
 
+If a release has more than one installable zip asset, select one by name or glob:
+
+```bash
+fontbrew install owner/repo --asset "*desktop*.zip"
+```
+
 Install from a local archive:
 
 ```bash
 fontbrew install ./SomeFont.zip
+```
+
+For archives that contain multiple independent families, choose one or install all:
+
+```bash
+fontbrew install ./SomeFont.zip --family "Some Font"
+fontbrew install ./SomeFont.zip --all
+```
+
+Local archives can use an explicit package ID:
+
+```bash
+fontbrew install ./SomeFont.zip --id some-font
+```
+
+## Configuration
+
+Fontbrew stores user preferences in `~/.config/fontbrew/config.toml`.
+
+```bash
+fontbrew config get install.format_preference
+fontbrew config set install.format_preference ttf,otf
+fontbrew config set network.update_concurrency 2
+```
+
+Supported config keys are:
+
+- `install.format_preference`
+- `install.activation_strategy`
+- `network.metadata_ttl_hours`
+- `network.update_concurrency`
+
+`install.activation_strategy` currently supports `symlink`; `copy` is reserved but not implemented.
+
+## Output
+
+Use `--json` for machine-readable output. JSON mode writes only structured JSON to stdout.
+
+```bash
+fontbrew --json list
+```
+
+Use `--quiet` to suppress progress and warnings, and `-v` for more detailed progress.
+
+## Self Update
+
+Standalone release binaries can update themselves:
+
+```bash
+fontbrew self-update --dry-run
+fontbrew self-update --yes
 ```
 
 ## Safety

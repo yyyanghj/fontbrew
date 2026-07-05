@@ -13,9 +13,9 @@ Fontbrew is a Rust 2021 workspace with a reusable core crate and a thin CLI crat
 
 - `Provider { provider: Fontsource, id }`
 - `GitHubRepo { owner, repo }`
-- `LocalArchive { path }`
+- `LocalPath(PathBuf)`
 
-CLI parsing treats unprefixed names as exact Fontsource IDs. The explicit `fontsource:<id>` prefix maps to the same provider source. `owner/repo` maps to GitHub. Existing local filesystem paths ending in `.zip` map to local archive sources.
+CLI parsing treats unprefixed names as exact Fontsource IDs. The explicit `fontsource:<id>` prefix maps to the same provider source. Valid `owner/repo` input maps to GitHub. Path-like inputs map to local archive sources before provider or GitHub installation: inputs beginning with `.`, beginning with `/`, containing a backslash, or ending in `.zip` are local paths. Inputs with slash separators that are not valid GitHub repo syntax also fall back to local path handling and fail later if the path does not exist.
 
 Install source parsing should stay conservative:
 
@@ -28,24 +28,25 @@ Install source parsing should stay conservative:
 - `app.rs`: orchestrates high-level use cases and keeps request/response models stable for CLI and tests.
 - `providers.rs`: Fontsource list/detail metadata, metadata snapshots, search, and provider asset download requests.
 - `github.rs`: GitHub release lookup, release asset filtering, asset selector matching, and release metadata.
-- `archive.rs`: archive extraction and format filtering.
-- `font.rs`: desktop font metadata parsing and family/style detection.
+- `archives.rs`: zip extraction, archive safety checks, and format filtering.
+- `fonts.rs`: desktop font metadata parsing and family/style detection.
 - `install.rs`: install plan construction, staging, package identity validation, and manifest record creation.
 - `update.rs`: update planning and two-phase replacement.
 - `manifest.rs`: manifest schema and persistence.
 - `activation.rs`: Fontbrew-owned activation artifacts.
 - `config.rs`: user configuration for install format preference, activation strategy, metadata TTL, and update concurrency.
-- `tasks.rs`: filesystem lock handling and app-level task helpers.
+- `fetch.rs`: async HTTP client setup, headers, bounded downloads, and network error mapping.
+- `tasks.rs`: app-level task helpers.
 
 ## Provider Metadata
 
 Fontsource metadata is cached under the provider metadata directory as JSON snapshots. The snapshots contain only metadata. Font files downloaded during install or update go through staging and then into the managed package store.
 
-Metadata refresh should be implementation detail. Commands that need Fontsource data may use fresh snapshots when valid and should fall back to stale snapshots when a refresh fails and stale metadata can still answer safely.
+Metadata refresh is an implementation detail. Search and install may use fresh snapshots when valid and may fall back to stale snapshots when a refresh fails and stale metadata can still answer safely. Update resolution uses Fontsource detail metadata as the update source; when a fresh update lookup fails, update should report the failure instead of falling back to stale metadata.
 
 ## GitHub Release Assets
 
-GitHub package versions use the selected release tag. The resolver chooses the latest stable release by default. An asset is installable when it is an archive containing supported desktop font files.
+GitHub package versions use the selected release tag. The resolver chooses the latest stable release by default. A GitHub font package asset is installable when it is a `.zip` archive containing supported desktop font files.
 
 If multiple installable assets are possible, planning fails unless the user provides an explicit asset selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
 
@@ -53,11 +54,11 @@ If multiple installable assets are possible, planning fails unless the user prov
 
 Local archives are copied or read through staging and parsed with the same archive and font pipeline as remote archives. Local archives have no update source.
 
-Package ID override is allowed for local archives only. Provider and GitHub identities come from their source model and parsed package metadata.
+Package ID override is allowed for local archives only, and cannot be combined with an explicit family selection. Provider and GitHub identities come from their source model and parsed package metadata.
 
 ## Package Boundary
 
-Fontbrew groups parsed font files by font family. A single-family source can plan directly. A multi-family GitHub or local archive requires explicit family selection when non-interactive.
+Fontbrew groups parsed font files by font family. A single-family source can plan directly. A multi-family GitHub or local archive requires explicit family selection when non-interactive; interactive human mode may prompt for one or more families.
 
 Selected families become the package boundary recorded in the manifest. Update validation reuses the manifest family boundary to avoid silently replacing a package with unrelated font files.
 
@@ -96,6 +97,23 @@ Update apply:
 
 Dry-run update reports the planned changes without mutating manifest, activation artifacts, or package store state.
 
+Update prepare work is async and package-level concurrent. The `jobs` request value overrides `network.update_concurrency` from config, with a minimum of one. Apply work remains serialized under the global file lock.
+
+## Config
+
+Config is stored in `~/.config/fontbrew/config.toml` with schema version `1`.
+
+Supported keys:
+
+- `install.format_preference`: ordered list of desktop formats. The persisted values are lowercase `otf`, `ttf`, `ttc`, and `otc`.
+- `install.activation_strategy`: `symlink` is supported. `copy` is represented in the activation model but rejected by config until copy activation is implemented.
+- `network.metadata_ttl_hours`: positive integer TTL for Fontsource metadata snapshots.
+- `network.update_concurrency`: positive integer default for update prepare concurrency.
+
+## Async Runtime
+
+`fontbrew-cli` owns the Tokio runtime through `#[tokio::main]`. `FontbrewApp` exposes async high-level methods and uses `NetworkClient` for async HTTP. Blocking filesystem transactions, archive parsing, font parsing, and self-update replacement are moved behind `tokio::task::spawn_blocking` where needed. Reporters remain CLI-owned and are not shared across concurrent prepare tasks.
+
 ## Safety Boundaries
 
 - All writes stay under Fontbrew-owned paths.
@@ -106,7 +124,7 @@ Dry-run update reports the planned changes without mutating manifest, activation
 
 ## Verification
 
-Use temp-directory tests for filesystem behavior. Network behavior must use fake HTTP clients or explicit manual verification.
+Use temp-directory tests for filesystem behavior. Network behavior must use local HTTP servers, hidden endpoint overrides, or explicit manual verification.
 
 Required local checks before release-facing changes:
 

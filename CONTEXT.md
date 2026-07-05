@@ -65,7 +65,7 @@ The local record of managed packages that are actually installed on this machine
 _Avoid_: Lockfile, desired state, project manifest
 
 **Config**:
-The local user preference file that controls Fontbrew behavior such as format preference, activation strategy, metadata TTL, and update concurrency. Config is separate from the manifest because it records preferences rather than installed package facts.
+The local user preference file that controls Fontbrew behavior such as format preference, metadata TTL, and update concurrency. Config stores the activation strategy key too, but the current MVP accepts only `symlink`; `copy` is reserved until copy activation is implemented. Config is separate from the manifest because it records preferences rather than installed package facts.
 _Avoid_: Manifest, lockfile
 
 **Update Source**:
@@ -85,7 +85,7 @@ A source-level published version of one or more packages, such as a GitHub Relea
 _Avoid_: Package, font file version
 
 **Asset**:
-A downloadable artifact within a release, such as a zip archive containing font files. Asset selection happens before package discovery inside the downloaded content.
+A downloadable artifact within a release, such as a zip archive containing font files. For font package GitHub releases, only `.zip` assets are installable. Asset selection happens before package discovery inside the downloaded content.
 _Avoid_: Package, release
 
 **Conflict**:
