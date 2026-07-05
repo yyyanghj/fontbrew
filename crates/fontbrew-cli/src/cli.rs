@@ -235,9 +235,9 @@ enum CliFontFormat {
     Otc,
 }
 
-pub fn run(cli: Cli) -> u8 {
+pub async fn run(cli: Cli) -> u8 {
     let app = FontbrewApp::new();
-    let cancellation = CliCancellation::new();
+    let cancellation = Arc::new(CliCancellation::new());
     if cli.command.consumes_cancellation() {
         let _ = cancellation.install_ctrlc_handler();
     }
@@ -250,8 +250,9 @@ pub fn run(cli: Cli) -> u8 {
             &app,
             &mut reporter,
             &mut confirmer,
-            &cancellation,
-        );
+            cancellation.clone(),
+        )
+        .await;
     }
 
     let mut reporter = HumanReporter::new(cli.quiet, cli.verbose > 0);
@@ -262,18 +263,19 @@ pub fn run(cli: Cli) -> u8 {
         &app,
         &mut reporter,
         &mut confirmer,
-        &cancellation,
+        cancellation.clone(),
     )
+    .await
 }
 
-fn run_with_reporter(
+async fn run_with_reporter(
     command: Command,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> u8 {
-    match execute(command, app, reporter, confirmer, cancellation) {
+    match execute(command, app, reporter, confirmer, cancellation).await {
         Ok(()) => exit::SUCCESS,
         Err(error) => {
             let exit_code = error.exit_code();
@@ -283,43 +285,50 @@ fn run_with_reporter(
     }
 }
 
-fn execute(
+async fn execute(
     command: Command,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     match command {
-        Command::Install(args) => install(args, app, reporter, confirmer, cancellation),
-        Command::List => list(app, reporter),
-        Command::Info(args) => info(args, app, reporter),
-        Command::Remove(args) => remove(args, app, reporter, confirmer, cancellation),
-        Command::Search(args) => search(args, app, reporter),
-        Command::Outdated(args) => outdated(args, app, reporter),
-        Command::Update(args) => update(args, app, reporter, confirmer, cancellation),
-        Command::Config(args) => config(args, app, reporter),
-        Command::SelfUpdate(args) => run_self_update(args, reporter, confirmer, cancellation),
+        Command::Install(args) => install(args, app, reporter, confirmer, cancellation).await,
+        Command::List => list(app, reporter).await,
+        Command::Info(args) => info(args, app, reporter).await,
+        Command::Remove(args) => remove(args, app, reporter, confirmer, cancellation).await,
+        Command::Search(args) => search(args, app, reporter).await,
+        Command::Outdated(args) => outdated(args, app, reporter).await,
+        Command::Update(args) => update(args, app, reporter, confirmer, cancellation).await,
+        Command::Config(args) => config(args, app, reporter).await,
+        Command::SelfUpdate(args) => run_self_update(args, reporter, confirmer, cancellation).await,
     }
 }
 
-fn install(
+async fn install(
     args: InstallArgs,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     let explicit_families = selected_family_args(&args.families);
     if !explicit_families.is_empty() {
-        let plans =
-            build_family_install_plans(&args, explicit_families, app, reporter, cancellation)?;
-        let reports = apply_install_plans(&args, plans, app, reporter, confirmer, cancellation)?;
+        let plans = build_family_install_plans(
+            &args,
+            explicit_families,
+            app,
+            reporter,
+            cancellation.clone(),
+        )
+        .await?;
+        let reports =
+            apply_install_plans(&args, plans, app, reporter, confirmer, cancellation).await?;
         return render_install_reports(reporter, reports);
     }
 
     let request = install_request_from_args(&args, Vec::new())?;
-    let plan_result = build_install_plan(request, app, reporter, cancellation);
+    let plan_result = build_install_plan(request, app, reporter, cancellation.clone()).await;
     let plan = match plan_result {
         Ok(plan) => plan,
         Err(CliError::Core(FontbrewError::FamilySelectionRequired { families })) => {
@@ -328,16 +337,23 @@ fn install(
             } else {
                 confirmer.select_families(&families)?
             };
-            let plans =
-                build_family_install_plans(&args, selected_families, app, reporter, cancellation)?;
+            let plans = build_family_install_plans(
+                &args,
+                selected_families,
+                app,
+                reporter,
+                cancellation.clone(),
+            )
+            .await?;
             let reports =
-                apply_install_plans(&args, plans, app, reporter, confirmer, cancellation)?;
+                apply_install_plans(&args, plans, app, reporter, confirmer, cancellation).await?;
             return render_install_reports(reporter, reports);
         }
         Err(error) => return Err(error),
     };
 
-    let reports = apply_install_plans(&args, vec![plan], app, reporter, confirmer, cancellation)?;
+    let reports =
+        apply_install_plans(&args, vec![plan], app, reporter, confirmer, cancellation).await?;
     render_install_reports(reporter, reports)
 }
 
@@ -382,18 +398,18 @@ fn selected_family_args(families: &[String]) -> Vec<FamilyName> {
     selected_families
 }
 
-fn build_family_install_plans(
+async fn build_family_install_plans(
     args: &InstallArgs,
     selected_families: Vec<FamilyName>,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<Vec<InstallPlan>> {
     let mut plans = Vec::new();
 
     for family in selected_families {
         let request = install_request_from_args(args, vec![family])?;
-        match build_install_plan(request, app, reporter, cancellation) {
+        match build_install_plan(request, app, reporter, cancellation.clone()).await {
             Ok(plan) => plans.push(plan),
             Err(error) => {
                 for plan in plans {
@@ -407,27 +423,28 @@ fn build_family_install_plans(
     Ok(plans)
 }
 
-fn build_install_plan(
+async fn build_install_plan(
     request: InstallRequest,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<InstallPlan> {
     let mut progress = ProgressAdapter::new(reporter);
-    let plan =
-        app.install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)?;
+    let plan = app
+        .install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)
+        .await?;
     progress.finish()?;
 
     Ok(plan)
 }
 
-fn apply_install_plans(
+async fn apply_install_plans(
     args: &InstallArgs,
     mut plans: Vec<InstallPlan>,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<Vec<InstallReport>> {
     let risks = plans
         .iter()
@@ -454,7 +471,9 @@ fn apply_install_plans(
     while let Some(plan) = plans.pop() {
         let result: CliResult<InstallReport> = {
             let mut progress = ProgressAdapter::new(reporter);
-            let report = app.apply_install(plan, policy.clone(), &mut progress, cancellation)?;
+            let report = app
+                .apply_install(plan, policy.clone(), &mut progress, cancellation.clone())
+                .await?;
             progress.finish()?;
             Ok(report)
         };
@@ -483,28 +502,30 @@ fn render_install_reports(
     reporter.render_install_batch_report(InstallBatchReport { packages: reports })
 }
 
-fn list(app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
-    let report = app.list_packages()?;
+async fn list(app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    let report = app.list_packages().await?;
 
     reporter.render_list_report(report)
 }
 
-fn info(args: InfoArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+async fn info(args: InfoArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
-    let report = app.package_info(InfoRequest { package_id })?;
+    let report = app.package_info(InfoRequest { package_id }).await?;
 
     reporter.render_info_report(report)
 }
 
-fn remove(
+async fn remove(
     args: RemoveArgs,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
-    let plan = app.remove_plan_with_cancellation(RemoveRequest { package_id }, cancellation)?;
+    let plan = app
+        .remove_plan_with_cancellation(RemoveRequest { package_id }, cancellation.clone())
+        .await?;
     let policy = confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {
@@ -514,7 +535,9 @@ fn remove(
     )?;
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
-        let report = app.apply_remove(plan, policy, &mut progress, cancellation)?;
+        let report = app
+            .apply_remove(plan, policy, &mut progress, cancellation)
+            .await?;
         progress.finish()?;
         report
     };
@@ -522,32 +545,38 @@ fn remove(
     reporter.render_remove_report(report)
 }
 
-fn search(args: SearchArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
-    let report = app.search(SearchRequest {
-        query: args.query.unwrap_or_default(),
-        limit: args.limit,
-    })?;
+async fn search(args: SearchArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+    let report = app
+        .search(SearchRequest {
+            query: args.query.unwrap_or_default(),
+            limit: args.limit,
+        })
+        .await?;
 
     reporter.render_search_report(report)
 }
 
-fn outdated(args: OutdatedArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+async fn outdated(
+    args: OutdatedArgs,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+) -> CliResult<()> {
     let package_ids = args
         .package_ids
         .into_iter()
         .map(PackageId::parse)
         .collect::<fontbrew_core::Result<Vec<_>>>()?;
-    let report = app.outdated(OutdatedRequest { package_ids })?;
+    let report = app.outdated(OutdatedRequest { package_ids }).await?;
 
     reporter.render_outdated_report(report)
 }
 
-fn update(
+async fn update(
     args: UpdateArgs,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     let package_ids = args
         .package_ids
@@ -560,7 +589,9 @@ fn update(
     };
     let report = {
         let mut progress = ProgressAdapter::new(reporter);
-        let plan = app.update_plan(request, &mut progress, cancellation)?;
+        let plan = app
+            .update_plan(request, &mut progress, cancellation.clone())
+            .await?;
         let policy = match confirmer.execution_policy(
             &plan.risks,
             ConfirmationOptions {
@@ -574,7 +605,9 @@ fn update(
                 return Err(error);
             }
         };
-        let report = app.apply_update(plan, policy, &mut progress, cancellation)?;
+        let report = app
+            .apply_update(plan, policy, &mut progress, cancellation)
+            .await?;
         progress.finish()?;
         report
     };
@@ -582,31 +615,33 @@ fn update(
     reporter.render_update_report(report)
 }
 
-fn config(args: ConfigArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
+async fn config(args: ConfigArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
     match args.command {
         ConfigCommand::Get(args) => {
-            let report = app.config_get(ConfigGetRequest { key: args.key })?;
+            let report = app.config_get(ConfigGetRequest { key: args.key }).await?;
             reporter.render_config_get_report(report)
         }
         ConfigCommand::Set(args) => {
-            let report = app.config_set(ConfigSetRequest {
-                key: args.key,
-                value: args.value,
-            })?;
+            let report = app
+                .config_set(ConfigSetRequest {
+                    key: args.key,
+                    value: args.value,
+                })
+                .await?;
             reporter.render_config_set_report(report)
         }
     }
 }
 
-fn run_self_update(
+async fn run_self_update(
     args: SelfUpdateArgs,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     let request = SelfUpdateRequest::from_environment(args.dry_run, args.yes, args.force)?;
 
-    self_update_command::run(request, reporter, confirmer, cancellation)
+    self_update_command::run(request, reporter, confirmer, cancellation).await
 }
 
 fn install_source_from_arg(source: &str) -> InstallSource {

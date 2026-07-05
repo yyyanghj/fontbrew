@@ -2,7 +2,10 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use fontbrew_core::{
@@ -19,6 +22,17 @@ struct NoProgress;
 
 impl ProgressSink for NoProgress {
     fn emit(&mut self, _event: ProgressEvent) {}
+}
+
+#[derive(Default)]
+struct RecordingProgress {
+    events: Vec<ProgressEvent>,
+}
+
+impl ProgressSink for RecordingProgress {
+    fn emit(&mut self, event: ProgressEvent) {
+        self.events.push(event);
+    }
 }
 
 struct NeverCancelled;
@@ -234,26 +248,61 @@ fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
     entries
 }
 
-fn apply_install(app: &FontbrewApp, archive_path: &Path) -> fontbrew_core::Result<()> {
-    let plan = app.install_plan(local_archive_request(archive_path, false))?;
+async fn apply_install(app: &FontbrewApp, archive_path: &Path) -> fontbrew_core::Result<()> {
+    let plan = app
+        .install_plan(local_archive_request(archive_path, false))
+        .await?;
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &cancellation,
-    )?;
+        cancellation.clone(),
+    )
+    .await?;
     Ok(())
 }
 
-#[test]
-fn no_cancellation_token_never_cancels() {
+#[tokio::test]
+async fn local_archive_install_plan_error_replays_progress_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let archive_path = temp.path().join("bad.zip");
+    fs::write(&archive_path, b"not a zip archive").expect("write invalid archive");
+
+    let app = FontbrewApp::with_paths(paths);
+    let mut progress = RecordingProgress::default();
+    let error = app
+        .install_plan_with_progress_and_cancellation(
+            local_archive_request_with_package_id_override(
+                &archive_path,
+                package_id("source-code-pro"),
+            ),
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("bad archive should fail planning");
+
+    assert!(error.to_string().contains("archive rejected"));
+    assert!(matches!(
+        progress.events.first(),
+        Some(ProgressEvent::ResolvingSource { source }) if source == &archive_path.display().to_string()
+    ));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ExtractingArchive { package_id } if package_id.as_str() == "source-code-pro"
+    )));
+}
+
+#[tokio::test]
+async fn no_cancellation_token_never_cancels() {
     assert!(!NoCancellation.is_cancelled());
 }
 
-#[test]
-fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
+#[tokio::test]
+async fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app = FontbrewApp::with_paths(test_paths(&temp));
     let archive_path = temp.path().join("source-code-pro.zip");
@@ -264,6 +313,7 @@ fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan local archive install");
     let json = serde_json::to_value(&plan).expect("plan should serialize");
 
@@ -272,8 +322,8 @@ fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
     assert!(!json.to_string().contains("package_store"));
 }
 
-#[test]
-fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
+#[tokio::test]
+async fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -284,6 +334,7 @@ fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
     );
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan local archive install");
     assert!(
         staging_entries(&paths)
@@ -297,8 +348,9 @@ fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &AlwaysCancelled,
+            Arc::new(AlwaysCancelled),
         )
+        .await
         .expect_err("cancelled apply should fail");
 
     assert!(matches!(error, FontbrewError::Cancelled));
@@ -312,8 +364,8 @@ fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
         .exists());
 }
 
-#[test]
-fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
+#[tokio::test]
+async fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -326,10 +378,11 @@ fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
     let error = app
         .install_plan_with_cancellation(
             local_archive_request(&archive_path, false),
-            &CancelWhenInstallStagingExists {
+            Arc::new(CancelWhenInstallStagingExists {
                 paths: paths.clone(),
-            },
+            }),
         )
+        .await
         .expect_err("cancellation after staging creation should fail");
 
     assert!(matches!(error, FontbrewError::Cancelled));
@@ -337,9 +390,9 @@ fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
 }
 
 #[cfg(unix)]
-#[test]
-fn install_plan_removes_stale_install_staging_without_touching_unrelated_paths_or_symlink_targets()
-{
+#[tokio::test]
+async fn install_plan_removes_stale_install_staging_without_touching_unrelated_paths_or_symlink_targets(
+) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -364,6 +417,7 @@ fn install_plan_removes_stale_install_staging_without_touching_unrelated_paths_o
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan local archive install");
 
     assert!(!stale_dir.exists());
@@ -381,8 +435,8 @@ fn install_plan_removes_stale_install_staging_without_touching_unrelated_paths_o
     assert!(outside_dir.join("keep").exists());
 }
 
-#[test]
-fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
+#[tokio::test]
+async fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -399,9 +453,11 @@ fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
 
     let first_plan = app
         .install_plan(local_archive_request(&first_archive, false))
+        .await
         .expect("plan first local archive install");
     let second_plan = app
         .install_plan(local_archive_request(&second_archive, false))
+        .await
         .expect("planning second install should not delete first staging");
 
     assert_eq!(
@@ -416,8 +472,9 @@ fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
         first_plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("first plan should remain applicable after second planning cleanup");
     assert!(paths
         .package_store_dir(
@@ -428,8 +485,9 @@ fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
         .exists());
 }
 
-#[test]
-fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepared_plan_staging() {
+#[tokio::test]
+async fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepared_plan_staging(
+) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -446,6 +504,7 @@ fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepar
 
     let first_plan = app
         .install_plan(local_archive_request(&first_archive, false))
+        .await
         .expect("plan first local archive install");
     let abandoned_staging = paths.staging_dir().join("install-abandoned");
     fs::create_dir_all(&abandoned_staging).expect("create abandoned staging");
@@ -454,6 +513,7 @@ fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepar
 
     let second_plan = app
         .install_plan(local_archive_request(&second_archive, false))
+        .await
         .expect("planning second install should clean abandoned staging");
 
     assert!(!abandoned_staging.exists());
@@ -470,8 +530,9 @@ fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepar
         first_plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("first plan should remain applicable after abandoned cleanup");
     assert!(paths
         .package_store_dir(
@@ -482,8 +543,8 @@ fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_prepar
         .exists());
 }
 
-#[test]
-fn local_archive_install_list_info_remove_round_trip() {
+#[tokio::test]
+async fn local_archive_install_list_info_remove_round_trip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -493,8 +554,13 @@ fn local_archive_install_list_info_remove_round_trip() {
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
 
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let plan = app
-        .install_plan(local_archive_request(&archive_path, false))
+        .install_plan_with_cancellation(
+            local_archive_request(&archive_path, false),
+            cancellation.clone(),
+        )
+        .await
         .expect("plan local archive install");
 
     assert_eq!(plan.package_id, package_id("source-code-pro"));
@@ -510,14 +576,14 @@ fn local_archive_install_list_info_remove_round_trip() {
     assert!(plan.risks.is_empty());
 
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
     let report = app
         .apply_install(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect("install local archive");
 
     assert_eq!(report.package_id, package_id("source-code-pro"));
@@ -537,7 +603,7 @@ fn local_archive_install_list_info_remove_round_trip() {
         managed_font_path
     );
 
-    let list = app.list_packages().expect("list packages");
+    let list = app.list_packages().await.expect("list packages");
     assert_eq!(list.packages.len(), 1);
     assert_eq!(list.packages[0].package_id, package_id("source-code-pro"));
     assert_eq!(list.packages[0].families[0].as_str(), "Source Code Pro");
@@ -547,6 +613,7 @@ fn local_archive_install_list_info_remove_round_trip() {
         .package_info(InfoRequest {
             package_id: package_id("source-code-pro"),
         })
+        .await
         .expect("package info");
     assert_eq!(info.package.package_id, package_id("source-code-pro"));
     assert_eq!(info.package.version.as_str(), "local");
@@ -557,9 +624,13 @@ fn local_archive_install_list_info_remove_round_trip() {
     assert!(info.package.activated);
 
     let remove_plan = app
-        .remove_plan(RemoveRequest {
-            package_id: package_id("source-code-pro"),
-        })
+        .remove_plan_with_cancellation(
+            RemoveRequest {
+                package_id: package_id("source-code-pro"),
+            },
+            cancellation.clone(),
+        )
+        .await
         .expect("plan remove");
     assert!(!remove_plan.changes.is_empty());
     assert!(remove_plan.risks.is_empty());
@@ -569,21 +640,23 @@ fn local_archive_install_list_info_remove_round_trip() {
             remove_plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect("remove package");
     assert!(remove_report.removed);
     assert!(!activation_path.exists());
     assert!(!managed_font_path.exists());
     assert!(app
         .list_packages()
+        .await
         .expect("list after remove")
         .packages
         .is_empty());
 }
 
-#[test]
-fn local_archive_package_id_override_installs_non_normalizable_family_and_records_metadata() {
+#[tokio::test]
+async fn local_archive_package_id_override_installs_non_normalizable_family_and_records_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -593,6 +666,7 @@ fn local_archive_package_id_override_installs_non_normalizable_family_and_record
 
     let error = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect_err("unsafe family should not normalize into a package id");
 
     assert!(matches!(error, FontbrewError::InvalidPackageId { .. }));
@@ -604,19 +678,21 @@ fn local_archive_package_id_override_installs_non_normalizable_family_and_record
             &archive_path,
             package_id("custom-local"),
         ))
+        .await
         .expect("override should name the local package");
 
     assert_eq!(plan.package_id, package_id("custom-local"));
 
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let report = app
         .apply_install(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect("install local archive with override");
 
     assert_eq!(report.package_id, package_id("custom-local"));
@@ -630,8 +706,8 @@ fn local_archive_package_id_override_installs_non_normalizable_family_and_record
     assert_eq!(record.families[0].as_str(), "Source/Code Pro");
 }
 
-#[test]
-fn direct_local_archive_requires_family_selection_for_multiple_families() {
+#[tokio::test]
+async fn direct_local_archive_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -646,6 +722,7 @@ fn direct_local_archive_requires_family_selection_for_multiple_families() {
 
     let error = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect_err("multi-family local archive should require an explicit boundary");
 
     assert!(matches!(
@@ -660,8 +737,8 @@ fn direct_local_archive_requires_family_selection_for_multiple_families() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() {
+#[tokio::test]
+async fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -679,6 +756,7 @@ fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() 
             &archive_path,
             package_id("custom-local"),
         ))
+        .await
         .expect_err("override should not define a family boundary");
 
     assert!(matches!(
@@ -693,8 +771,8 @@ fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() 
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn direct_local_archive_selected_family_installs_one_package() {
+#[tokio::test]
+async fn direct_local_archive_selected_family_installs_one_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -712,6 +790,7 @@ fn direct_local_archive_selected_family_installs_one_package() {
             &archive_path,
             vec!["Inter"],
         ))
+        .await
         .expect("selected family should plan");
 
     assert_eq!(plan.package_id, package_id("inter"));
@@ -721,8 +800,9 @@ fn direct_local_archive_selected_family_installs_one_package() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("selected family should install");
 
     assert_eq!(report.package_id, package_id("inter"));
@@ -738,8 +818,8 @@ fn direct_local_archive_selected_family_installs_one_package() {
         .exists());
 }
 
-#[test]
-fn package_id_override_is_rejected_for_non_local_sources() {
+#[tokio::test]
+async fn package_id_override_is_rejected_for_non_local_sources() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -770,6 +850,7 @@ fn package_id_override_is_rejected_for_non_local_sources() {
     ] {
         let error = app
             .install_plan(request)
+            .await
             .expect_err("override should be local-only");
 
         assert!(matches!(error, FontbrewError::Config { .. }));
@@ -781,8 +862,8 @@ fn package_id_override_is_rejected_for_non_local_sources() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
+#[tokio::test]
+async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -791,7 +872,9 @@ fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
         &archive_path,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &archive_path).expect("install local archive");
+    apply_install(&app, &archive_path)
+        .await
+        .expect("install local archive");
     let package_store_dir = paths.package_store_dir(
         &package_id("source-code-pro"),
         &PackageVersion::new("local"),
@@ -804,14 +887,16 @@ fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
         .remove_plan(RemoveRequest {
             package_id: package_id("source-code-pro"),
         })
+        .await
         .expect("plan remove");
     let report = app
         .apply_remove(
             remove_plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &CancelOnCheck::new(4),
+            Arc::new(CancelOnCheck::new(4)),
         )
+        .await
         .expect("remove should finish once mutation has started");
 
     assert!(report.removed);
@@ -823,8 +908,8 @@ fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
         .is_none());
 }
 
-#[test]
-fn install_plan_rejects_reserved_copy_activation_config_and_cleans_staging() {
+#[tokio::test]
+async fn install_plan_rejects_reserved_copy_activation_config_and_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -848,6 +933,7 @@ activation_strategy = "copy"
 
     let error = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect_err("copy activation config should be rejected");
 
     assert!(matches!(error, FontbrewError::Config { .. }));
@@ -865,8 +951,9 @@ activation_strategy = "copy"
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn local_archive_install_uses_global_format_preference_when_formats_have_equivalent_coverage() {
+#[tokio::test]
+async fn local_archive_install_uses_global_format_preference_when_formats_have_equivalent_coverage()
+{
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -891,7 +978,9 @@ format_preference = ["ttf", "otf"]
     )
     .expect("write config");
 
-    apply_install(&app, &archive_path).expect("install preferred ttf");
+    apply_install(&app, &archive_path)
+        .await
+        .expect("install preferred ttf");
 
     let package_dir = paths.package_store_dir(
         &package_id("source-code-pro"),
@@ -901,8 +990,8 @@ format_preference = ["ttf", "otf"]
     assert!(!package_dir.join("files/SourceCodePro-Regular.otf").exists());
 }
 
-#[test]
-fn local_archive_request_format_preference_overrides_global_config() {
+#[tokio::test]
+async fn local_archive_request_format_preference_overrides_global_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -933,15 +1022,17 @@ format_preference = ["ttf", "otf"]
             false,
             vec![FontFormat::Otf],
         ))
+        .await
         .expect("plan otf override");
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &cancellation,
+        cancellation.clone(),
     )
+    .await
     .expect("install preferred otf");
 
     let package_dir = paths.package_store_dir(
@@ -952,8 +1043,8 @@ format_preference = ["ttf", "otf"]
     assert!(!package_dir.join("files/SourceCodePro-Regular.ttf").exists());
 }
 
-#[test]
-fn local_archive_install_uses_default_format_preference_when_coverage_differs() {
+#[tokio::test]
+async fn local_archive_install_uses_default_format_preference_when_coverage_differs() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -969,15 +1060,17 @@ fn local_archive_install_uses_default_format_preference_when_coverage_differs() 
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("format coverage mismatch should still use default preference");
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &cancellation,
+        cancellation.clone(),
     )
+    .await
     .expect("install default preferred format");
 
     let package_dir = paths.package_store_dir(
@@ -989,8 +1082,8 @@ fn local_archive_install_uses_default_format_preference_when_coverage_differs() 
     assert!(!package_dir.join("files/SourceCodePro-Bold.ttf").exists());
 }
 
-#[test]
-fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
+#[tokio::test]
+async fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1010,15 +1103,17 @@ fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
             false,
             vec![FontFormat::Otf],
         ))
+        .await
         .expect("explicit format preference should select requested format");
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &cancellation,
+        cancellation.clone(),
     )
+    .await
     .expect("install requested otf subset");
 
     let package_dir = paths.package_store_dir(
@@ -1030,8 +1125,8 @@ fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
     assert!(!package_dir.join("files/SourceCodePro-Bold.ttf").exists());
 }
 
-#[test]
-fn local_archive_explicit_unavailable_format_fails_without_fallback() {
+#[tokio::test]
+async fn local_archive_explicit_unavailable_format_fails_without_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1047,6 +1142,7 @@ fn local_archive_explicit_unavailable_format_fails_without_fallback() {
             false,
             vec![FontFormat::Otf],
         ))
+        .await
         .expect_err("explicit unavailable format should not fall back silently");
 
     assert!(matches!(error, FontbrewError::Conflict { .. }));
@@ -1055,8 +1151,8 @@ fn local_archive_explicit_unavailable_format_fails_without_fallback() {
 }
 
 #[cfg(unix)]
-#[test]
-fn install_rejects_package_store_symlink_without_writing_outside_managed_root() {
+#[tokio::test]
+async fn install_rejects_package_store_symlink_without_writing_outside_managed_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1076,16 +1172,18 @@ fn install_rejects_package_store_symlink_without_writing_outside_managed_root() 
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan local archive install");
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let error = app
         .apply_install(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect_err("package store symlink should reject");
 
     assert!(matches!(error, FontbrewError::PathResolution { .. }));
@@ -1095,8 +1193,8 @@ fn install_rejects_package_store_symlink_without_writing_outside_managed_root() 
     assert!(!paths.manifest_path().exists());
 }
 
-#[test]
-fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory() {
+#[tokio::test]
+async fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1135,8 +1233,9 @@ fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory(
             },
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("malformed manifest version should reject");
 
     assert!(matches!(
@@ -1150,8 +1249,8 @@ fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory(
 }
 
 #[cfg(unix)]
-#[test]
-fn failed_reinstall_preserves_existing_activation_and_package_store() {
+#[tokio::test]
+async fn failed_reinstall_preserves_existing_activation_and_package_store() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1162,7 +1261,9 @@ fn failed_reinstall_preserves_existing_activation_and_package_store() {
         &archive_path,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &archive_path).expect("initial install");
+    apply_install(&app, &archive_path)
+        .await
+        .expect("initial install");
 
     let managed_font_path = paths
         .package_store_dir(
@@ -1178,6 +1279,7 @@ fn failed_reinstall_preserves_existing_activation_and_package_store() {
 
     let reinstall_plan = app
         .install_plan(local_archive_request(&archive_path, true))
+        .await
         .expect("plan reinstall");
     let original_permissions = fs::metadata(paths.managed_store_dir())
         .expect("managed root metadata")
@@ -1188,18 +1290,19 @@ fn failed_reinstall_preserves_existing_activation_and_package_store() {
         .expect("make managed root read-only");
 
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
-    let result = app.apply_install(
-        reinstall_plan,
-        ExecutionPolicy::SafeOnly,
-        &mut progress,
-        &cancellation,
-    );
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
+    let error = app
+        .apply_install(
+            reinstall_plan,
+            ExecutionPolicy::SafeOnly,
+            &mut progress,
+            cancellation.clone(),
+        )
+        .await
+        .expect_err("manifest write should fail");
 
     fs::set_permissions(paths.managed_store_dir(), original_permissions)
         .expect("restore managed root permissions");
-
-    let error = result.expect_err("manifest write should fail");
     assert!(matches!(error, FontbrewError::Io(_)));
     assert_eq!(
         fs::read_link(&activation_path).expect("existing activation symlink remains"),
@@ -1211,8 +1314,8 @@ fn failed_reinstall_preserves_existing_activation_and_package_store() {
     );
 }
 
-#[test]
-fn repeated_local_archive_install_without_reinstall_is_noop() {
+#[tokio::test]
+async fn repeated_local_archive_install_without_reinstall_is_noop() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1221,7 +1324,9 @@ fn repeated_local_archive_install_without_reinstall_is_noop() {
         &archive_path,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &archive_path).expect("initial install");
+    apply_install(&app, &archive_path)
+        .await
+        .expect("initial install");
 
     let managed_font_path = paths
         .package_store_dir(
@@ -1233,20 +1338,22 @@ fn repeated_local_archive_install_without_reinstall_is_noop() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan repeated install");
     assert!(plan.already_installed);
     assert!(plan.changes.is_empty());
     assert!(plan.risks.is_empty());
 
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let report = app
         .apply_install(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect("apply repeated install");
 
     assert!(!report.installed);
@@ -1257,8 +1364,8 @@ fn repeated_local_archive_install_without_reinstall_is_noop() {
     );
 }
 
-#[test]
-fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
+#[tokio::test]
+async fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1267,7 +1374,9 @@ fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
         &archive_path,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &archive_path).expect("initial install");
+    apply_install(&app, &archive_path)
+        .await
+        .expect("initial install");
 
     let unmanaged_activation_file = paths.activation_dir().join("Unmanaged.ttf");
     fs::write(&unmanaged_activation_file, b"unmanaged").expect("write unmanaged activation file");
@@ -1282,15 +1391,17 @@ fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
         .remove_plan(RemoveRequest {
             package_id: package_id("source-code-pro"),
         })
+        .await
         .expect("plan remove");
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     app.apply_remove(
         remove_plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &cancellation,
+        cancellation.clone(),
     )
+    .await
     .expect("remove package");
 
     assert_eq!(
@@ -1307,8 +1418,8 @@ fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
     );
 }
 
-#[test]
-fn failed_local_archive_install_does_not_update_manifest() {
+#[tokio::test]
+async fn failed_local_archive_install_does_not_update_manifest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1317,19 +1428,21 @@ fn failed_local_archive_install_does_not_update_manifest() {
 
     let error = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect_err("invalid font archive should fail during planning");
 
     assert!(matches!(error, FontbrewError::FontParse { .. }));
     assert!(!paths.manifest_path().exists());
     assert!(app
         .list_packages()
+        .await
         .expect("list after failed install")
         .packages
         .is_empty());
 }
 
-#[test]
-fn activation_conflict_blocks_install_without_manifest_update() {
+#[tokio::test]
+async fn activation_conflict_blocks_install_without_manifest_update() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1344,19 +1457,21 @@ fn activation_conflict_blocks_install_without_manifest_update() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install with activation conflict");
 
     assert_eq!(plan.risks.len(), 1);
 
     let mut progress = NoProgress;
-    let cancellation = NeverCancelled;
+    let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let error = app
         .apply_install(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect_err("safe policy should reject activation conflict");
 
     assert!(matches!(
@@ -1370,8 +1485,8 @@ fn activation_conflict_blocks_install_without_manifest_update() {
     assert!(!paths.manifest_path().exists());
 }
 
-#[test]
-fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_safe_policy() {
+#[tokio::test]
+async fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_safe_policy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1396,6 +1511,7 @@ fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_saf
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install with unmanaged family overlap");
 
     assert!(plan.risks.iter().any(|risk| matches!(
@@ -1412,8 +1528,9 @@ fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_saf
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("safe policy should reject same-family unmanaged overlap");
 
     assert!(matches!(
@@ -1431,8 +1548,8 @@ fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_saf
 }
 
 #[cfg(unix)]
-#[test]
-fn install_plan_reports_activation_artifact_managed_by_another_package() {
+#[tokio::test]
+async fn install_plan_reports_activation_artifact_managed_by_another_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1484,6 +1601,7 @@ fn install_plan_reports_activation_artifact_managed_by_another_package() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install with other managed activation conflict");
 
     assert!(plan.risks.iter().any(|risk| matches!(
@@ -1497,8 +1615,8 @@ fn install_plan_reports_activation_artifact_managed_by_another_package() {
     )));
 }
 
-#[test]
-fn install_plan_reports_already_managed_package_from_different_source() {
+#[tokio::test]
+async fn install_plan_reports_already_managed_package_from_different_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1512,10 +1630,13 @@ fn install_plan_reports_already_managed_package_from_different_source() {
         &second_archive,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &first_archive).expect("initial install");
+    apply_install(&app, &first_archive)
+        .await
+        .expect("initial install");
 
     let plan = app
         .install_plan(local_archive_request(&second_archive, false))
+        .await
         .expect("plan same package from different source");
 
     assert!(plan.risks.iter().any(|risk| matches!(
@@ -1534,8 +1655,9 @@ fn install_plan_reports_already_managed_package_from_different_source() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("safe policy should reject source conflict");
 
     assert!(matches!(
@@ -1544,8 +1666,8 @@ fn install_plan_reports_already_managed_package_from_different_source() {
     ));
 }
 
-#[test]
-fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk() {
+#[tokio::test]
+async fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1559,10 +1681,13 @@ fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk
         &second_archive,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     );
-    apply_install(&app, &first_archive).expect("initial install");
+    apply_install(&app, &first_archive)
+        .await
+        .expect("initial install");
 
     let plan = app
         .install_plan(local_archive_request(&second_archive, true))
+        .await
         .expect("plan reinstall from different source");
     assert!(!plan.risks.is_empty());
 
@@ -1571,8 +1696,9 @@ fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk
             plan,
             ExecutionPolicy::AssumeYes,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("approved risk should not silently adopt a different source");
 
     assert!(matches!(error, FontbrewError::Conflict { .. }));
@@ -1580,14 +1706,15 @@ fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk
         .package_info(InfoRequest {
             package_id: package_id("source-code-pro"),
         })
+        .await
         .expect("package info after rejected reinstall");
     assert!(info.package.source.contains("source-code-pro-first.zip"));
     assert!(!info.package.source.contains("source-code-pro-second.zip"));
 }
 
 #[cfg(unix)]
-#[test]
-fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
+#[tokio::test]
+async fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1617,6 +1744,7 @@ fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install with unmanaged symlink family overlap");
 
     assert!(plan.risks.iter().any(|risk| matches!(
@@ -1629,8 +1757,8 @@ fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
     )));
 }
 
-#[test]
-fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
+#[tokio::test]
+async fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1642,6 +1770,7 @@ fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install before unmanaged font appears");
     assert!(plan.risks.is_empty());
 
@@ -1663,8 +1792,9 @@ fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("stale plan should recheck same-family overlap");
 
     assert!(matches!(
@@ -1682,8 +1812,8 @@ fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
 }
 
 #[cfg(unix)]
-#[test]
-fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
+#[tokio::test]
+async fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -1695,6 +1825,7 @@ fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
+        .await
         .expect("plan install before managed conflict appears");
     assert!(plan.risks.is_empty());
 
@@ -1742,8 +1873,9 @@ fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
             plan,
             ExecutionPolicy::AssumeYes,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("approved stale plan should not overwrite other managed activation");
 
     match error {
@@ -1769,8 +1901,8 @@ fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
 }
 
 #[cfg(unix)]
-#[test]
-fn install_plan_scan_error_removes_staging_directory() {
+#[tokio::test]
+async fn install_plan_scan_error_removes_staging_directory() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1796,10 +1928,11 @@ fn install_plan_scan_error_removes_staging_directory() {
     fs::set_permissions(&user_fonts_dir, execute_only_permissions)
         .expect("make user font dir unreadable");
 
-    let result = app.install_plan(local_archive_request(&archive_path, false));
-
+    let error = app
+        .install_plan(local_archive_request(&archive_path, false))
+        .await
+        .expect_err("unreadable scan dir should fail planning");
     fs::set_permissions(&user_fonts_dir, original_permissions).expect("restore user font dir");
-    let error = result.expect_err("unreadable scan dir should fail planning");
     assert!(matches!(error, FontbrewError::Io(_)));
     assert!(
         !paths.staging_dir().exists() || {

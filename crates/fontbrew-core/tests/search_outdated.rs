@@ -1,78 +1,14 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use fontbrew_core::{
-    fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    CancellationToken, FamilyName, FontbrewApp, OutdatedRequest, PackageId, PackageVersion,
-    SearchRequest,
+    FamilyName, FontbrewApp, OutdatedRequest, PackageId, PackageVersion, SearchRequest,
 };
 
-#[derive(Clone)]
-enum FakeHttpRoute {
-    Response(Vec<u8>),
-}
+mod support;
 
-#[derive(Default)]
-struct FakeHttpClient {
-    routes: Mutex<BTreeMap<String, FakeHttpRoute>>,
-    requests: Mutex<Vec<HttpRequest>>,
-}
-
-impl FakeHttpClient {
-    fn with_text(&self, url: &str, body: impl Into<String>) {
-        self.routes.lock().expect("routes lock").insert(
-            url.to_string(),
-            FakeHttpRoute::Response(body.into().into_bytes()),
-        );
-    }
-
-    fn requested_urls(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .iter()
-            .map(|request| request.url.clone())
-            .collect()
-    }
-}
-
-impl HttpClient for FakeHttpClient {
-    fn get(&self, request: HttpRequest) -> fontbrew_core::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.clone());
-        let body = self
-            .routes
-            .lock()
-            .expect("routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP request: {}", request.url));
-
-        match body {
-            FakeHttpRoute::Response(body) => Ok(HttpResponse { status: 200, body }),
-        }
-    }
-
-    fn download_to_file(
-        &self,
-        request: HttpRequest,
-        _destination: &Path,
-        _max_bytes: u64,
-        _cancellation: &dyn CancellationToken,
-    ) -> fontbrew_core::Result<u64> {
-        panic!(
-            "outdated should not download GitHub release assets: {}",
-            request.url
-        );
-    }
-}
+use support::LocalHttpServer;
 
 fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     FontbrewPaths::for_tests(
@@ -86,16 +22,16 @@ fn package_id(id: &str) -> PackageId {
     PackageId::parse(id).expect("test package id should be valid")
 }
 
-fn github_releases_url(owner: &str, repo: &str) -> String {
-    format!("https://api.github.com/repos/{owner}/{repo}/releases")
+fn github_releases_path(owner: &str, repo: &str) -> String {
+    format!("/repos/{owner}/{repo}/releases")
 }
 
-fn fontsource_list_url() -> String {
-    "https://api.fontsource.org/v1/fonts".to_string()
+fn fontsource_list_path() -> String {
+    "/fonts".to_string()
 }
 
-fn fontsource_detail_url(id: &str) -> String {
-    format!("https://api.fontsource.org/v1/fonts/{id}")
+fn fontsource_detail_path(id: &str) -> String {
+    format!("/fonts/{id}")
 }
 
 fn manifest_record(
@@ -129,13 +65,13 @@ fn write_manifest(paths: &FontbrewPaths, records: Vec<ManifestPackageRecord>) {
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
 }
 
-#[test]
-fn unprefixed_search_fetches_fontsource_results() {
+#[tokio::test]
+async fn unprefixed_search_fetches_fontsource_results() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_list_url(),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &fontsource_list_path(),
         r#"[
   {
     "id": "inter",
@@ -149,8 +85,8 @@ fn unprefixed_search_fetches_fontsource_results() {
   }
 ]"#,
     );
-    fake_http.with_text(
-        &fontsource_detail_url("inter"),
+    server.respond_text(
+        &fontsource_detail_path("inter"),
         r#"{
   "id": "inter",
   "family": "Inter",
@@ -173,26 +109,33 @@ fn unprefixed_search_fetches_fontsource_results() {
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = FontbrewApp::with_paths_and_network_client(
+        paths.clone(),
+        Arc::new(server.network_client()),
+    );
 
     let report = app
         .search(SearchRequest {
             query: "iner".to_string(),
             limit: Some(1),
         })
+        .await
         .expect("search should fetch Fontsource metadata");
 
     assert_eq!(report.results.len(), 1);
     assert_eq!(report.results[0].package_id, package_id("inter"));
     assert_eq!(report.results[0].source, "fontsource:inter");
     assert_eq!(
-        fake_http.requested_urls(),
-        vec![fontsource_list_url(), fontsource_detail_url("inter")]
+        server.request_urls(),
+        vec![
+            server.url(&fontsource_list_path()),
+            server.url(&fontsource_detail_path("inter"))
+        ]
     );
 }
 
-#[test]
-fn outdated_reports_newer_github_releases_and_local_packages_without_update_sources() {
+#[tokio::test]
+async fn outdated_reports_newer_github_releases_and_local_packages_without_update_sources() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_manifest(
@@ -235,25 +178,26 @@ fn outdated_reports_newer_github_releases_and_local_packages_without_update_sour
             ),
         ],
     );
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
         r#"[{"tag_name":"v1.2.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    fake_http.with_text(
-        &github_releases_url("rsms", "inter"),
+    server.respond_text(
+        &github_releases_path("rsms", "inter"),
         r#"[{"tag_name":"v4.1.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    fake_http.with_text(
-        &github_releases_url("owner", "up-to-date"),
+    server.respond_text(
+        &github_releases_path("owner", "up-to-date"),
         r#"[{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+    let app = FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()));
 
     let report = app
         .outdated(OutdatedRequest {
             package_ids: Vec::new(),
         })
+        .await
         .expect("check outdated packages");
 
     assert_eq!(report.packages.len(), 2);
@@ -266,11 +210,11 @@ fn outdated_reports_newer_github_releases_and_local_packages_without_update_sour
     assert_eq!(report.not_updatable[0].package_id, package_id("local-only"));
     assert!(report.not_updatable[0].reason.contains("no update source"));
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            github_releases_url("rsms", "inter"),
-            github_releases_url("adobe", "source-code-pro"),
-            github_releases_url("owner", "up-to-date"),
+            server.url(&github_releases_path("rsms", "inter")),
+            server.url(&github_releases_path("adobe", "source-code-pro")),
+            server.url(&github_releases_path("owner", "up-to-date")),
         ]
     );
 }

@@ -8,8 +8,8 @@ fn fixture_path(filename: &str) -> PathBuf {
         .join(filename)
 }
 
-#[test]
-fn fonts_read_ttf_metadata_for_grouping_and_style() {
+#[tokio::test]
+async fn fonts_read_ttf_metadata_for_grouping_and_style() {
     let reader = TtfParserMetadataReader;
 
     let faces = reader
@@ -29,8 +29,8 @@ fn fonts_read_ttf_metadata_for_grouping_and_style() {
     assert_eq!(face.face_index, 0);
 }
 
-#[test]
-fn fonts_read_otf_metadata() {
+#[tokio::test]
+async fn fonts_read_otf_metadata() {
     let reader = TtfParserMetadataReader;
 
     let faces = reader
@@ -51,8 +51,8 @@ fn fonts_read_otf_metadata() {
     assert_eq!(face.face_index, 0);
 }
 
-#[test]
-fn fonts_read_variable_ttf_metadata() {
+#[tokio::test]
+async fn fonts_read_variable_ttf_metadata() {
     let reader = TtfParserMetadataReader;
 
     let faces = reader
@@ -69,8 +69,8 @@ fn fonts_read_variable_ttf_metadata() {
     assert_eq!(face.face_index, 0);
 }
 
-#[test]
-fn fonts_read_ttc_metadata_for_each_face() {
+#[tokio::test]
+async fn fonts_read_ttc_metadata_for_each_face() {
     let reader = TtfParserMetadataReader;
 
     let faces = reader

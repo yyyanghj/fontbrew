@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
@@ -10,7 +9,6 @@ use std::{
 };
 
 use fontbrew_core::{
-    fetch::{HttpClient, HttpRequest, HttpResponse},
     fs::{debug_fail_next_atomic_write, DebugAtomicWriteFailure},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
@@ -19,6 +17,12 @@ use fontbrew_core::{
     UpdateRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+mod support;
+
+use support::{LocalHttpServer, ResponseGate, ServerConcurrencyProbe};
+
+static INITIAL_GITHUB_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct NoProgress;
 
@@ -43,85 +47,6 @@ impl CancellationToken for CancelWhenInstallStagingExists {
         staging_entries(&self.paths)
             .iter()
             .any(|entry| entry.starts_with("install-"))
-    }
-}
-
-#[derive(Default)]
-struct FakeHttpClient {
-    routes: Mutex<BTreeMap<String, Vec<u8>>>,
-    download_routes: Mutex<BTreeMap<String, Vec<u8>>>,
-    requests: Mutex<Vec<String>>,
-    probe: Option<Arc<ConcurrencyProbe>>,
-}
-
-impl FakeHttpClient {
-    fn with_probe(probe: Arc<ConcurrencyProbe>) -> Self {
-        Self {
-            probe: Some(probe),
-            ..Self::default()
-        }
-    }
-
-    fn with_text(&self, url: &str, body: impl Into<String>) {
-        self.routes
-            .lock()
-            .expect("routes lock")
-            .insert(url.to_string(), body.into().into_bytes());
-    }
-
-    fn with_download_bytes(&self, url: &str, body: Vec<u8>) {
-        self.download_routes
-            .lock()
-            .expect("download routes lock")
-            .insert(url.to_string(), body);
-    }
-}
-
-impl HttpClient for FakeHttpClient {
-    fn get(&self, request: HttpRequest) -> fontbrew_core::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.url.clone());
-        if let Some(probe) = &self.probe {
-            probe.enter_release_request();
-        }
-        let body = self
-            .routes
-            .lock()
-            .expect("routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP request: {}", request.url));
-
-        Ok(HttpResponse { status: 200, body })
-    }
-
-    fn download_to_file(
-        &self,
-        request: HttpRequest,
-        destination: &Path,
-        _max_bytes: u64,
-        _cancellation: &dyn CancellationToken,
-    ) -> fontbrew_core::Result<u64> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.url.clone());
-        let body = self
-            .download_routes
-            .lock()
-            .expect("download routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP download request: {}", request.url));
-
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).expect("create download parent");
-        }
-        fs::write(destination, &body).expect("write fake download");
-
-        Ok(body.len() as u64)
     }
 }
 
@@ -185,8 +110,47 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     )
 }
 
-fn github_releases_url(owner: &str, repo: &str) -> String {
-    format!("https://api.github.com/repos/{owner}/{repo}/releases")
+fn github_releases_path(owner: &str, repo: &str) -> String {
+    format!("/repos/{owner}/{repo}/releases")
+}
+
+fn download_path(name: &str) -> String {
+    format!("/downloads/{name}")
+}
+
+fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
+    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+}
+
+fn seed_github_update(
+    server: &LocalHttpServer,
+    owner: &str,
+    repo: &str,
+    version: &str,
+    asset_name: &str,
+    download_name: &str,
+    archive: Vec<u8>,
+) {
+    let download_url = server.url(&download_path(download_name));
+    server.respond_text(
+        &github_releases_path(owner, repo),
+        github_release_json(version, asset_name, &download_url),
+    );
+    server.respond_bytes(&download_path(download_name), archive);
+}
+
+fn source_code_pro_update_app(paths: &FontbrewPaths, archive: Vec<u8>) -> FontbrewApp {
+    let server = LocalHttpServer::start();
+    seed_github_update(
+        &server,
+        "adobe",
+        "source-code-pro",
+        "v2.0.0",
+        "source-code-pro.zip",
+        "source-code-pro-v2.zip",
+        archive,
+    );
+    app_with_server(paths.clone(), &server)
 }
 
 fn zip_with_fixture_font(entry_name: &str, fixture_name: &str) -> Vec<u8> {
@@ -242,29 +206,27 @@ fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
     entries
 }
 
-fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (FontbrewApp, UpdatePlan) {
-    install_github_source_code_pro(paths, "v1.0.0");
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+async fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (FontbrewApp, UpdatePlan) {
+    install_github_source_code_pro(paths, "v1.0.0").await;
+    let update_server = LocalHttpServer::start();
+    seed_github_update(
+        &update_server,
+        "adobe",
+        "source-code-pro",
+        "v2.0.0",
+        "source-code-pro.zip",
+        "source-code-pro-v2.zip",
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
+    let app = app_with_server(paths.clone(), &update_server);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
 
     (app, plan)
@@ -302,36 +264,32 @@ fn write_manifest(paths: &FontbrewPaths, records: Vec<ManifestPackageRecord>) {
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
 }
 
-fn install_github_source_code_pro(
-    paths: &FontbrewPaths,
-    version: &str,
-) -> (FontbrewApp, Arc<FakeHttpClient>) {
+async fn install_github_source_code_pro(paths: &FontbrewPaths, version: &str) -> FontbrewApp {
     install_github_source_code_pro_with_entries(
         paths,
         version,
         &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
     )
+    .await
 }
 
-fn install_github_source_code_pro_with_entries(
+async fn install_github_source_code_pro_with_entries(
     paths: &FontbrewPaths,
     version: &str,
     entries: &[(&str, &str)],
-) -> (FontbrewApp, Arc<FakeHttpClient>) {
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            version,
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro.zip",
-        ),
-    );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+) -> FontbrewApp {
+    let _guard = INITIAL_GITHUB_INSTALL_LOCK.lock().await;
+    let server = LocalHttpServer::start();
+    seed_github_update(
+        &server,
+        "adobe",
+        "source-code-pro",
+        version,
+        "source-code-pro.zip",
+        "source-code-pro.zip",
         zip_with_fixture_fonts(entries),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::GitHubRepo {
@@ -344,17 +302,24 @@ fn install_github_source_code_pro_with_entries(
             selected_families: Vec::new(),
             reinstall: false,
         })
-        .expect("plan GitHub install");
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "plan GitHub install: {error:?}; requests: {:?}",
+                server.requests()
+            )
+        });
     let mut progress = NoProgress;
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("apply GitHub install");
 
-    (app, fake_http)
+    app
 }
 
 fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
@@ -376,8 +341,8 @@ fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
     zip.finish().expect("finish zip").into_inner()
 }
 
-#[test]
-fn task_runner_respects_bounded_limit_without_tokio() {
+#[tokio::test]
+async fn task_runner_respects_bounded_limit_without_tokio() {
     let serial_probe = Arc::new(ConcurrencyProbe::new(1));
     tasks::map_bounded(vec![0, 1, 2], 1, {
         let probe = serial_probe.clone();
@@ -393,11 +358,11 @@ fn task_runner_respects_bounded_limit_without_tokio() {
     assert_eq!(parallel_probe.max_active(), 2);
 }
 
-#[test]
-fn update_apply_policy_failure_cleans_prepared_staging() {
+#[tokio::test]
+async fn update_apply_policy_failure_cleans_prepared_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let (app, mut plan) = prepare_source_code_pro_update(&paths);
+    let (app, mut plan) = prepare_source_code_pro_update(&paths).await;
     assert!(
         staging_entries(&paths)
             .iter()
@@ -414,8 +379,9 @@ fn update_apply_policy_failure_cleans_prepared_staging() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("safe policy should reject risky update");
 
     assert!(matches!(
@@ -425,11 +391,11 @@ fn update_apply_policy_failure_cleans_prepared_staging() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn discard_update_plan_cleans_prepared_staging() {
+#[tokio::test]
+async fn discard_update_plan_cleans_prepared_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let (app, plan) = prepare_source_code_pro_update(&paths);
+    let (app, plan) = prepare_source_code_pro_update(&paths).await;
     assert!(
         staging_entries(&paths)
             .iter()
@@ -442,11 +408,11 @@ fn discard_update_plan_cleans_prepared_staging() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn update_apply_manifest_read_failure_cleans_prepared_staging() {
+#[tokio::test]
+async fn update_apply_manifest_read_failure_cleans_prepared_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let (app, plan) = prepare_source_code_pro_update(&paths);
+    let (app, plan) = prepare_source_code_pro_update(&paths).await;
     assert!(
         staging_entries(&paths)
             .iter()
@@ -460,8 +426,9 @@ fn update_apply_manifest_read_failure_cleans_prepared_staging() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect_err("manifest read should fail");
 
     assert!(matches!(
@@ -471,33 +438,28 @@ fn update_apply_manifest_read_failure_cleans_prepared_staging() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn update_plan_cancellation_after_resolved_github_staging_creation_cleans_staging() {
+#[tokio::test]
+async fn update_plan_cancellation_after_resolved_github_staging_creation_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
     assert!(staging_entries(&paths).is_empty());
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
+    let app = source_code_pro_update_app(
+        &paths,
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
 
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &CancelWhenInstallStagingExists {
+            Arc::new(CancelWhenInstallStagingExists {
                 paths: paths.clone(),
-            },
+            }),
         )
+        .await
         .expect("update plan should record per-package cancellation failure");
 
     assert!(plan.prepared.is_empty());
@@ -507,8 +469,8 @@ fn update_plan_cancellation_after_resolved_github_staging_creation_cleans_stagin
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn update_prepare_partial_failure_does_not_block_other_prepared_packages() {
+#[tokio::test]
+async fn update_prepare_partial_failure_does_not_block_other_prepared_packages() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_manifest(
@@ -536,32 +498,30 @@ fn update_prepare_partial_failure_does_not_block_other_prepared_packages() {
             ),
         ],
     );
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro.zip",
-        ),
-    );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    let server = LocalHttpServer::start();
+    seed_github_update(
+        &server,
+        "adobe",
+        "source-code-pro",
+        "v2.0.0",
+        "source-code-pro.zip",
+        "source-code-pro.zip",
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    fake_http.with_text(
-        &github_releases_url("rsms", "inter"),
+    server.respond_text(
+        &github_releases_path("rsms", "inter"),
         r#"[{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+    let app = app_with_server(paths.clone(), &server);
 
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(Vec::new(), Some(2)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan updates with partial prepare failure");
 
     assert_eq!(plan.prepared.len(), 1);
@@ -581,8 +541,8 @@ fn update_prepare_partial_failure_does_not_block_other_prepared_packages() {
     );
 }
 
-#[test]
-fn update_prepare_identity_mismatch_fails_that_package_only() {
+#[tokio::test]
+async fn update_prepare_identity_mismatch_fails_that_package_only() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_manifest(
@@ -598,28 +558,19 @@ fn update_prepare_identity_mismatch_fails_that_package_only() {
             None,
         )],
     );
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro.zip",
-        ),
-    );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
 
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(Vec::new(), Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("identity mismatch is reported in plan");
 
     assert!(plan.prepared.is_empty());
@@ -628,8 +579,8 @@ fn update_prepare_identity_mismatch_fails_that_package_only() {
     assert!(plan.failed[0].reason.contains("identity mismatch"));
 }
 
-#[test]
-fn direct_github_update_reuses_manifest_family_boundary() {
+#[tokio::test]
+async fn direct_github_update_reuses_manifest_family_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_manifest(
@@ -648,31 +599,22 @@ fn direct_github_update_reuses_manifest_family_boundary() {
             }),
         )],
     );
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro.zip",
-        ),
-    );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
             ("Inter-Variable.ttf", "Inter-Variable.ttf"),
         ]),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
 
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("direct GitHub update should reuse manifest family boundary");
 
     assert_eq!(plan.prepared.len(), 1);
@@ -682,8 +624,8 @@ fn direct_github_update_reuses_manifest_family_boundary() {
     assert!(staging_entries(&paths).len() <= 1);
 }
 
-#[test]
-fn update_prepare_uses_bounded_parallelism_for_github_checks() {
+#[tokio::test]
+async fn update_prepare_uses_bounded_parallelism_for_github_checks() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     write_manifest(
@@ -712,62 +654,167 @@ fn update_prepare_uses_bounded_parallelism_for_github_checks() {
         ],
     );
 
-    let serial_probe = Arc::new(ConcurrencyProbe::new(1));
-    let serial_http = Arc::new(FakeHttpClient::with_probe(serial_probe.clone()));
-    seed_two_successful_updates(&serial_http);
-    let serial_app = FontbrewApp::with_paths_and_http_client(paths.clone(), serial_http);
+    let serial_probe = Arc::new(ServerConcurrencyProbe::new(1));
+    let serial_server = LocalHttpServer::start();
+    seed_two_successful_updates(&serial_server, serial_probe.clone());
+    let serial_app = app_with_server(paths.clone(), &serial_server);
     let mut progress = NoProgress;
     serial_app
         .update_plan(
             update_request(Vec::new(), Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("serial update plan");
     assert_eq!(serial_probe.max_active(), 1);
 
-    let parallel_probe = Arc::new(ConcurrencyProbe::new(2));
-    let parallel_http = Arc::new(FakeHttpClient::with_probe(parallel_probe.clone()));
-    seed_two_successful_updates(&parallel_http);
-    let parallel_app = FontbrewApp::with_paths_and_http_client(paths, parallel_http);
+    let parallel_probe = Arc::new(ServerConcurrencyProbe::new(2));
+    let parallel_server = LocalHttpServer::start();
+    seed_two_successful_updates(&parallel_server, parallel_probe.clone());
+    let parallel_app = app_with_server(paths, &parallel_server);
     parallel_app
         .update_plan(
             update_request(Vec::new(), Some(2)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("parallel update plan");
     assert_eq!(parallel_probe.max_active(), 2);
 }
 
-fn seed_two_successful_updates(fake_http: &FakeHttpClient) {
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro.zip",
-        ),
+#[tokio::test]
+async fn update_plan_preserves_input_order_when_second_package_finishes_first() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_manifest(
+        &paths,
+        vec![
+            manifest_record(
+                "source-code-pro",
+                "v1.0.0",
+                "Source Code Pro",
+                ManifestSource::GitHub {
+                    owner: "adobe".to_string(),
+                    repo: "source-code-pro".to_string(),
+                },
+                None,
+            ),
+            manifest_record(
+                "inter",
+                "v1.0.0",
+                "Inter",
+                ManifestSource::GitHub {
+                    owner: "rsms".to_string(),
+                    repo: "inter".to_string(),
+                },
+                None,
+            ),
+        ],
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+
+    let server = LocalHttpServer::start();
+    let source_code_pro_release_gate = Arc::new(ResponseGate::blocked());
+    let inter_download_gate = Arc::new(ResponseGate::open());
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text_with_gate(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_json("v2.0.0", "source-code-pro.zip", &source_code_pro_download),
+        source_code_pro_release_gate.clone(),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    fake_http.with_text(
-        &github_releases_url("rsms", "inter"),
-        github_release_json("v2.0.0", "inter.zip", "https://downloads.example/inter.zip"),
+
+    let inter_download = server.url(&download_path("inter.zip"));
+    server.respond_text(
+        &github_releases_path("rsms", "inter"),
+        github_release_json("v2.0.0", "inter.zip", &inter_download),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/inter.zip",
+    server.respond_bytes_with_gate(
+        &download_path("inter.zip"),
         zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        inter_download_gate.clone(),
+    );
+    let app = app_with_server(paths, &server);
+    let release_gate = tokio::task::spawn_blocking(move || {
+        source_code_pro_release_gate.wait_for_arrival();
+        inter_download_gate.wait_for_completion();
+        source_code_pro_release_gate.release();
+    });
+
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(
+                vec![package_id("source-code-pro"), package_id("inter")],
+                Some(2),
+            ),
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("plan updates");
+    release_gate
+        .await
+        .expect("gated response release should complete");
+
+    assert_eq!(
+        plan.prepared
+            .iter()
+            .map(|package| package.package_id.clone())
+            .collect::<Vec<_>>(),
+        vec![package_id("source-code-pro"), package_id("inter")]
+    );
+
+    let report = app
+        .apply_update(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("apply updates");
+    assert_eq!(
+        report
+            .updated
+            .iter()
+            .map(|package| package.package_id.clone())
+            .collect::<Vec<_>>(),
+        vec![package_id("source-code-pro"), package_id("inter")]
     );
 }
 
-#[test]
-fn update_apply_failure_preserves_old_version_activation_and_manifest() {
+fn seed_two_successful_updates(server: &LocalHttpServer, probe: Arc<ServerConcurrencyProbe>) {
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_with_probe(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_json("v2.0.0", "source-code-pro.zip", &source_code_pro_download),
+        probe.clone(),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let inter_download = server.url(&download_path("inter.zip"));
+    server.respond_with_probe(
+        &github_releases_path("rsms", "inter"),
+        github_release_json("v2.0.0", "inter.zip", &inter_download),
+        probe,
+    );
+    server.respond_bytes(
+        &download_path("inter.zip"),
+        zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
+    );
+}
+#[tokio::test]
+async fn update_apply_failure_preserves_old_version_activation_and_manifest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
     let old_store_path = paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -780,27 +827,18 @@ fn update_apply_failure_preserves_old_version_activation_and_manifest() {
         old_store_path
     );
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular-v2.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
     assert_eq!(plan.prepared.len(), 1);
 
@@ -812,8 +850,9 @@ fn update_apply_failure_preserves_old_version_activation_and_manifest() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports per-package failure");
 
     assert!(report.updated.is_empty());
@@ -841,8 +880,8 @@ fn update_apply_failure_preserves_old_version_activation_and_manifest() {
     );
 }
 
-#[test]
-fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_restores_old() {
+#[tokio::test]
+async fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_restores_old() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     install_github_source_code_pro_with_entries(
@@ -852,7 +891,8 @@ fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_re
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
             ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
         ],
-    );
+    )
+    .await;
     let old_regular_store_path = paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -868,30 +908,21 @@ fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_re
     let old_regular_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     let old_bold_activation_path = paths.activation_dir().join("SourceCodePro-Bold.ttf");
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-NewA.ttf", "SourceCodePro-Regular.ttf"),
             ("SourceCodePro-NewB.ttf", "SourceCodePro-Bold.ttf"),
         ]),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
     let partial_new_activation = paths.activation_dir().join("SourceCodePro-NewA.ttf");
     let conflict_path = paths.activation_dir().join("SourceCodePro-NewB.ttf");
@@ -902,8 +933,9 @@ fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_re
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports per-package failure");
 
     assert!(report.updated.is_empty());
@@ -937,8 +969,8 @@ fn update_apply_new_activation_mid_failure_removes_partial_new_activation_and_re
         .exists());
 }
 
-#[test]
-fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_activation() {
+#[tokio::test]
+async fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_activation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     install_github_source_code_pro_with_entries(
@@ -948,7 +980,8 @@ fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_act
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
             ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
         ],
-    );
+    )
+    .await;
     let old_regular_store_path = paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -964,30 +997,21 @@ fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_act
     let old_regular_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     let old_bold_activation_path = paths.activation_dir().join("SourceCodePro-Bold.ttf");
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-NewA.ttf", "SourceCodePro-Regular.ttf"),
             ("SourceCodePro-NewB.ttf", "SourceCodePro-Bold.ttf"),
         ]),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
     fs::remove_file(&old_bold_activation_path).expect("remove old bold activation");
     fs::write(&old_bold_activation_path, b"unmanaged").expect("replace old bold activation");
@@ -997,8 +1021,9 @@ fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_act
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports per-package failure");
 
     assert!(report.updated.is_empty());
@@ -1029,33 +1054,24 @@ fn update_apply_old_activation_deactivation_mid_failure_restores_removed_old_act
         .exists());
 }
 
-#[test]
-fn update_apply_copy_failure_removes_partial_new_package_store() {
+#[tokio::test]
+async fn update_apply_copy_failure_removes_partial_new_package_store() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
     fs::remove_file(first_staged_font_file(&paths.staging_dir()))
         .expect("remove staged font before apply");
@@ -1065,8 +1081,9 @@ fn update_apply_copy_failure_removes_partial_new_package_store() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports copy failure");
 
     assert!(report.updated.is_empty());
@@ -1088,33 +1105,25 @@ fn update_apply_copy_failure_removes_partial_new_package_store() {
     );
 }
 
-#[test]
-fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manifest_may_reference_them() {
+#[tokio::test]
+async fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manifest_may_reference_them(
+) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
 
     debug_fail_next_atomic_write(
@@ -1127,8 +1136,9 @@ fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manifest_may
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports manifest write failure");
 
     assert!(report.updated.is_empty());
@@ -1157,11 +1167,12 @@ fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manifest_may
     }
 }
 
-#[test]
-fn update_apply_manifest_write_not_committed_failure_restores_old_state_and_removes_new_store() {
+#[tokio::test]
+async fn update_apply_manifest_write_not_committed_failure_restores_old_state_and_removes_new_store(
+) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
     let old_store_path = paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -1170,27 +1181,18 @@ fn update_apply_manifest_write_not_committed_failure_restores_old_state_and_remo
         .join("files/SourceCodePro-Regular.ttf");
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
     debug_fail_next_atomic_write(
         &paths.manifest_path(),
@@ -1202,8 +1204,9 @@ fn update_apply_manifest_write_not_committed_failure_restores_old_state_and_remo
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply reports manifest write failure");
 
     assert!(report.updated.is_empty());
@@ -1233,37 +1236,29 @@ fn update_apply_manifest_write_not_committed_failure_restores_old_state_and_remo
         .exists());
 }
 
-#[test]
-fn update_apply_success_points_manifest_and_activation_to_new_version_and_removes_old_store() {
+#[tokio::test]
+async fn update_apply_success_points_manifest_and_activation_to_new_version_and_removes_old_store()
+{
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
     let old_store_dir = paths.package_store_dir(
         &package_id("source-code-pro"),
         &PackageVersion::new("v1.0.0"),
     );
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
 
     let report = app
@@ -1271,8 +1266,9 @@ fn update_apply_success_points_manifest_and_activation_to_new_version_and_remove
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply update");
 
     assert_eq!(report.updated.len(), 1);
@@ -1295,11 +1291,11 @@ fn update_apply_success_points_manifest_and_activation_to_new_version_and_remove
     assert!(!old_store_dir.exists());
 }
 
-#[test]
-fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
+#[tokio::test]
+async fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    install_github_source_code_pro(&paths, "v1.0.0");
+    install_github_source_code_pro(&paths, "v1.0.0").await;
     let old_store_path = paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -1308,27 +1304,18 @@ fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
         .join("files/SourceCodePro-Regular.ttf");
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        github_release_json(
-            "v2.0.0",
-            "source-code-pro.zip",
-            "https://downloads.example/source-code-pro-v2.zip",
-        ),
-    );
-    update_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-v2.zip",
+    let app = source_code_pro_update_app(
+        &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
             update_request(vec![package_id("source-code-pro")], Some(1)),
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan update");
 
     let report = app
@@ -1336,8 +1323,9 @@ fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
             plan,
             ExecutionPolicy::DryRun,
             &mut progress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("dry-run update");
 
     assert!(report.updated.is_empty());

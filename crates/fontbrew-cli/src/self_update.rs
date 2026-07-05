@@ -9,7 +9,7 @@ use std::{
 
 use flate2::read::GzDecoder;
 use fontbrew_core::{
-    fetch::{HttpClient, HttpHeader, HttpRequest, ReqwestHttpClient},
+    fetch::{HttpHeader, HttpRequest, NetworkClient},
     fs::GlobalFileLock,
     platform::FontbrewPaths,
     CancellationToken, FontbrewError,
@@ -123,71 +123,83 @@ enum PlannedAction {
     Reinstall,
 }
 
-pub fn run(
+pub async fn run(
     request: SelfUpdateRequest,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: std::sync::Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
-    let http_client = ReqwestHttpClient::try_new()?;
+    let network_client = NetworkClient::new()?;
 
-    run_with_http_client(request, &http_client, reporter, confirmer, cancellation)
+    run_with_network_client(request, &network_client, reporter, confirmer, cancellation).await
 }
 
-fn run_with_http_client(
+async fn run_with_network_client(
     request: SelfUpdateRequest,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: std::sync::Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
-    run_with_http_client_with_target_override(
+    run_with_network_client_with_target_override(
         request,
-        http_client,
+        network_client,
         reporter,
         confirmer,
         cancellation,
         None,
     )
+    .await
 }
 
 #[cfg(test)]
-fn run_with_http_client_for_target(
+async fn run_with_network_client_for_target(
     request: SelfUpdateRequest,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
+    github_api_base_url: &str,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
+    cancellation: std::sync::Arc<dyn CancellationToken>,
     target: &str,
 ) -> CliResult<()> {
-    run_with_http_client_with_target_override(
+    run_with_network_client_with_target_override(
         request,
-        http_client,
+        network_client,
         reporter,
         confirmer,
         cancellation,
-        Some(target),
+        SelfUpdateRunOverrides {
+            target: Some(target),
+            github_api_base_url,
+        },
     )
+    .await
 }
 
-fn run_with_http_client_with_target_override(
+async fn run_with_network_client_with_target_override(
     request: SelfUpdateRequest,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     reporter: &mut dyn Reporter,
     confirmer: &mut dyn Confirmer,
-    cancellation: &dyn CancellationToken,
-    target_override: Option<&str>,
+    cancellation: std::sync::Arc<dyn CancellationToken>,
+    overrides: impl Into<SelfUpdateRunOverrides<'_>>,
 ) -> CliResult<()> {
-    ensure_not_cancelled(cancellation)?;
-    let _lock = GlobalFileLock::try_exclusive(&request.lock_path)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let install_method = detect_install_method(&request.current_executable, home_dir().as_deref())?;
-    let target = match target_override {
+    let overrides = overrides.into();
+    let target = match overrides.target {
         Some(target) => target,
         None => current_target()?,
     };
     reporter.self_update_progress("Checking latest fontbrew release...")?;
-    let release = resolve_latest_release(http_client, &request.repo, target)?;
+    let release = resolve_latest_release(
+        network_client,
+        &request.repo,
+        overrides.github_api_base_url,
+        target,
+    )
+    .await?;
     let current_version = parse_current_version(&request.current_version)?;
     let action = planned_action(&current_version, &release.latest_version, request.force);
     let latest_version = release.latest_version.to_string();
@@ -228,78 +240,144 @@ fn run_with_http_client_with_target_override(
     )?;
 
     let staging_dir = create_staging_dir_for(&request.current_executable)?;
-    let result = install_release(
-        http_client,
-        &release,
-        target,
-        &request.current_executable,
-        &staging_dir,
-        reporter,
-        cancellation,
-    );
+    let result = async {
+        let prepared = prepare_release(
+            network_client,
+            &release,
+            target,
+            &staging_dir,
+            reporter,
+            cancellation.clone(),
+        )
+        .await?;
+        ensure_not_cancelled(cancellation.as_ref())?;
+        reporter.self_update_progress(&format!(
+            "Installing {}...",
+            request.current_executable.display()
+        ))?;
+        replace_prepared_release(&request, &release.latest_version, &prepared).await
+    }
+    .await;
     let _ = fs::remove_dir_all(&staging_dir);
-    result?;
-
-    let status = match action {
-        PlannedAction::Update => SelfUpdateStatus::Updated,
-        PlannedAction::Reinstall => SelfUpdateStatus::Reinstalled,
-        PlannedAction::SkipUpToDate | PlannedAction::SkipNewerCurrent => unreachable!(),
-    };
+    let locked_outcome = result?;
 
     reporter.render_self_update_report(SelfUpdateReport {
-        current_version: current_version.to_string(),
+        current_version: locked_outcome.current_version.to_string(),
         latest_version: latest_version.clone(),
         target_version: latest_version,
         executable_path: request.current_executable,
         install_method,
-        status,
+        status: locked_outcome.status,
         backup_path: None,
     })
 }
 
-fn install_release(
-    http_client: &dyn HttpClient,
+struct SelfUpdateRunOverrides<'a> {
+    target: Option<&'a str>,
+    github_api_base_url: &'a str,
+}
+
+impl<'a> From<Option<&'a str>> for SelfUpdateRunOverrides<'a> {
+    fn from(target: Option<&'a str>) -> Self {
+        Self {
+            target,
+            github_api_base_url: GITHUB_API_BASE_URL,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSelfUpdate {
+    new_binary_path: PathBuf,
+}
+
+struct PreparedReleaseInput {
+    archive_path: PathBuf,
+    checksum_path: PathBuf,
+    expected_archive_name: String,
+    target: String,
+    new_binary_path: PathBuf,
+}
+
+struct LockedReplaceInput {
+    current_executable: PathBuf,
+    lock_path: PathBuf,
+    force: bool,
+    latest_version: Version,
+    new_binary_path: PathBuf,
+}
+
+struct LockedReplaceOutcome {
+    current_version: Version,
+    status: SelfUpdateStatus,
+}
+
+async fn prepare_release(
+    network_client: &NetworkClient,
     release: &ReleaseSelection,
     target: &str,
-    current_executable: &Path,
     staging_dir: &Path,
     reporter: &mut dyn Reporter,
-    cancellation: &dyn CancellationToken,
-) -> CliResult<()> {
+    cancellation: std::sync::Arc<dyn CancellationToken>,
+) -> CliResult<PreparedSelfUpdate> {
     let archive_path = staging_dir.join(&release.archive_asset.name);
     let checksum_path = staging_dir.join(&release.checksum_asset.name);
     let new_binary_path = staging_dir.join("fontbrew.new");
 
     reporter.self_update_progress(&format!("Downloading {}...", release.archive_asset.name))?;
     download_asset(
-        http_client,
+        network_client,
         &release.archive_asset.browser_download_url,
         &archive_path,
-        cancellation,
-    )?;
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     reporter.self_update_progress(&format!("Downloading {}...", release.checksum_asset.name))?;
     download_asset(
-        http_client,
+        network_client,
         &release.checksum_asset.browser_download_url,
         &checksum_path,
-        cancellation,
-    )?;
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     reporter.self_update_progress("Verifying checksum...")?;
-    verify_checksum_file(&archive_path, &checksum_path, &release.archive_asset.name)?;
-
-    extract_expected_binary(&archive_path, target, &new_binary_path)?;
-    set_executable(&new_binary_path)?;
-    smoke_test_binary(&new_binary_path)?;
-
-    reporter.self_update_progress(&format!("Installing {}...", current_executable.display()))?;
-    replace_executable(current_executable, &new_binary_path)
+    ensure_not_cancelled(cancellation.as_ref())?;
+    prepare_release_blocking(PreparedReleaseInput {
+        archive_path,
+        checksum_path,
+        expected_archive_name: release.archive_asset.name.clone(),
+        target: target.to_string(),
+        new_binary_path,
+    })
+    .await
 }
 
-fn resolve_latest_release(
-    http_client: &dyn HttpClient,
+async fn prepare_release_blocking(input: PreparedReleaseInput) -> CliResult<PreparedSelfUpdate> {
+    spawn_self_update_blocking(move || {
+        verify_checksum_file(
+            &input.archive_path,
+            &input.checksum_path,
+            &input.expected_archive_name,
+        )?;
+        extract_expected_binary(&input.archive_path, &input.target, &input.new_binary_path)?;
+        set_executable(&input.new_binary_path)?;
+        smoke_test_binary(&input.new_binary_path)?;
+
+        Ok(PreparedSelfUpdate {
+            new_binary_path: input.new_binary_path,
+        })
+    })
+    .await
+}
+
+async fn resolve_latest_release(
+    network_client: &NetworkClient,
     repo: &str,
+    github_api_base_url: &str,
     target: &str,
 ) -> CliResult<ReleaseSelection> {
     let (owner, name) = repo
@@ -313,12 +391,17 @@ fn resolve_latest_release(
         });
     }
 
-    let url = format!("{GITHUB_API_BASE_URL}/repos/{owner}/{name}/releases");
-    let response = http_client.get(HttpRequest {
-        url: url.clone(),
-        display_url: None,
-        headers: github_headers(),
-    })?;
+    let url = format!(
+        "{}/repos/{owner}/{name}/releases",
+        github_api_base_url.trim_end_matches('/')
+    );
+    let response = network_client
+        .get(HttpRequest {
+            url: url.clone(),
+            display_url: None,
+            headers: github_headers(),
+        })
+        .await?;
     let body = successful_response_body(response.status, response.body, &url)?;
     let releases: Vec<GitHubRelease> =
         serde_json::from_slice(&body).map_err(|source| CliError::SelfUpdateInvalidRelease {
@@ -368,22 +451,24 @@ fn exact_release_asset(release: &GitHubRelease, name: &str) -> CliResult<GitHubR
         })
 }
 
-fn download_asset(
-    http_client: &dyn HttpClient,
+async fn download_asset(
+    network_client: &NetworkClient,
     url: &str,
     destination: &Path,
-    cancellation: &dyn CancellationToken,
+    cancellation: std::sync::Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
-    http_client.download_to_file(
-        HttpRequest {
-            url: url.to_string(),
-            display_url: None,
-            headers: github_headers(),
-        },
-        destination,
-        MAX_SELF_UPDATE_DOWNLOAD_BYTES,
-        cancellation,
-    )?;
+    network_client
+        .download_to_file(
+            HttpRequest {
+                url: url.to_string(),
+                display_url: None,
+                headers: github_headers(),
+            },
+            destination,
+            MAX_SELF_UPDATE_DOWNLOAD_BYTES,
+            cancellation,
+        )
+        .await?;
 
     Ok(())
 }
@@ -494,6 +579,67 @@ fn extract_expected_binary(archive_path: &Path, target: &str, destination: &Path
             expected_path.display()
         ),
     })
+}
+
+async fn replace_prepared_release(
+    request: &SelfUpdateRequest,
+    latest_version: &Version,
+    prepared: &PreparedSelfUpdate,
+) -> CliResult<LockedReplaceOutcome> {
+    replace_prepared_release_blocking(LockedReplaceInput {
+        current_executable: request.current_executable.clone(),
+        lock_path: request.lock_path.clone(),
+        force: request.force,
+        latest_version: latest_version.clone(),
+        new_binary_path: prepared.new_binary_path.clone(),
+    })
+    .await
+}
+
+async fn replace_prepared_release_blocking(
+    input: LockedReplaceInput,
+) -> CliResult<LockedReplaceOutcome> {
+    spawn_self_update_blocking(move || {
+        let _lock = GlobalFileLock::try_exclusive(&input.lock_path)?;
+        detect_install_method(&input.current_executable, home_dir().as_deref())?;
+        let locked_current_version = read_executable_version(&input.current_executable)?;
+        let action = planned_action(&locked_current_version, &input.latest_version, input.force);
+        let status = locked_replace_status(action);
+        match action {
+            PlannedAction::Update | PlannedAction::Reinstall => {
+                replace_executable(&input.current_executable, &input.new_binary_path)?;
+            }
+            PlannedAction::SkipUpToDate | PlannedAction::SkipNewerCurrent => {}
+        }
+
+        Ok(LockedReplaceOutcome {
+            current_version: locked_current_version,
+            status,
+        })
+    })
+    .await
+}
+
+fn locked_replace_status(action: PlannedAction) -> SelfUpdateStatus {
+    match action {
+        PlannedAction::Update => SelfUpdateStatus::Updated,
+        PlannedAction::Reinstall => SelfUpdateStatus::Reinstalled,
+        PlannedAction::SkipUpToDate => SelfUpdateStatus::UpToDate,
+        PlannedAction::SkipNewerCurrent => SelfUpdateStatus::SkippedNewerCurrent,
+    }
+}
+
+async fn spawn_self_update_blocking<T>(
+    work: impl FnOnce() -> CliResult<T> + Send + 'static,
+) -> CliResult<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|source| CliError::SelfUpdateFailed {
+            message: format!("self-update blocking task failed: {source}"),
+        })?
 }
 
 fn replace_executable(current_executable: &Path, new_binary_path: &Path) -> CliResult<()> {
@@ -626,6 +772,37 @@ fn backup_path_for(current_executable: &Path) -> CliResult<PathBuf> {
         "{file_name}.old-{timestamp}-{}",
         std::process::id()
     )))
+}
+
+fn read_executable_version(path: &Path) -> CliResult<Version> {
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|source| CliError::SelfUpdateFailed {
+            message: format!("could not run {} --version: {source}", path.display()),
+        })?;
+    if !output.status.success() {
+        return Err(CliError::SelfUpdateFailed {
+            message: format!(
+                "{} --version failed with status {}",
+                path.display(),
+                output.status
+            ),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout
+        .split_whitespace()
+        .find_map(|part| Version::parse(part.strip_prefix('v').unwrap_or(part)).ok())
+        .ok_or_else(|| CliError::SelfUpdateFailed {
+            message: format!(
+                "could not read current fontbrew version from {} --version output",
+                path.display()
+            ),
+        })?;
+
+    Ok(version)
 }
 
 fn smoke_test_binary(path: &Path) -> CliResult<()> {
@@ -961,10 +1138,13 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs::File,
-        sync::{Mutex, MutexGuard, OnceLock},
+        io::{BufRead, BufReader, Write},
+        net::{Shutdown, TcpListener},
+        sync::{Arc, Mutex, OnceLock},
+        thread,
     };
 
-    use fontbrew_core::{fetch::HttpResponse, Result as CoreResult};
+    use fontbrew_core::fetch::NetworkClient;
     use tempfile::TempDir;
 
     use super::*;
@@ -978,59 +1158,113 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FakeHttpClient {
-        responses: Mutex<BTreeMap<String, HttpResponse>>,
-        downloads: Mutex<BTreeMap<String, Vec<u8>>>,
+    struct CancelWhenPreparedBinaryExists {
+        root: PathBuf,
     }
 
-    impl FakeHttpClient {
-        fn respond(&self, url: &str, body: &str) {
-            self.responses.lock().unwrap().insert(
-                url.to_string(),
-                HttpResponse {
-                    status: 200,
-                    body: body.as_bytes().to_vec(),
-                },
-            );
-        }
-
-        fn download(&self, url: &str, bytes: Vec<u8>) {
-            self.downloads
-                .lock()
-                .unwrap()
-                .insert(url.to_string(), bytes);
-        }
-    }
-
-    impl HttpClient for FakeHttpClient {
-        fn get(&self, request: HttpRequest) -> CoreResult<HttpResponse> {
-            self.responses
-                .lock()
-                .unwrap()
-                .remove(&request.url)
-                .ok_or_else(|| FontbrewError::Network {
-                    message: format!("no fake response for {}", request.url),
+    impl CancellationToken for CancelWhenPreparedBinaryExists {
+        fn is_cancelled(&self) -> bool {
+            fs::read_dir(&self.root).is_ok_and(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    let path = entry.path();
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(".fontbrew-update-"))
+                        && path.join("fontbrew.new").exists()
                 })
+            })
+        }
+    }
+
+    struct TestHttpServer {
+        base_url: String,
+        routes: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestHttpServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind self-update test server");
+            let base_url = format!(
+                "http://{}",
+                listener
+                    .local_addr()
+                    .expect("self-update test server address")
+            );
+            let routes = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
+            let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+            let server_routes = routes.clone();
+            let server_requests = requests.clone();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.expect("accept self-update request");
+                    let routes = server_routes.clone();
+                    let requests = server_requests.clone();
+                    thread::spawn(move || {
+                        let mut reader =
+                            BufReader::new(stream.try_clone().expect("clone request stream"));
+                        let mut request_line = String::new();
+                        reader.read_line(&mut request_line).expect("read request");
+                        let path = request_line
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("/")
+                            .to_string();
+                        loop {
+                            let mut line = String::new();
+                            let read = reader.read_line(&mut line).expect("read request header");
+                            if read == 0 || line == "\r\n" {
+                                break;
+                            }
+                        }
+                        requests.lock().expect("requests lock").push(request_line);
+                        let body = routes
+                            .lock()
+                            .expect("routes lock")
+                            .get(&path)
+                            .cloned()
+                            .unwrap_or_else(|| panic!("no test response for {path}"));
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .expect("write response headers");
+                        stream.write_all(&body).expect("write response body");
+                        stream.flush().expect("flush response");
+                        stream.shutdown(Shutdown::Write).expect("shutdown response");
+                    });
+                }
+            });
+
+            Self {
+                base_url,
+                routes,
+                requests,
+            }
         }
 
-        fn download_to_file(
-            &self,
-            request: HttpRequest,
-            destination: &Path,
-            _max_bytes: u64,
-            _cancellation: &dyn CancellationToken,
-        ) -> CoreResult<u64> {
-            let bytes = self
-                .downloads
+        fn url(&self, path: &str) -> String {
+            format!("{}{}", self.base_url, path)
+        }
+
+        fn respond_text(&self, path: &str, body: impl Into<String>) {
+            self.respond_bytes(path, body.into().into_bytes());
+        }
+
+        fn respond_bytes(&self, path: &str, bytes: Vec<u8>) {
+            self.routes
                 .lock()
-                .unwrap()
-                .remove(&request.url)
-                .ok_or_else(|| FontbrewError::Network {
-                    message: format!("no fake download for {}", request.url),
-                })?;
-            fs::write(destination, &bytes)?;
-            Ok(bytes.len() as u64)
+                .expect("routes lock")
+                .insert(path.to_string(), bytes);
+        }
+
+        fn network_client(&self) -> NetworkClient {
+            NetworkClient::new().expect("network client")
+        }
+
+        fn request_lines(&self) -> Vec<String> {
+            self.requests.lock().expect("requests lock").clone()
         }
     }
 
@@ -1152,11 +1386,11 @@ mod tests {
         assert_eq!(error.kind(), "self_update_checksum_mismatch");
     }
 
-    #[test]
-    fn release_asset_contract_selects_target_archive_and_checksum() {
-        let http = FakeHttpClient::default();
-        http.respond(
-            "https://api.github.com/repos/yyyanghj/fontbrew/releases",
+    #[tokio::test]
+    async fn release_asset_contract_selects_target_archive_and_checksum() {
+        let server = TestHttpServer::start();
+        server.respond_text(
+            "/repos/yyyanghj/fontbrew/releases",
             r#"[
               {"tag_name":"v0.1.2","draft":false,"prerelease":false,"assets":[
                 {"name":"fontbrew-aarch64-apple-darwin.tar.gz","browser_download_url":"https://downloads.example/archive"},
@@ -1164,9 +1398,16 @@ mod tests {
               ]}
             ]"#,
         );
+        let client = server.network_client();
 
-        let release = resolve_latest_release(&http, "yyyanghj/fontbrew", "aarch64-apple-darwin")
-            .expect("resolve release");
+        let release = resolve_latest_release(
+            &client,
+            "yyyanghj/fontbrew",
+            &server.base_url,
+            "aarch64-apple-darwin",
+        )
+        .await
+        .expect("resolve release");
 
         assert_eq!(release.latest_version, Version::parse("0.1.2").unwrap());
         assert_eq!(
@@ -1177,20 +1418,30 @@ mod tests {
             release.checksum_asset.name,
             "fontbrew-aarch64-apple-darwin.tar.gz.sha256"
         );
+        assert!(
+            server.request_lines()[0].starts_with("GET /repos/yyyanghj/fontbrew/releases HTTP/1.1")
+        );
     }
 
-    #[test]
-    fn release_asset_contract_rejects_missing_target_asset() {
-        let http = FakeHttpClient::default();
-        http.respond(
-            "https://api.github.com/repos/yyyanghj/fontbrew/releases",
+    #[tokio::test]
+    async fn release_asset_contract_rejects_missing_target_asset() {
+        let server = TestHttpServer::start();
+        server.respond_text(
+            "/repos/yyyanghj/fontbrew/releases",
             r#"[
               {"tag_name":"v0.1.2","draft":false,"prerelease":false,"assets":[]}
             ]"#,
         );
+        let client = server.network_client();
 
-        let error = resolve_latest_release(&http, "yyyanghj/fontbrew", "aarch64-apple-darwin")
-            .expect_err("missing asset should fail");
+        let error = resolve_latest_release(
+            &client,
+            "yyyanghj/fontbrew",
+            &server.base_url,
+            "aarch64-apple-darwin",
+        )
+        .await
+        .expect_err("missing asset should fail");
 
         assert_eq!(error.kind(), "self_update_invalid_release");
         assert!(error.message().contains("missing required asset"));
@@ -1338,43 +1589,44 @@ mod tests {
         assert!(String::from_utf8_lossy(&output.stdout).contains("old"));
     }
 
-    #[test]
-    fn install_release_downloads_verifies_extracts_and_replaces() {
-        let _guard = replacement_test_guard();
+    #[tokio::test]
+    async fn prepare_release_downloads_verifies_extracts_and_replaces() {
+        let _guard = replacement_test_guard_async().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let current = write_script(&temp, "fontbrew", "old");
         let staging = create_staging_dir_for(&current).expect("create staging dir");
         let archive_bytes = archive_with_fontbrew_binary("aarch64-apple-darwin");
         let checksum = sha256_bytes(&archive_bytes);
-        let http = FakeHttpClient::default();
-        http.download("https://downloads.example/archive", archive_bytes);
-        http.download(
-            "https://downloads.example/checksum",
+        let server = TestHttpServer::start();
+        server.respond_bytes("/archive", archive_bytes);
+        server.respond_bytes(
+            "/checksum",
             format!("{checksum}  fontbrew-aarch64-apple-darwin.tar.gz\n").into_bytes(),
         );
         let release = ReleaseSelection {
             latest_version: Version::parse("0.1.2").unwrap(),
             archive_asset: GitHubReleaseAsset {
                 name: "fontbrew-aarch64-apple-darwin.tar.gz".to_string(),
-                browser_download_url: "https://downloads.example/archive".to_string(),
+                browser_download_url: server.url("/archive"),
             },
             checksum_asset: GitHubReleaseAsset {
                 name: "fontbrew-aarch64-apple-darwin.tar.gz.sha256".to_string(),
-                browser_download_url: "https://downloads.example/checksum".to_string(),
+                browser_download_url: server.url("/checksum"),
             },
         };
         let mut reporter = TestReporter::default();
 
-        install_release(
-            &http,
+        let prepared = prepare_release(
+            &server.network_client(),
             &release,
             "aarch64-apple-darwin",
-            &current,
             &staging,
             &mut reporter,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("install release");
+        replace_executable(&current, &prepared.new_binary_path).expect("replace executable");
 
         let output = Command::new(&current)
             .arg("--version")
@@ -1387,16 +1639,16 @@ mod tests {
             .any(|line| line.contains("Verifying checksum")));
     }
 
-    #[test]
-    fn run_dry_run_reports_planned_update_without_prompting_or_downloading() {
+    #[tokio::test]
+    async fn run_dry_run_reports_planned_update_without_prompting_or_downloading() {
         let temp = tempfile::tempdir().expect("tempdir");
         let current = write_script(&temp, "fontbrew", "0.1.1");
-        let http = FakeHttpClient::default();
-        respond_with_release(&http, "v0.1.2");
+        let server = TestHttpServer::start();
+        respond_with_release(&server, "v0.1.2");
         let mut reporter = TestReporter::default();
         let mut confirmer = TestConfirmer::default();
 
-        run_with_http_client_for_target(
+        run_with_network_client_for_target(
             SelfUpdateRequest {
                 dry_run: true,
                 assume_yes: false,
@@ -1406,12 +1658,14 @@ mod tests {
                 lock_path: temp.path().join("self-update.lock"),
                 repo: DEFAULT_FONTBREW_REPO.to_string(),
             },
-            &http,
+            &server.network_client(),
+            &server.base_url,
             &mut reporter,
             &mut confirmer,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
             "aarch64-apple-darwin",
         )
+        .await
         .expect("dry-run self-update");
 
         assert!(!confirmer.prompted);
@@ -1423,16 +1677,142 @@ mod tests {
         assert_eq!(report.executable_path, current);
     }
 
-    #[test]
-    fn run_up_to_date_reports_without_prompting_or_downloading() {
+    #[tokio::test]
+    async fn run_dry_run_fetches_release_without_taking_self_update_lock() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let current = write_script(&temp, "fontbrew", "0.1.2");
-        let http = FakeHttpClient::default();
-        respond_with_release(&http, "v0.1.2");
+        let current = write_script(&temp, "fontbrew", "0.1.1");
+        let server = TestHttpServer::start();
+        respond_with_release(&server, "v0.1.2");
+        let lock_path = temp.path().join("self-update.lock");
+        let _held_lock = GlobalFileLock::try_exclusive(&lock_path).expect("hold self-update lock");
         let mut reporter = TestReporter::default();
         let mut confirmer = TestConfirmer::default();
 
-        run_with_http_client_for_target(
+        run_with_network_client_for_target(
+            SelfUpdateRequest {
+                dry_run: true,
+                assume_yes: false,
+                force: false,
+                current_executable: current,
+                current_version: "0.1.1".to_string(),
+                lock_path,
+                repo: DEFAULT_FONTBREW_REPO.to_string(),
+            },
+            &server.network_client(),
+            &server.base_url,
+            &mut reporter,
+            &mut confirmer,
+            Arc::new(NeverCancelled),
+            "aarch64-apple-darwin",
+        )
+        .await
+        .expect("dry-run self-update should not take replacement lock");
+
+        assert_eq!(
+            reporter.self_update_reports[0].status,
+            SelfUpdateStatus::Planned
+        );
+        assert_eq!(server.request_lines().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_blocking_prepare_prevents_locked_replace_and_cleans_staging() {
+        let _guard = replacement_test_guard_async().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = write_script(&temp, "fontbrew", "0.1.1");
+        let archive_bytes = archive_with_fontbrew_binary("aarch64-apple-darwin");
+        let checksum = sha256_bytes(&archive_bytes);
+        let server = TestHttpServer::start();
+        respond_with_release(&server, "v0.1.2");
+        server.respond_bytes("/archive", archive_bytes);
+        server.respond_bytes(
+            "/checksum",
+            format!("{checksum}  fontbrew-aarch64-apple-darwin.tar.gz\n").into_bytes(),
+        );
+        let mut reporter = TestReporter::default();
+        let mut confirmer = TestConfirmer::default();
+
+        let error = run_with_network_client_for_target(
+            SelfUpdateRequest {
+                dry_run: false,
+                assume_yes: true,
+                force: false,
+                current_executable: current.clone(),
+                current_version: "0.1.1".to_string(),
+                lock_path: temp.path().join("self-update.lock"),
+                repo: DEFAULT_FONTBREW_REPO.to_string(),
+            },
+            &server.network_client(),
+            &server.base_url,
+            &mut reporter,
+            &mut confirmer,
+            Arc::new(CancelWhenPreparedBinaryExists {
+                root: temp.path().to_path_buf(),
+            }),
+            "aarch64-apple-darwin",
+        )
+        .await
+        .expect_err("post-prepare cancellation should stop replacement");
+
+        assert_eq!(error.kind(), "cancelled");
+        let output = Command::new(&current)
+            .arg("--version")
+            .output()
+            .expect("run current executable");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("0.1.1"));
+        assert!(fs::read_dir(temp.path())
+            .expect("read temp dir")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".fontbrew-update-")));
+    }
+
+    #[tokio::test]
+    async fn locked_replace_revalidates_current_version_before_replacing() {
+        let _guard = replacement_test_guard_async().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = write_script(&temp, "fontbrew", "0.1.2");
+        let new_binary = write_script(&temp, "fontbrew.new", "0.1.3");
+
+        let outcome = replace_prepared_release(
+            &SelfUpdateRequest {
+                dry_run: false,
+                assume_yes: true,
+                force: false,
+                current_executable: current.clone(),
+                current_version: "0.1.1".to_string(),
+                lock_path: temp.path().join("self-update.lock"),
+                repo: DEFAULT_FONTBREW_REPO.to_string(),
+            },
+            &Version::parse("0.1.2").unwrap(),
+            &PreparedSelfUpdate {
+                new_binary_path: new_binary.clone(),
+            },
+        )
+        .await
+        .expect("locked replace revalidates current version");
+
+        assert_eq!(outcome.status, SelfUpdateStatus::UpToDate);
+        let output = Command::new(&current)
+            .arg("--version")
+            .output()
+            .expect("run current executable");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("0.1.2"));
+        assert!(new_binary.exists());
+    }
+
+    #[tokio::test]
+    async fn run_up_to_date_reports_without_prompting_or_downloading() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = write_script(&temp, "fontbrew", "0.1.2");
+        let server = TestHttpServer::start();
+        respond_with_release(&server, "v0.1.2");
+        let mut reporter = TestReporter::default();
+        let mut confirmer = TestConfirmer::default();
+
+        run_with_network_client_for_target(
             SelfUpdateRequest {
                 dry_run: false,
                 assume_yes: false,
@@ -1442,12 +1822,14 @@ mod tests {
                 lock_path: temp.path().join("self-update.lock"),
                 repo: DEFAULT_FONTBREW_REPO.to_string(),
             },
-            &http,
+            &server.network_client(),
+            &server.base_url,
             &mut reporter,
             &mut confirmer,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
             "aarch64-apple-darwin",
         )
+        .await
         .expect("up-to-date self-update");
 
         assert!(!confirmer.prompted);
@@ -1604,18 +1986,22 @@ mod tests {
         bytes
     }
 
-    fn respond_with_release(http: &FakeHttpClient, tag_name: &str) {
-        http.respond(
-            "https://api.github.com/repos/yyyanghj/fontbrew/releases",
-            &format!(
+    fn respond_with_release(server: &TestHttpServer, tag_name: &str) {
+        server.respond_text(
+            "/repos/yyyanghj/fontbrew/releases",
+            format!(
                 r#"[
                   {{"tag_name":"{tag_name}","draft":false,"prerelease":false,"assets":[
-                    {{"name":"fontbrew-aarch64-apple-darwin.tar.gz","browser_download_url":"https://downloads.example/archive"}},
-                    {{"name":"fontbrew-aarch64-apple-darwin.tar.gz.sha256","browser_download_url":"https://downloads.example/checksum"}},
-                    {{"name":"fontbrew-x86_64-apple-darwin.tar.gz","browser_download_url":"https://downloads.example/archive-x86_64"}},
-                    {{"name":"fontbrew-x86_64-apple-darwin.tar.gz.sha256","browser_download_url":"https://downloads.example/checksum-x86_64"}}
+                    {{"name":"fontbrew-aarch64-apple-darwin.tar.gz","browser_download_url":"{}"}},
+                    {{"name":"fontbrew-aarch64-apple-darwin.tar.gz.sha256","browser_download_url":"{}"}},
+                    {{"name":"fontbrew-x86_64-apple-darwin.tar.gz","browser_download_url":"{}"}},
+                    {{"name":"fontbrew-x86_64-apple-darwin.tar.gz.sha256","browser_download_url":"{}"}}
                   ]}}
-                ]"#
+                ]"#,
+                server.url("/archive"),
+                server.url("/checksum"),
+                server.url("/archive-x86_64"),
+                server.url("/checksum-x86_64"),
             ),
         );
     }
@@ -1636,10 +2022,16 @@ mod tests {
         assert!(!has_backup);
     }
 
-    fn replacement_test_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn replacement_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        replacement_test_lock().blocking_lock()
+    }
+
+    async fn replacement_test_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+        replacement_test_lock().lock().await
+    }
+
+    fn replacement_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 }

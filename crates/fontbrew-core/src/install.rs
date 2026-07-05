@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,7 +16,7 @@ use crate::{
     archives::{ArchiveExtractionOptions, ExtractedFontFile, ZipArchiveExtractor},
     config::{dedupe_formats, font_format_label, FontbrewConfig},
     error::{FontbrewError, Result},
-    fetch::HttpClient,
+    fetch::NetworkClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
     fs::{ensure_existing_path_does_not_cross_symlink, GlobalFileLock},
     github,
@@ -115,17 +118,17 @@ pub(crate) fn ensure_package_id_override_allowed_for_source(
     Ok(())
 }
 
-pub fn github_repo_install_plan(
+pub async fn github_repo_install_plan(
     paths: &FontbrewPaths,
     repo: GitHubRepo,
     request: InstallRequest,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<InstallPlan> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let has_selected_families = !request.selected_families.is_empty();
     let options = RemoteInstallOptions::from_request(request)?;
@@ -165,25 +168,26 @@ pub fn github_repo_install_plan(
         },
         options,
         progress,
-        http_client,
-        cancellation,
-    )?;
-    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
 }
 
-pub fn fontsource_install_plan(
+pub async fn fontsource_install_plan(
     paths: &FontbrewPaths,
     provider_id: String,
     request: InstallRequest,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<InstallPlan> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let options = RemoteInstallOptions::from_request(request)?;
     let package_id = PackageId::parse(&provider_id)?;
@@ -210,17 +214,19 @@ pub fn fontsource_install_plan(
     progress.emit(ProgressEvent::ResolvingSource {
         source: format!("fontsource:{provider_id}"),
     });
-    let resolved =
-        FontsourceProvider::new(paths, http_client).resolve_install_package(&provider_id)?;
+    let resolved = FontsourceProvider::new(paths, network_client)
+        .resolve_install_package(&provider_id)
+        .await?;
     let prepared = prepare_provider_package(
         paths,
         resolved,
         options,
         progress,
-        http_client,
-        cancellation,
-    )?;
-    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
 
     install_plan_from_prepared(paths, prepared)
 }
@@ -832,20 +838,20 @@ impl Drop for StagingCleanupGuard {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_github_release_archive(
+async fn prepare_github_release_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let result = download_and_parse_github_archive(
         paths,
         repo,
@@ -853,10 +859,11 @@ fn prepare_github_release_archive(
         source,
         options,
         progress,
-        http_client,
+        network_client,
         staging_cleanup.path().to_path_buf(),
-        cancellation,
-    );
+        cancellation.clone(),
+    )
+    .await;
 
     if result.is_ok() {
         staging_cleanup.disarm();
@@ -865,27 +872,28 @@ fn prepare_github_release_archive(
     result
 }
 
-fn prepare_provider_package(
+async fn prepare_provider_package(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let result = download_and_parse_provider_fonts(
         paths,
         resolved,
         options,
         progress,
-        http_client,
+        network_client,
         staging_cleanup.path().to_path_buf(),
-        cancellation,
-    );
+        cancellation.clone(),
+    )
+    .await;
 
     if result.is_ok() {
         staging_cleanup.disarm();
@@ -894,12 +902,12 @@ fn prepare_provider_package(
     result
 }
 
-pub(crate) fn prepare_resolved_provider_package(
+pub(crate) async fn prepare_resolved_provider_package(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
     let mut progress = NoProgress;
     prepare_provider_package(
@@ -907,22 +915,23 @@ pub(crate) fn prepare_resolved_provider_package(
         resolved,
         options,
         &mut progress,
-        http_client,
+        network_client,
         cancellation,
     )
+    .await
 }
 
-fn download_and_parse_provider_fonts(
+async fn download_and_parse_provider_fonts(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     staging_dir: PathBuf,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     fs::create_dir_all(&staging_dir)?;
 
     if resolved.assets.len() > MAX_PROVIDER_FONT_FILES {
@@ -941,15 +950,17 @@ fn download_and_parse_provider_fonts(
         bytes: None,
     });
     for asset in &resolved.assets {
-        ensure_not_cancelled(cancellation)?;
+        ensure_not_cancelled(cancellation.as_ref())?;
         let destination = staging_dir.join(&asset.file_name);
         ensure_path_inside(&staging_dir, &destination)?;
-        let downloaded = http_client.download_to_file(
-            providers::provider_asset_request(&asset.url),
-            &destination,
-            MAX_PROVIDER_FONT_DOWNLOAD_BYTES,
-            cancellation,
-        )?;
+        let downloaded = network_client
+            .download_to_file(
+                providers::provider_asset_request(&asset.url),
+                &destination,
+                MAX_PROVIDER_FONT_DOWNLOAD_BYTES,
+                cancellation.clone(),
+            )
+            .await?;
         total_downloaded = total_downloaded.checked_add(downloaded).ok_or_else(|| {
             FontbrewError::ArchiveRejected {
                 reason: format!(
@@ -978,50 +989,58 @@ fn download_and_parse_provider_fonts(
         });
     }
 
-    progress.emit(ProgressEvent::ParsingFonts {
-        package_id: resolved.package_id.clone(),
-    });
-    parse_staged_font_files(
-        paths,
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let (result, events) = parse_staged_provider_fonts_blocking(RemoteFontParseInput {
+        paths: paths.clone(),
         staged_fonts,
         staging_dir,
-        resolved.version,
-        PreparedInstallSource::Provider {
+        version: resolved.version,
+        source: PreparedInstallSource::Provider {
             provider: resolved.provider,
             id: resolved.provider_id,
         },
-        Some(resolved.package_id),
-        options.reinstall,
-        ArchiveFormatPreference {
+        package_id_hint: Some(resolved.package_id),
+        reinstall: options.reinstall,
+        archive_format_preference: ArchiveFormatPreference {
             explicit_format_preference: options.explicit_format_preference,
         },
-        options.family_boundary,
-        cancellation,
-    )
+        family_boundary: options.family_boundary,
+        cancellation: cancellation.clone(),
+    })
+    .await?;
+    replay_progress(progress, events);
+    match result {
+        Ok(prepared) => {
+            ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
+            Ok(prepared)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn download_and_parse_github_archive(
+async fn download_and_parse_github_archive(
     paths: &FontbrewPaths,
     repo: &GitHubRepo,
     fallback_package_id: PackageId,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     staging_dir: PathBuf,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let asset = github::resolve_release_asset(
-        http_client,
+        network_client,
         repo,
         options.asset_selector.as_deref(),
         &fallback_package_id,
-    )?;
-    ensure_not_cancelled(cancellation)?;
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     download_and_parse_resolved_github_archive(
         paths,
@@ -1029,35 +1048,37 @@ fn download_and_parse_github_archive(
         source,
         options,
         progress,
-        http_client,
+        network_client,
         staging_dir,
         cancellation,
     )
+    .await
 }
 
-pub(crate) fn prepare_resolved_github_release_archive(
+pub(crate) async fn prepare_resolved_github_release_archive(
     paths: &FontbrewPaths,
     asset: github::ResolvedGitHubAsset,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
     let mut progress = NoProgress;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     let result = download_and_parse_resolved_github_archive(
         paths,
         asset,
         source,
         options,
         &mut progress,
-        http_client,
+        network_client,
         staging_cleanup.path().to_path_buf(),
-        cancellation,
-    );
+        cancellation.clone(),
+    )
+    .await;
 
     if result.is_ok() {
         staging_cleanup.disarm();
@@ -1067,17 +1088,17 @@ pub(crate) fn prepare_resolved_github_release_archive(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn download_and_parse_resolved_github_archive(
+async fn download_and_parse_resolved_github_archive(
     paths: &FontbrewPaths,
     asset: github::ResolvedGitHubAsset,
     source: PreparedInstallSource,
     options: RemoteInstallOptions,
     progress: &mut dyn ProgressSink,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     staging_dir: PathBuf,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     fs::create_dir_all(&staging_dir)?;
     let archive_path = staging_dir.join("download.zip");
     if let Some(package_id) = &options.package_id {
@@ -1087,28 +1108,137 @@ fn download_and_parse_resolved_github_archive(
         });
     }
     github::download_release_asset_to_file(
-        http_client,
+        network_client,
         &asset.download_url,
         &archive_path,
-        cancellation,
-    )?;
-    ensure_not_cancelled(cancellation)?;
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
-    extract_and_parse_archive(
-        paths,
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let (result, events) = extract_and_parse_archive_blocking(RemoteArchiveParseInput {
+        paths: paths.clone(),
         archive_path,
         staging_dir,
-        asset.version,
+        version: asset.version,
         source,
-        options.package_id,
-        options.reinstall,
-        ArchiveFormatPreference {
+        package_id_hint: options.package_id,
+        reinstall: options.reinstall,
+        archive_format_preference: ArchiveFormatPreference {
             explicit_format_preference: options.explicit_format_preference,
         },
-        options.family_boundary,
-        progress,
-        cancellation,
-    )
+        family_boundary: options.family_boundary,
+        cancellation: cancellation.clone(),
+    })
+    .await?;
+    replay_progress(progress, events);
+    match result {
+        Ok(prepared) => {
+            ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
+            Ok(prepared)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+struct RemoteArchiveParseInput {
+    paths: FontbrewPaths,
+    archive_path: PathBuf,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    package_id_hint: Option<PackageId>,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    family_boundary: Option<InstallFamilyBoundary>,
+    cancellation: Arc<dyn CancellationToken>,
+}
+
+struct RemoteFontParseInput {
+    paths: FontbrewPaths,
+    staged_fonts: Vec<ExtractedFontFile>,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    package_id_hint: Option<PackageId>,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    family_boundary: Option<InstallFamilyBoundary>,
+    cancellation: Arc<dyn CancellationToken>,
+}
+
+#[derive(Default)]
+struct RecordingProgressSink {
+    events: Vec<ProgressEvent>,
+}
+
+impl ProgressSink for RecordingProgressSink {
+    fn emit(&mut self, event: ProgressEvent) {
+        self.events.push(event);
+    }
+}
+
+fn replay_progress(progress: &mut dyn ProgressSink, events: Vec<ProgressEvent>) {
+    for event in events {
+        progress.emit(event);
+    }
+}
+
+async fn extract_and_parse_archive_blocking(
+    input: RemoteArchiveParseInput,
+) -> Result<(Result<PreparedInstallPackage>, Vec<ProgressEvent>)> {
+    tokio::task::spawn_blocking(move || {
+        let mut progress = RecordingProgressSink::default();
+        let result = extract_and_parse_archive(
+            &input.paths,
+            input.archive_path,
+            input.staging_dir,
+            input.version,
+            input.source,
+            input.package_id_hint,
+            input.reinstall,
+            input.archive_format_preference,
+            input.family_boundary,
+            &mut progress,
+            input.cancellation.as_ref(),
+        );
+        Ok((result, progress.events))
+    })
+    .await
+    .map_err(blocking_join_error)?
+}
+
+async fn parse_staged_provider_fonts_blocking(
+    input: RemoteFontParseInput,
+) -> Result<(Result<PreparedInstallPackage>, Vec<ProgressEvent>)> {
+    tokio::task::spawn_blocking(move || {
+        let mut progress = RecordingProgressSink::default();
+        if let Some(package_id) = &input.package_id_hint {
+            progress.emit(ProgressEvent::ParsingFonts {
+                package_id: package_id.clone(),
+            });
+        }
+        let result = parse_staged_font_files(
+            &input.paths,
+            input.staged_fonts,
+            input.staging_dir,
+            input.version,
+            input.source,
+            input.package_id_hint,
+            input.reinstall,
+            input.archive_format_preference,
+            input.family_boundary,
+            input.cancellation.as_ref(),
+        );
+        Ok((result, progress.events))
+    })
+    .await
+    .map_err(blocking_join_error)?
+}
+
+fn blocking_join_error(error: tokio::task::JoinError) -> FontbrewError {
+    FontbrewError::Io(std::io::Error::other(error.to_string()))
 }
 
 #[allow(clippy::too_many_arguments)]

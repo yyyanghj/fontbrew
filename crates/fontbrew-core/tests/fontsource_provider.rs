@@ -1,20 +1,24 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File, FileTimes},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use fontbrew_core::{
-    fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FontbrewApp, FontbrewError, InfoRequest, InstallRequest,
     InstallSource, OutdatedRequest, PackageId, ProgressEvent, ProgressSink, ProviderKind,
     SearchRequest, UpdateRequest,
 };
+
+mod support;
+
+use support::LocalHttpServer;
+
+static FONTSOURCE_HTTP_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct NoProgress;
 
@@ -41,133 +45,6 @@ impl CancellationToken for NeverCancelled {
     }
 }
 
-#[derive(Default)]
-struct FakeHttpClient {
-    routes: Mutex<BTreeMap<String, HttpResponse>>,
-    download_routes: Mutex<BTreeMap<String, Vec<u8>>>,
-    fail_gets_with_transport_error: Mutex<bool>,
-    requests: Mutex<Vec<HttpRequest>>,
-    download_targets: Mutex<Vec<PathBuf>>,
-}
-
-impl FakeHttpClient {
-    fn with_text(&self, url: &str, body: impl Into<String>) {
-        self.with_status(url, 200, body);
-    }
-
-    fn with_status(&self, url: &str, status: u16, body: impl Into<String>) {
-        self.routes.lock().expect("routes lock").insert(
-            url.to_string(),
-            HttpResponse {
-                status,
-                body: body.into().into_bytes(),
-            },
-        );
-    }
-
-    fn with_download_bytes(&self, url: &str, body: Vec<u8>) {
-        self.download_routes
-            .lock()
-            .expect("download routes lock")
-            .insert(url.to_string(), body);
-    }
-
-    fn fail_gets_with_transport_error(&self) {
-        *self
-            .fail_gets_with_transport_error
-            .lock()
-            .expect("fail gets lock") = true;
-    }
-
-    fn requested_urls(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .iter()
-            .map(|request| request.url.clone())
-            .collect()
-    }
-
-    fn download_targets(&self) -> Vec<PathBuf> {
-        self.download_targets
-            .lock()
-            .expect("download targets lock")
-            .clone()
-    }
-}
-
-impl HttpClient for FakeHttpClient {
-    fn get(&self, request: HttpRequest) -> fontbrew_core::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.clone());
-        if *self
-            .fail_gets_with_transport_error
-            .lock()
-            .expect("fail gets lock")
-        {
-            return Err(FontbrewError::Network {
-                message: format!(
-                    "could not fetch {}: simulated transport failure",
-                    request.display_url()
-                ),
-            });
-        }
-
-        let body = self
-            .routes
-            .lock()
-            .expect("routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP request: {}", request.url));
-
-        Ok(body)
-    }
-
-    fn download_to_file(
-        &self,
-        request: HttpRequest,
-        destination: &Path,
-        max_bytes: u64,
-        _cancellation: &dyn CancellationToken,
-    ) -> fontbrew_core::Result<u64> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.clone());
-        let body = self
-            .download_routes
-            .lock()
-            .expect("download routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP download request: {}", request.url));
-
-        if body.len() as u64 > max_bytes {
-            return Err(FontbrewError::ArchiveRejected {
-                reason: format!(
-                    "download exceeds maximum size of {max_bytes} bytes: {}",
-                    request.url
-                ),
-            });
-        }
-
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).expect("create download parent");
-        }
-        let mut file = File::create(destination).expect("create download destination");
-        file.write_all(&body).expect("write fake download");
-        self.download_targets
-            .lock()
-            .expect("download targets lock")
-            .push(destination.to_path_buf());
-
-        Ok(body.len() as u64)
-    }
-}
-
 fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     FontbrewPaths::for_tests(
         temp.path().join("data"),
@@ -190,12 +67,42 @@ fn fixture_font_bytes(filename: &str) -> Vec<u8> {
     bytes
 }
 
-fn fontsource_list_url() -> String {
-    "https://api.fontsource.org/v1/fonts".to_string()
+fn fontsource_list_path() -> String {
+    "/fonts".to_string()
 }
 
-fn fontsource_detail_url(id: &str) -> String {
-    format!("https://api.fontsource.org/v1/fonts/{id}")
+fn fontsource_detail_path(id: &str) -> String {
+    format!("/fonts/{id}")
+}
+
+fn font_download_path(name: &str) -> String {
+    format!("/cdn/{name}")
+}
+
+fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
+    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+}
+
+fn downloaded_font_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_downloaded_font_files(&paths.staging_dir(), &mut files);
+    files.sort();
+    files
+}
+
+fn collect_downloaded_font_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if !path.exists() {
+        return;
+    }
+    for entry in fs::read_dir(path).expect("read staging path") {
+        let entry = entry.expect("read staging entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_downloaded_font_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("ttf") {
+            files.push(path);
+        }
+    }
 }
 
 fn provider_metadata_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
@@ -260,13 +167,14 @@ fn assert_provider_metadata_has_no_font_binaries(paths: &FontbrewPaths) {
     }
 }
 
-#[test]
-fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_snapshots() {
+#[tokio::test]
+async fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_snapshots() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_list_url(),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &fontsource_list_path(),
         r#"[
   {
     "id": "abel",
@@ -290,8 +198,8 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
   }
 ]"#,
     );
-    fake_http.with_text(
-        &fontsource_detail_url("abel"),
+    server.respond_text(
+        &fontsource_detail_path("abel"),
         r#"{
   "id": "abel",
   "family": "Abel",
@@ -316,8 +224,8 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
   }
 }"#,
     );
-    fake_http.with_text(
-        &fontsource_detail_url("abel-web-only"),
+    server.respond_text(
+        &fontsource_detail_path("abel-web-only"),
         r#"{
   "id": "abel-web-only",
   "family": "Abel Web Only",
@@ -341,13 +249,14 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
 
     let report = app
         .search(SearchRequest {
             query: "fontsource:Abl".to_string(),
             limit: None,
         })
+        .await
         .expect("search Fontsource");
 
     assert_eq!(report.results.len(), 1);
@@ -363,11 +272,11 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
         "v18"
     );
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            fontsource_list_url(),
-            fontsource_detail_url("abel"),
-            fontsource_detail_url("abel-web-only"),
+            server.url(&fontsource_list_path()),
+            server.url(&fontsource_detail_path("abel")),
+            server.url(&fontsource_detail_path("abel-web-only")),
         ]
     );
     assert!(!provider_metadata_files(&paths).is_empty());
@@ -381,13 +290,14 @@ fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_metadata_
     assert!(!paths.managed_store_dir().join("packages").exists());
 }
 
-#[test]
-fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
+#[tokio::test]
+async fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_list_url(),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &fontsource_list_path(),
         r#"[{
   "id": "abel",
   "family": "Abel",
@@ -399,8 +309,8 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
   "type": "fontsource"
 }]"#,
     );
-    fake_http.with_text(
-        &fontsource_detail_url("abel"),
+    server.respond_text(
+        &fontsource_detail_path("abel"),
         r#"{
   "id": "abel",
   "family": "Abel",
@@ -423,12 +333,13 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
     let first_report = app
         .search(SearchRequest {
             query: "fontsource:Abel".to_string(),
             limit: None,
         })
+        .await
         .expect("first search should write Fontsource metadata snapshot");
 
     assert_eq!(first_report.results.len(), 1);
@@ -441,13 +352,12 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
         "v18"
     );
 
-    fake_http.fail_gets_with_transport_error();
-
     let second_report = app
         .search(SearchRequest {
             query: "fontsource:Abel".to_string(),
             limit: None,
         })
+        .await
         .expect("second search should use fresh Fontsource metadata snapshot");
 
     assert_eq!(second_report.results.len(), 1);
@@ -461,19 +371,23 @@ fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
         "v18"
     );
     assert_eq!(
-        fake_http.requested_urls(),
-        vec![fontsource_list_url(), fontsource_detail_url("abel")]
+        server.request_urls(),
+        vec![
+            server.url(&fontsource_list_path()),
+            server.url(&fontsource_detail_path("abel"))
+        ]
     );
     assert_provider_metadata_has_no_font_binaries(&paths);
 }
 
-#[test]
-fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() {
+#[tokio::test]
+async fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_list_url(),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &fontsource_list_path(),
         r#"[{
   "id": "abel",
   "family": "Abel",
@@ -485,8 +399,8 @@ fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() 
   "type": "fontsource"
 }]"#,
     );
-    fake_http.with_text(
-        &fontsource_detail_url("abel"),
+    server.respond_text(
+        &fontsource_detail_path("abel"),
         r#"{
   "id": "abel",
   "family": "Abel",
@@ -509,24 +423,27 @@ fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() 
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
 
     app.search(SearchRequest {
         query: "fontsource:Abel".to_string(),
         limit: None,
     })
+    .await
     .expect("first search should write Fontsource metadata snapshot");
 
     let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
     set_file_modified_time(&fontsource_list_snapshot_path(&paths), stale_time);
     set_file_modified_time(&fontsource_detail_snapshot_path(&paths, "abel"), stale_time);
-    fake_http.fail_gets_with_transport_error();
+    server.respond_status(&fontsource_list_path(), 500, "server error");
+    server.respond_status(&fontsource_detail_path("abel"), 500, "server error");
 
     let stale_report = app
         .search(SearchRequest {
             query: "fontsource:Abel".to_string(),
             limit: None,
         })
+        .await
         .expect("stale Fontsource metadata should be used when refresh fails");
 
     assert_eq!(stale_report.results.len(), 1);
@@ -540,24 +457,26 @@ fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fails() 
         "v18"
     );
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            fontsource_list_url(),
-            fontsource_detail_url("abel"),
-            fontsource_list_url(),
-            fontsource_detail_url("abel"),
+            server.url(&fontsource_list_path()),
+            server.url(&fontsource_detail_path("abel")),
+            server.url(&fontsource_list_path()),
+            server.url(&fontsource_detail_path("abel")),
         ]
     );
     assert_provider_metadata_has_no_font_binaries(&paths);
 }
 
-#[test]
-fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_source() {
+#[tokio::test]
+async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_source() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_detail_url("source-code-pro"),
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&font_download_path("source-code-pro.ttf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
         r#"{
   "id": "source-code-pro",
   "family": "Source Code Pro",
@@ -573,19 +492,20 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
         "latin": {
           "url": {
             "woff2": "https://cdn.example/source-code-pro.woff2",
-            "ttf": "https://cdn.example/source-code-pro.ttf"
+            "ttf": "__DOWNLOAD_URL__"
           }
         }
       }
     }
   }
-}"#,
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_download),
     );
-    fake_http.with_download_bytes(
-        "https://cdn.example/source-code-pro.ttf",
+    server.respond_bytes(
+        &font_download_path("source-code-pro.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(InstallRequest {
@@ -599,6 +519,7 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
             selected_families: Vec::new(),
             reinstall: false,
         })
+        .await
         .expect("plan Fontsource install");
 
     assert_eq!(plan.package_id, package_id("source-code-pro"));
@@ -610,13 +531,13 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
         "v2"
     );
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            fontsource_detail_url("source-code-pro"),
-            "https://cdn.example/source-code-pro.ttf".to_string(),
+            server.url(&fontsource_detail_path("source-code-pro")),
+            source_code_pro_download,
         ]
     );
-    let download_targets = fake_http.download_targets();
+    let download_targets = downloaded_font_files(&paths);
     assert_eq!(download_targets.len(), 1);
     assert!(download_targets[0].starts_with(paths.staging_dir()));
     assert_eq!(
@@ -631,8 +552,9 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply Fontsource install");
 
     assert_eq!(report.package_id, package_id("source-code-pro"));
@@ -653,6 +575,7 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
         .package_info(InfoRequest {
             package_id: package_id("source-code-pro"),
         })
+        .await
         .expect("read Fontsource package info");
     assert_eq!(info.package.source, "fontsource:source-code-pro");
     assert!(record.font_files.iter().all(|font_file| font_file
@@ -668,13 +591,16 @@ fn fontsource_install_downloads_desktop_font_and_records_provider_manifest_sourc
     );
 }
 
-#[test]
-fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
+#[tokio::test]
+async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let install_http = Arc::new(FakeHttpClient::default());
-    install_http.with_text(
-        &fontsource_detail_url("source-code-pro"),
+    let install_server = LocalHttpServer::start();
+    let source_code_pro_v1_download =
+        install_server.url(&font_download_path("source-code-pro-v1.ttf"));
+    install_server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
         r#"{
   "id": "source-code-pro",
   "family": "Source Code Pro",
@@ -689,19 +615,20 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
       "normal": {
         "latin": {
           "url": {
-            "ttf": "https://cdn.example/source-code-pro-v1.ttf"
+            "ttf": "__DOWNLOAD_URL__"
           }
         }
       }
     }
   }
-}"#,
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_v1_download),
     );
-    install_http.with_download_bytes(
-        "https://cdn.example/source-code-pro-v1.ttf",
+    install_server.respond_bytes(
+        &font_download_path("source-code-pro-v1.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), install_http);
+    let app = app_with_server(paths.clone(), &install_server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::Provider {
@@ -714,13 +641,15 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
             selected_families: Vec::new(),
             reinstall: false,
         })
+        .await
         .expect("plan initial Fontsource install");
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("apply initial Fontsource install");
 
     let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
@@ -729,9 +658,11 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
         stale_time,
     );
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.with_text(
-        &fontsource_detail_url("source-code-pro"),
+    let update_server = LocalHttpServer::start();
+    let source_code_pro_v2_download =
+        update_server.url(&font_download_path("source-code-pro-v2.ttf"));
+    update_server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
         r#"{
   "id": "source-code-pro",
   "family": "Source Code Pro",
@@ -746,24 +677,26 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
       "normal": {
         "latin": {
           "url": {
-            "ttf": "https://cdn.example/source-code-pro-v2.ttf"
+            "ttf": "__DOWNLOAD_URL__"
           }
         }
       }
     }
   }
-}"#,
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_v2_download),
     );
-    update_http.with_download_bytes(
-        "https://cdn.example/source-code-pro-v2.ttf",
+    update_server.respond_bytes(
+        &font_download_path("source-code-pro-v2.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), update_http.clone());
+    let app = app_with_server(paths.clone(), &update_server);
 
     let outdated = app
         .outdated(OutdatedRequest {
             package_ids: vec![package_id("source-code-pro")],
         })
+        .await
         .expect("check Fontsource outdated");
     assert_eq!(outdated.packages.len(), 1);
     assert_eq!(outdated.packages[0].latest_version.as_str(), "v2");
@@ -776,8 +709,9 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
                 jobs: Some(1),
             },
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("plan Fontsource update");
     assert_eq!(plan.prepared.len(), 1);
     assert_eq!(plan.prepared[0].target_version.as_str(), "v2");
@@ -787,8 +721,9 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
-            &NeverCancelled,
+            Arc::new(NeverCancelled),
         )
+        .await
         .expect("apply Fontsource update");
 
     assert_eq!(report.updated.len(), 1);
@@ -806,21 +741,24 @@ fn fontsource_update_uses_provider_metadata_and_replaces_managed_version() {
         }
     );
     assert_eq!(
-        update_http.requested_urls(),
+        update_server.request_urls(),
         vec![
-            fontsource_detail_url("source-code-pro"),
-            "https://cdn.example/source-code-pro-v2.ttf".to_string(),
+            update_server.url(&fontsource_detail_path("source-code-pro")),
+            source_code_pro_v2_download,
         ]
     );
 }
 
-#[test]
-fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
+#[tokio::test]
+async fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let install_http = Arc::new(FakeHttpClient::default());
-    install_http.with_text(
-        &fontsource_detail_url("source-code-pro"),
+    let install_server = LocalHttpServer::start();
+    let source_code_pro_v1_download =
+        install_server.url(&font_download_path("source-code-pro-v1.ttf"));
+    install_server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
         r#"{
   "id": "source-code-pro",
   "family": "Source Code Pro",
@@ -835,19 +773,20 @@ fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
       "normal": {
         "latin": {
           "url": {
-            "ttf": "https://cdn.example/source-code-pro-v1.ttf"
+            "ttf": "__DOWNLOAD_URL__"
           }
         }
       }
     }
   }
-}"#,
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_v1_download),
     );
-    install_http.with_download_bytes(
-        "https://cdn.example/source-code-pro-v1.ttf",
+    install_server.respond_bytes(
+        &font_download_path("source-code-pro-v1.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), install_http);
+    let app = app_with_server(paths.clone(), &install_server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::Provider {
@@ -860,13 +799,15 @@ fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
             selected_families: Vec::new(),
             reinstall: false,
         })
+        .await
         .expect("plan initial Fontsource install");
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("apply initial Fontsource install");
 
     let stale_time = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
@@ -875,26 +816,35 @@ fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
         stale_time,
     );
 
-    let update_http = Arc::new(FakeHttpClient::default());
-    update_http.fail_gets_with_transport_error();
-    let app = FontbrewApp::with_paths_and_http_client(paths, update_http);
+    let update_server = LocalHttpServer::start();
+    update_server.respond_status(
+        &fontsource_detail_path("source-code-pro"),
+        500,
+        "server error",
+    );
+    let app = app_with_server(paths, &update_server);
 
     let error = app
         .outdated(OutdatedRequest {
             package_ids: vec![package_id("source-code-pro")],
         })
+        .await
         .expect_err("stale Fontsource metadata should not hide refresh failure");
 
-    assert!(error.to_string().contains("simulated transport failure"));
+    assert!(error
+        .to_string()
+        .contains("HTTP request failed with status 500"));
 }
 
-#[test]
-fn fontsource_install_plan_reports_progress_before_apply() {
+#[tokio::test]
+async fn fontsource_install_plan_reports_progress_before_apply() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &fontsource_detail_url("source-code-pro"),
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&font_download_path("source-code-pro.ttf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
         r#"{
   "id": "source-code-pro",
   "family": "Source Code Pro",
@@ -909,20 +859,21 @@ fn fontsource_install_plan_reports_progress_before_apply() {
       "normal": {
         "latin": {
           "url": {
-            "ttf": "https://cdn.example/source-code-pro.ttf"
+            "ttf": "__DOWNLOAD_URL__"
           }
         }
       }
     }
   }
-}"#,
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_download),
     );
     let font_bytes = fixture_font_bytes("SourceCodePro-Regular.ttf");
-    fake_http.with_download_bytes(
-        "https://cdn.example/source-code-pro.ttf",
+    server.respond_bytes(
+        &font_download_path("source-code-pro.ttf"),
         font_bytes.clone(),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
+    let app = app_with_server(paths, &server);
     let mut progress = RecordingProgress::default();
 
     app.install_plan_with_progress_and_cancellation(
@@ -938,8 +889,9 @@ fn fontsource_install_plan_reports_progress_before_apply() {
             reinstall: false,
         },
         &mut progress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("plan Fontsource install");
 
     assert!(progress.events.iter().any(|event| matches!(
@@ -963,4 +915,90 @@ fn fontsource_install_plan_reports_progress_before_apply() {
         event,
         ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
     )));
+}
+
+#[tokio::test]
+async fn fontsource_install_plan_parse_error_replays_provider_progress_and_cleans_staging() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&font_download_path("source-code-pro.ttf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "ttf": "__DOWNLOAD_URL__"
+          }
+        }
+      }
+    }
+  }
+}"#
+        .replace("__DOWNLOAD_URL__", &source_code_pro_download),
+    );
+    let malformed_font = b"not a parseable font".to_vec();
+    server.respond_bytes(
+        &font_download_path("source-code-pro.ttf"),
+        malformed_font.clone(),
+    );
+    let app = app_with_server(paths.clone(), &server);
+    let mut progress = RecordingProgress::default();
+
+    let error = app
+        .install_plan_with_progress_and_cancellation(
+            InstallRequest {
+                source: InstallSource::Provider {
+                    provider: ProviderKind::Fontsource,
+                    id: "source-code-pro".to_string(),
+                },
+                package_id_override: None,
+                format_preference: Vec::new(),
+                asset_selector: None,
+                selected_families: Vec::new(),
+                reinstall: false,
+            },
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("malformed provider font should fail planning");
+
+    assert!(matches!(error, FontbrewError::FontParse { .. }));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DownloadStarted { package_id, bytes: None }
+            if package_id.as_str() == "source-code-pro"
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DownloadProgress {
+            package_id,
+            downloaded,
+            total: None,
+        } if package_id.as_str() == "source-code-pro" && *downloaded == malformed_font.len() as u64
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+    )));
+    assert!(
+        !paths.staging_dir().exists()
+            || fs::read_dir(paths.staging_dir())
+                .expect("read staging dir")
+                .next()
+                .is_none()
+    );
 }

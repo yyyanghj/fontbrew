@@ -129,8 +129,8 @@ mod tests {
         assert!(json["package"]["activation_artifacts"].is_array());
     }
 
-    #[test]
-    fn package_info_returns_an_info_report_shell() {
+    #[tokio::test]
+    async fn package_info_returns_an_info_report_shell() {
         let temp = tempfile::tempdir().expect("tempdir");
         let app = FontbrewApp::with_paths(FontbrewPaths::for_tests(
             temp.path().join("data"),
@@ -141,7 +141,7 @@ mod tests {
             package_id: package_id("jetbrains-mono"),
         };
 
-        let result: crate::Result<InfoReport> = app.package_info(request);
+        let result: crate::Result<InfoReport> = app.package_info(request).await;
         let error = result.expect_err("missing package should fail");
 
         assert!(matches!(error, FontbrewError::Manifest { .. }));

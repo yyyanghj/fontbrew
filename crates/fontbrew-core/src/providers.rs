@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::{
     config::FontbrewConfig,
     error::{FontbrewError, Result},
-    fetch::{HttpClient, HttpHeader, HttpRequest},
+    fetch::{HttpHeader, HttpRequest, NetworkClient},
     fs::write_atomically,
     model::{FamilyName, FontFormat, PackageVersion, SearchResult},
     platform::FontbrewPaths,
@@ -18,7 +18,6 @@ use crate::{
     PackageId, ProviderKind,
 };
 
-const FONTSOURCE_API_BASE_URL: &str = "https://api.fontsource.org/v1";
 const DEFAULT_PROVIDER_SEARCH_LIMIT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,22 +48,29 @@ type FontsourceFontAsset = ProviderFontAsset;
 #[derive(Clone, Copy)]
 pub(crate) struct FontsourceProvider<'a> {
     paths: &'a FontbrewPaths,
-    http_client: &'a dyn HttpClient,
+    network_client: &'a NetworkClient,
 }
 
 impl<'a> FontsourceProvider<'a> {
-    pub(crate) fn new(paths: &'a FontbrewPaths, http_client: &'a dyn HttpClient) -> Self {
-        Self { paths, http_client }
+    pub(crate) fn new(paths: &'a FontbrewPaths, network_client: &'a NetworkClient) -> Self {
+        Self {
+            paths,
+            network_client,
+        }
     }
 
-    pub(crate) fn search(&self, request: ProviderSearchRequest<'_>) -> Result<Vec<SearchResult>> {
+    pub(crate) async fn search(
+        &self,
+        request: ProviderSearchRequest<'_>,
+    ) -> Result<Vec<SearchResult>> {
         let raw_query = request.query.trim();
         if raw_query.is_empty() {
             return Ok(Vec::new());
         }
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
         let metadata_ttl = provider_metadata_ttl(self.paths)?;
-        let list_records = fetch_fontsource_list(self.http_client, &snapshot_store, metadata_ttl)?;
+        let list_records =
+            fetch_fontsource_list(self.network_client, &snapshot_store, metadata_ttl).await?;
         let mut matched_records = list_records
             .into_iter()
             .filter_map(|record| {
@@ -86,12 +92,13 @@ impl<'a> FontsourceProvider<'a> {
             }
 
             let detail = fetch_fontsource_detail(
-                self.http_client,
+                self.network_client,
                 &snapshot_store,
                 &record.id,
                 metadata_ttl,
                 true,
-            )?;
+            )
+            .await?;
 
             let Some(result) = search_result_from_detail(&detail)? else {
                 continue;
@@ -102,21 +109,21 @@ impl<'a> FontsourceProvider<'a> {
         Ok(results)
     }
 
-    pub(crate) fn resolve_install_package(
+    pub(crate) async fn resolve_install_package(
         &self,
         provider_id: &str,
     ) -> Result<FontsourceResolvedPackage> {
-        self.resolve_package(provider_id, true)
+        self.resolve_package(provider_id, true).await
     }
 
-    pub(crate) fn resolve_update_package(
+    pub(crate) async fn resolve_update_package(
         &self,
         provider_id: &str,
     ) -> Result<FontsourceResolvedPackage> {
-        self.resolve_package(provider_id, false)
+        self.resolve_package(provider_id, false).await
     }
 
-    fn resolve_package(
+    async fn resolve_package(
         &self,
         provider_id: &str,
         allow_stale_on_error: bool,
@@ -125,12 +132,13 @@ impl<'a> FontsourceProvider<'a> {
         let snapshot_store = FontsourceSnapshotStore::new(self.paths);
         let metadata_ttl = provider_metadata_ttl(self.paths)?;
         let detail = fetch_fontsource_detail(
-            self.http_client,
+            self.network_client,
             &snapshot_store,
             provider_id,
             metadata_ttl,
             allow_stale_on_error,
-        )?;
+        )
+        .await?;
 
         if detail.id != provider_id {
             return Err(FontbrewError::ArchiveRejected {
@@ -244,8 +252,8 @@ impl<'a> FontsourceSnapshotStore<'a> {
     }
 }
 
-fn fetch_fontsource_list(
-    http_client: &dyn HttpClient,
+async fn fetch_fontsource_list(
+    network_client: &NetworkClient,
     snapshot_store: &FontsourceSnapshotStore<'_>,
     metadata_ttl: Duration,
 ) -> Result<Vec<FontsourceListRecord>> {
@@ -255,12 +263,15 @@ fn fetch_fontsource_list(
         }
     }
 
-    let url = format!("{FONTSOURCE_API_BASE_URL}/fonts");
-    let response = match http_client.get(HttpRequest {
-        url: url.clone(),
-        display_url: None,
-        headers: fontsource_headers(),
-    }) {
+    let url = format!("{}/fonts", network_client.fontsource_api_base_url());
+    let response = match network_client
+        .get(HttpRequest {
+            url: url.clone(),
+            display_url: None,
+            headers: fontsource_headers(),
+        })
+        .await
+    {
         Ok(response) => response,
         Err(error) => {
             return fontsource_cached_list_or_error(snapshot_store, error);
@@ -276,8 +287,8 @@ fn fetch_fontsource_list(
     Ok(records)
 }
 
-fn fetch_fontsource_detail(
-    http_client: &dyn HttpClient,
+async fn fetch_fontsource_detail(
+    network_client: &NetworkClient,
     snapshot_store: &FontsourceSnapshotStore<'_>,
     provider_id: &str,
     metadata_ttl: Duration,
@@ -289,12 +300,18 @@ fn fetch_fontsource_detail(
         }
     }
 
-    let url = format!("{FONTSOURCE_API_BASE_URL}/fonts/{provider_id}");
-    let response = match http_client.get(HttpRequest {
-        url: url.clone(),
-        display_url: None,
-        headers: fontsource_headers(),
-    }) {
+    let url = format!(
+        "{}/fonts/{provider_id}",
+        network_client.fontsource_api_base_url()
+    );
+    let response = match network_client
+        .get(HttpRequest {
+            url: url.clone(),
+            display_url: None,
+            headers: fontsource_headers(),
+        })
+        .await
+    {
         Ok(response) => response,
         Err(error) => {
             if allow_stale_on_error {

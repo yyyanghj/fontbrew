@@ -9,9 +9,10 @@ mod progress;
 mod reporter;
 mod self_update;
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     match cli::Cli::try_parse() {
-        Ok(cli) => ExitCode::from(cli::run(cli)),
+        Ok(cli) => ExitCode::from(cli::run(cli).await),
         Err(error) => {
             if std::env::args_os().any(|arg| arg == "--json") {
                 let mut reporter = reporter::json::JsonReporter::new();

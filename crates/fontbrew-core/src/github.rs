@@ -1,15 +1,14 @@
 use globset::Glob;
 use serde::Deserialize;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use crate::{
     error::{FontbrewError, Result},
-    fetch::{HttpClient, HttpHeader, HttpRequest},
+    fetch::{HttpHeader, HttpRequest, NetworkClient},
     model::{CancellationToken, PackageId, PackageVersion},
     sources::GitHubRepo,
 };
 
-const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_TOKEN_ENV_VAR: &str = "GITHUB_TOKEN";
 const MAX_RELEASE_ASSET_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -19,13 +18,13 @@ pub(crate) struct ResolvedGitHubAsset {
     pub download_url: String,
 }
 
-pub(crate) fn resolve_release_asset(
-    http_client: &dyn HttpClient,
+pub(crate) async fn resolve_release_asset(
+    network_client: &NetworkClient,
     repo: &GitHubRepo,
     asset_selector: Option<&str>,
     package_id: &PackageId,
 ) -> Result<ResolvedGitHubAsset> {
-    let release = fetch_latest_stable_release(http_client, repo)?;
+    let release = fetch_latest_stable_release(network_client, repo).await?;
     let version = release_version(&release)?;
     let asset = select_release_asset(&release, asset_selector, package_id)?;
 
@@ -35,31 +34,33 @@ pub(crate) fn resolve_release_asset(
     })
 }
 
-pub(crate) fn resolve_latest_stable_release_version(
-    http_client: &dyn HttpClient,
+pub(crate) async fn resolve_latest_stable_release_version(
+    network_client: &NetworkClient,
     repo: &GitHubRepo,
 ) -> Result<PackageVersion> {
-    let release = fetch_latest_stable_release(http_client, repo)?;
+    let release = fetch_latest_stable_release(network_client, repo).await?;
 
     release_version(&release)
 }
 
-pub(crate) fn download_release_asset_to_file(
-    http_client: &dyn HttpClient,
+pub(crate) async fn download_release_asset_to_file(
+    network_client: &NetworkClient,
     url: &str,
     destination: &Path,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<u64> {
-    http_client.download_to_file(
-        HttpRequest {
-            url: url.to_string(),
-            display_url: None,
-            headers: github_headers(),
-        },
-        destination,
-        MAX_RELEASE_ASSET_DOWNLOAD_BYTES,
-        cancellation,
-    )
+    network_client
+        .download_to_file(
+            HttpRequest {
+                url: url.to_string(),
+                display_url: None,
+                headers: github_headers(),
+            },
+            destination,
+            MAX_RELEASE_ASSET_DOWNLOAD_BYTES,
+            cancellation,
+        )
+        .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -76,19 +77,23 @@ struct GitHubReleaseAsset {
     browser_download_url: String,
 }
 
-fn fetch_latest_stable_release(
-    http_client: &dyn HttpClient,
+async fn fetch_latest_stable_release(
+    network_client: &NetworkClient,
     repo: &GitHubRepo,
 ) -> Result<GitHubRelease> {
     let url = format!(
-        "{GITHUB_API_BASE_URL}/repos/{}/{}/releases",
-        repo.owner, repo.repo
+        "{}/repos/{}/{}/releases",
+        network_client.github_api_base_url(),
+        repo.owner,
+        repo.repo
     );
-    let response = http_client.get(HttpRequest {
-        url: url.clone(),
-        display_url: None,
-        headers: github_headers(),
-    })?;
+    let response = network_client
+        .get(HttpRequest {
+            url: url.clone(),
+            display_url: None,
+            headers: github_headers(),
+        })
+        .await?;
     let body = successful_response_body(response.status, response.body, &url)?;
     let releases: Vec<GitHubRelease> =
         serde_json::from_slice(&body).map_err(|source| FontbrewError::Network {

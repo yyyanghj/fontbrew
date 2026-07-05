@@ -1,16 +1,14 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
 use fontbrew_core::{
-    fetch::{HttpClient, HttpRequest, HttpResponse},
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InstallRequest,
@@ -18,7 +16,11 @@ use fontbrew_core::{
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+mod support;
+
+use support::LocalHttpServer;
+
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct NoProgress;
 
@@ -26,208 +28,22 @@ impl ProgressSink for NoProgress {
     fn emit(&mut self, _event: ProgressEvent) {}
 }
 
+#[derive(Default)]
+struct RecordingProgress {
+    events: Vec<ProgressEvent>,
+}
+
+impl ProgressSink for RecordingProgress {
+    fn emit(&mut self, event: ProgressEvent) {
+        self.events.push(event);
+    }
+}
+
 struct NeverCancelled;
 
 impl CancellationToken for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
-    }
-}
-
-#[derive(Default)]
-struct FakeHttpClient {
-    routes: Mutex<BTreeMap<String, Vec<u8>>>,
-    download_routes: Mutex<BTreeMap<String, FakeDownloadRoute>>,
-    requests: Mutex<Vec<HttpRequest>>,
-    download_targets: Mutex<Vec<PathBuf>>,
-}
-
-#[derive(Clone)]
-struct FakeDownloadRoute {
-    status: u16,
-    content_length: Option<u64>,
-    body: Vec<u8>,
-    cancel_after_chunks: Option<usize>,
-    cancel_flag: Option<Arc<AtomicBool>>,
-}
-
-impl FakeHttpClient {
-    fn with_text(&self, url: &str, body: impl Into<String>) {
-        self.routes
-            .lock()
-            .expect("routes lock")
-            .insert(url.to_string(), body.into().into_bytes());
-    }
-
-    fn with_download_bytes(&self, url: &str, body: Vec<u8>) {
-        self.with_download(url, 200, Some(body.len() as u64), body);
-    }
-
-    fn with_download_content_length(&self, url: &str, content_length: u64) {
-        self.with_download(url, 200, Some(content_length), Vec::new());
-    }
-
-    fn with_download(&self, url: &str, status: u16, content_length: Option<u64>, body: Vec<u8>) {
-        self.download_routes.lock().expect("routes lock").insert(
-            url.to_string(),
-            FakeDownloadRoute {
-                status,
-                content_length,
-                body,
-                cancel_after_chunks: None,
-                cancel_flag: None,
-            },
-        );
-    }
-
-    fn with_cancelling_download_bytes(
-        &self,
-        url: &str,
-        body: Vec<u8>,
-        cancel_after_chunks: usize,
-        cancel_flag: Arc<AtomicBool>,
-    ) {
-        self.download_routes.lock().expect("routes lock").insert(
-            url.to_string(),
-            FakeDownloadRoute {
-                status: 200,
-                content_length: Some(body.len() as u64),
-                body,
-                cancel_after_chunks: Some(cancel_after_chunks),
-                cancel_flag: Some(cancel_flag),
-            },
-        );
-    }
-
-    fn requested_urls(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .iter()
-            .map(|request| request.url.clone())
-            .collect()
-    }
-
-    fn requested_requests(&self) -> Vec<HttpRequest> {
-        self.requests.lock().expect("requests lock").clone()
-    }
-
-    fn download_targets(&self) -> Vec<PathBuf> {
-        self.download_targets
-            .lock()
-            .expect("download targets lock")
-            .clone()
-    }
-}
-
-impl HttpClient for FakeHttpClient {
-    fn get(&self, request: HttpRequest) -> fontbrew_core::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.clone());
-        let body = self
-            .routes
-            .lock()
-            .expect("routes lock")
-            .get(&request.url)
-            .cloned()
-            .or_else(|| {
-                if self
-                    .download_routes
-                    .lock()
-                    .expect("download routes lock")
-                    .contains_key(&request.url)
-                {
-                    panic!(
-                        "download asset should be streamed to a file: {}",
-                        request.url
-                    );
-                }
-
-                None
-            })
-            .unwrap_or_else(|| panic!("unexpected HTTP request: {}", request.url));
-
-        Ok(HttpResponse { status: 200, body })
-    }
-
-    fn download_to_file(
-        &self,
-        request: HttpRequest,
-        destination: &Path,
-        max_bytes: u64,
-        cancellation: &dyn CancellationToken,
-    ) -> fontbrew_core::Result<u64> {
-        self.requests
-            .lock()
-            .expect("requests lock")
-            .push(request.clone());
-        let route = self
-            .download_routes
-            .lock()
-            .expect("download routes lock")
-            .get(&request.url)
-            .cloned()
-            .unwrap_or_else(|| panic!("unexpected HTTP download request: {}", request.url));
-
-        if !(200..300).contains(&route.status) {
-            return Err(FontbrewError::Network {
-                message: format!(
-                    "HTTP request failed with status {} for {}",
-                    route.status, request.url
-                ),
-            });
-        }
-
-        if route
-            .content_length
-            .is_some_and(|length| length > max_bytes)
-        {
-            return Err(FontbrewError::ArchiveRejected {
-                reason: format!(
-                    "download exceeds maximum size of {max_bytes} bytes: {}",
-                    request.url
-                ),
-            });
-        }
-
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).expect("create download parent");
-        }
-        let mut file = File::create(destination).expect("create download destination");
-        let mut written = 0_u64;
-        for (chunk_index, chunk) in route.body.chunks(7).enumerate() {
-            if cancellation.is_cancelled() {
-                let _ = fs::remove_file(destination);
-                return Err(FontbrewError::Cancelled);
-            }
-
-            let next = written + chunk.len() as u64;
-            if next > max_bytes {
-                let _ = fs::remove_file(destination);
-                return Err(FontbrewError::ArchiveRejected {
-                    reason: format!(
-                        "download exceeds maximum size of {max_bytes} bytes: {}",
-                        request.url
-                    ),
-                });
-            }
-
-            file.write_all(chunk).expect("write fake download chunk");
-            written = next;
-            if route.cancel_after_chunks == Some(chunk_index + 1) {
-                if let Some(cancel_flag) = &route.cancel_flag {
-                    cancel_flag.store(true, Ordering::SeqCst);
-                }
-            }
-        }
-
-        self.download_targets
-            .lock()
-            .expect("download targets lock")
-            .push(destination.to_path_buf());
-        Ok(written)
     }
 }
 
@@ -313,8 +129,56 @@ fn github_request_with_selected_families(
     }
 }
 
-fn github_releases_url(owner: &str, repo: &str) -> String {
-    format!("https://api.github.com/repos/{owner}/{repo}/releases")
+fn github_releases_path(owner: &str, repo: &str) -> String {
+    format!("/repos/{owner}/{repo}/releases")
+}
+
+fn download_path(name: &str) -> String {
+    format!("/downloads/{name}")
+}
+
+fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
+    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+}
+
+fn github_release_response(version: &str, asset_name: &str, download_url: &str) -> String {
+    format!(
+        r#"[
+  {{
+    "tag_name": "{version}",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "{asset_name}",
+        "browser_download_url": "{download_url}"
+      }}
+    ]
+  }}
+]"#
+    )
+}
+
+fn downloaded_staging_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_downloaded_staging_files(&paths.staging_dir(), &mut files);
+    files.sort();
+    files
+}
+
+fn collect_downloaded_staging_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if !path.exists() {
+        return;
+    }
+    for entry in fs::read_dir(path).expect("read staging path") {
+        let entry = entry.expect("read staging entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_downloaded_staging_files(&path, files);
+        } else if path.file_name().is_some_and(|name| name == "download.zip") {
+            files.push(path);
+        }
+    }
 }
 
 fn zip_with_fixture_font(entry_name: &str, fixture_name: &str) -> Vec<u8> {
@@ -341,62 +205,70 @@ fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
     zip.finish().expect("finish zip").into_inner()
 }
 
-fn apply_plan(app: &FontbrewApp, plan: fontbrew_core::InstallPlan) -> fontbrew_core::InstallReport {
+async fn apply_plan(
+    app: &FontbrewApp,
+    plan: fontbrew_core::InstallPlan,
+) -> fontbrew_core::InstallReport {
     let mut progress = NoProgress;
     app.apply_install(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
-        &NeverCancelled,
+        Arc::new(NeverCancelled),
     )
+    .await
     .expect("apply install")
 }
 
-#[test]
-fn direct_github_install_selects_latest_stable_release_and_records_github_source() {
+#[tokio::test]
+async fn direct_github_install_selects_latest_stable_release_and_records_github_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
     "tag_name": "v3.0.0",
     "draft": true,
     "prerelease": false,
     "assets": [
-      {"name": "draft.zip", "browser_download_url": "https://downloads.example/draft.zip"}
+      {{"name": "draft.zip", "browser_download_url": "https://downloads.example/draft.zip"}}
     ]
-  },
-  {
+  }},
+  {{
     "tag_name": "v2.0.0-beta.1",
     "draft": false,
     "prerelease": true,
     "assets": [
-      {"name": "beta.zip", "browser_download_url": "https://downloads.example/beta.zip"}
+      {{"name": "beta.zip", "browser_download_url": "https://downloads.example/beta.zip"}}
     ]
-  },
-  {
+  }},
+  {{
     "tag_name": "v1.2.3",
     "draft": false,
     "prerelease": false,
     "assets": [
-      {
+      {{
         "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
+        "browser_download_url": "{source_code_pro_download}"
+      }}
     ]
-  }
-]"#,
+  }}
+]"#
+        ),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect("plan GitHub install");
     assert_eq!(plan.package_id, package_id("source-code-pro"));
     assert_eq!(
@@ -407,13 +279,13 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
         "v1.2.3"
     );
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            github_releases_url("adobe", "source-code-pro"),
-            "https://downloads.example/source-code-pro.zip".to_string(),
+            server.url(&github_releases_path("adobe", "source-code-pro")),
+            source_code_pro_download,
         ]
     );
-    let download_targets = fake_http.download_targets();
+    let download_targets = downloaded_staging_files(&paths);
     assert_eq!(download_targets.len(), 1);
     assert!(download_targets[0].starts_with(paths.staging_dir()));
     assert_eq!(
@@ -425,7 +297,7 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
     );
     assert!(download_targets[0].exists());
 
-    let report = apply_plan(&app, plan);
+    let report = apply_plan(&app, plan).await;
     assert_eq!(report.installed_version.as_str(), "v1.2.3");
     assert_eq!(report.families[0].as_str(), "Source Code Pro");
 
@@ -449,38 +321,28 @@ fn direct_github_install_selects_latest_stable_release_and_records_github_source
     );
 }
 
-#[test]
-fn direct_github_install_requires_family_selection_for_multiple_families() {
+#[tokio::test]
+async fn direct_github_install_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_fonts(&[
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
             ("Inter-Variable.ttf", "Inter-Variable.ttf"),
         ]),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+    let app = app_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect_err("multi-family direct GitHub archive should require a boundary");
 
     assert!(matches!(
@@ -495,35 +357,61 @@ fn direct_github_install_requires_family_selection_for_multiple_families() {
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn direct_github_install_selected_family_installs_one_package() {
+#[tokio::test]
+async fn github_install_plan_archive_parse_error_replays_progress_and_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    server.respond_bytes(&download_path("source-code-pro.zip"), b"not a zip".to_vec());
+    let app = app_with_server(paths.clone(), &server);
+    let mut progress = RecordingProgress::default();
+
+    let error = app
+        .install_plan_with_progress_and_cancellation(
+            github_request("adobe", "source-code-pro", None),
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("malformed GitHub archive should fail planning");
+
+    assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DownloadStarted { package_id, .. }
+            if package_id.as_str() == "source-code-pro"
+    )));
+    assert!(progress.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ExtractingArchive { package_id }
+            if package_id.as_str() == "source-code-pro"
+    )));
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[tokio::test]
+async fn direct_github_install_selected_family_installs_one_package() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_fonts(&[
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
             ("Inter-Variable.ttf", "Inter-Variable.ttf"),
         ]),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+    let app = app_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request_with_selected_families(
@@ -532,11 +420,12 @@ fn direct_github_install_selected_family_installs_one_package() {
             None,
             vec!["Inter"],
         ))
+        .await
         .expect("selected family should plan");
 
     assert_eq!(plan.package_id, package_id("inter"));
 
-    let report = apply_plan(&app, plan);
+    let report = apply_plan(&app, plan).await;
 
     assert_eq!(report.package_id, package_id("inter"));
     assert_eq!(report.families, vec![FamilyName::new("Inter")]);
@@ -547,70 +436,63 @@ fn direct_github_install_selected_family_installs_one_package() {
         .is_none());
 }
 
-#[test]
-fn github_install_plan_cancellation_after_staging_creation_cleans_staging() {
+#[tokio::test]
+async fn github_install_plan_cancellation_after_staging_creation_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+    let server = LocalHttpServer::start();
+    let app = app_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan_with_cancellation(
             github_request("adobe", "source-code-pro", None),
-            &CancelWhenInstallStagingExists {
+            Arc::new(CancelWhenInstallStagingExists {
                 paths: paths.clone(),
-            },
+            }),
         )
+        .await
         .expect_err("cancellation after staging creation should fail");
 
     assert!(matches!(error, FontbrewError::Cancelled));
     assert!(staging_entries(&paths).is_empty());
 }
 
-#[test]
-fn github_install_plan_cleans_staging_when_download_is_cancelled() {
+#[tokio::test]
+async fn github_install_plan_cleans_staging_when_download_is_cancelled() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    fake_http.with_cancelling_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    server.respond_bytes_with_cancellation(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+        7,
         1,
         cancel_flag.clone(),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
-    let cancellation = AtomicCancellation { flag: cancel_flag };
+    let app = app_with_server(paths.clone(), &server);
+    let cancellation: Arc<dyn CancellationToken> =
+        Arc::new(AtomicCancellation { flag: cancel_flag });
 
     let error = app
         .install_plan_with_cancellation(
             github_request("adobe", "source-code-pro", None),
-            &cancellation,
+            cancellation.clone(),
         )
+        .await
         .expect_err("cancelled download should fail planning");
 
     assert!(matches!(error, FontbrewError::Cancelled));
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            github_releases_url("adobe", "source-code-pro"),
-            "https://downloads.example/source-code-pro.zip".to_string(),
+            server.url(&github_releases_path("adobe", "source-code-pro")),
+            source_code_pro_download,
         ]
     );
     assert!(
@@ -622,49 +504,40 @@ fn github_install_plan_cleans_staging_when_download_is_cancelled() {
     );
 }
 
-#[test]
-fn github_token_is_sent_as_authorization_header_without_persisting_to_manifest() {
-    let _guard = ENV_LOCK.lock().expect("env lock");
+#[tokio::test]
+async fn github_token_is_sent_as_authorization_header_without_persisting_to_manifest() {
+    let _guard = ENV_LOCK.lock().await;
     let original = std::env::var_os("GITHUB_TOKEN");
     std::env::set_var("GITHUB_TOKEN", "test-token");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http.clone());
+    let app = app_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect("plan GitHub install");
-    apply_plan(&app, plan);
+    apply_plan(&app, plan).await;
 
-    let requests = fake_http.requested_requests();
+    let requests = server.requests();
     assert!(requests
         .first()
         .expect("GitHub API request")
         .headers
         .iter()
-        .any(|header| header.name == "Authorization" && header.value == "Bearer test-token"));
+        .any(|(name, value)| name.eq_ignore_ascii_case("authorization")
+            && value == "Bearer test-token"));
     let manifest_text =
         std::fs::read_to_string(paths.manifest_path()).expect("manifest should exist");
     assert!(!manifest_text.contains("test-token"));
@@ -675,77 +548,55 @@ fn github_token_is_sent_as_authorization_header_without_persisting_to_manifest()
     }
 }
 
-#[test]
-fn direct_github_install_plan_is_noop_without_network_when_package_is_already_managed() {
+#[tokio::test]
+async fn direct_github_install_plan_is_noop_without_network_when_package_is_already_managed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let first_http = Arc::new(FakeHttpClient::default());
-    first_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let first_server = LocalHttpServer::start();
+    let source_code_pro_download = first_server.url(&download_path("source-code-pro.zip"));
+    first_server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
-    first_http.with_download_bytes(
-        "https://downloads.example/source-code-pro.zip",
+    first_server.respond_bytes(
+        &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), first_http);
+    let app = app_with_server(paths.clone(), &first_server);
     let first_plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect("plan first install");
-    apply_plan(&app, first_plan);
+    apply_plan(&app, first_plan).await;
 
-    let no_route_http = Arc::new(FakeHttpClient::default());
-    let app = FontbrewApp::with_paths_and_http_client(paths, no_route_http.clone());
+    let no_route_server = LocalHttpServer::start();
+    let app = app_with_server(paths, &no_route_server);
     let plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect("already managed direct GitHub install should plan without network");
 
     assert!(plan.already_installed);
     assert!(plan.changes.is_empty());
-    assert!(no_route_http.requested_urls().is_empty());
+    assert!(no_route_server.request_urls().is_empty());
 }
 
-#[test]
-fn oversized_github_asset_download_is_rejected_without_manifest_or_package_store() {
+#[tokio::test]
+async fn oversized_github_asset_download_is_rejected_without_manifest_or_package_store() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {
-        "name": "source-code-pro.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro.zip"
-      }
-    ]
-  }
-]"#,
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
-    fake_http.with_download_content_length(
-        "https://downloads.example/source-code-pro.zip",
-        600 * 1024 * 1024,
-    );
-    let app = FontbrewApp::with_paths_and_http_client(paths.clone(), fake_http);
+    server.respond_content_length(&download_path("source-code-pro.zip"), 600 * 1024 * 1024);
+    let app = app_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect_err("oversized download should be rejected");
 
     assert!(matches!(
@@ -756,13 +607,13 @@ fn oversized_github_asset_download_is_rejected_without_manifest_or_package_store
     assert!(!paths.managed_store_dir().join("packages").exists());
 }
 
-#[test]
-fn github_install_fails_when_multiple_installable_assets_match() {
+#[tokio::test]
+async fn github_install_fails_when_multiple_installable_assets_match() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
+    let server = LocalHttpServer::start();
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
         r#"[
   {
     "tag_name": "v1.2.3",
@@ -781,10 +632,11 @@ fn github_install_fails_when_multiple_installable_assets_match() {
   }
 ]"#,
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http);
+    let app = app_with_server(paths, &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
         .expect_err("ambiguous GitHub assets should fail");
 
     match error {
@@ -805,36 +657,39 @@ fn github_install_fails_when_multiple_installable_assets_match() {
     }
 }
 
-#[test]
-fn github_asset_selector_resolves_asset_ambiguity() {
+#[tokio::test]
+async fn github_asset_selector_resolves_asset_ambiguity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let fake_http = Arc::new(FakeHttpClient::default());
-    fake_http.with_text(
-        &github_releases_url("adobe", "source-code-pro"),
-        r#"[
-  {
+    let server = LocalHttpServer::start();
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
     "tag_name": "v1.2.3",
     "draft": false,
     "prerelease": false,
     "assets": [
-      {
+      {{
         "name": "source-code-pro-desktop.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro-desktop.zip"
-      },
-      {
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
         "name": "source-code-pro-nerd-font.zip",
         "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
-      }
+      }}
     ]
-  }
-]"#,
+  }}
+]"#
+        ),
     );
-    fake_http.with_download_bytes(
-        "https://downloads.example/source-code-pro-desktop.zip",
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = FontbrewApp::with_paths_and_http_client(paths, fake_http.clone());
+    let app = app_with_server(paths, &server);
 
     let plan = app
         .install_plan(github_request(
@@ -842,15 +697,16 @@ fn github_asset_selector_resolves_asset_ambiguity() {
             "source-code-pro",
             Some("*desktop.zip"),
         ))
+        .await
         .expect("selector should resolve one asset");
-    let report = apply_plan(&app, plan);
+    let report = apply_plan(&app, plan).await;
 
     assert_eq!(report.package_id, package_id("source-code-pro"));
     assert_eq!(
-        fake_http.requested_urls(),
+        server.request_urls(),
         vec![
-            github_releases_url("adobe", "source-code-pro"),
-            "https://downloads.example/source-code-pro-desktop.zip".to_string(),
+            server.url(&github_releases_path("adobe", "source-code-pro")),
+            desktop_download,
         ]
     );
 }

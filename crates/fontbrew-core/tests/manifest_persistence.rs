@@ -43,8 +43,8 @@ fn package_record(id: &str, version: &str) -> ManifestPackageRecord {
     }
 }
 
-#[test]
-fn empty_manifest_serializes_schema_version_and_packages() {
+#[tokio::test]
+async fn empty_manifest_serializes_schema_version_and_packages() {
     let manifest = ManifestV1::empty();
 
     let json = serde_json::to_value(&manifest).expect("manifest should serialize");
@@ -56,8 +56,8 @@ fn empty_manifest_serializes_schema_version_and_packages() {
         .is_empty());
 }
 
-#[test]
-fn manifest_packages_serialize_as_keyed_object_by_package_id() {
+#[tokio::test]
+async fn manifest_packages_serialize_as_keyed_object_by_package_id() {
     let mut manifest = ManifestV1::empty();
     manifest
         .insert_package(package_record("inter", "1.0.0"))
@@ -73,8 +73,8 @@ fn manifest_packages_serialize_as_keyed_object_by_package_id() {
     assert_eq!(json["packages"]["inter"]["version"], "1.0.0");
 }
 
-#[test]
-fn manifest_store_reads_and_writes_manifest_v1() {
+#[tokio::test]
+async fn manifest_store_reads_and_writes_manifest_v1() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     let mut manifest = ManifestV1::empty();
@@ -107,8 +107,8 @@ fn manifest_store_reads_and_writes_manifest_v1() {
     );
 }
 
-#[test]
-fn manifest_store_returns_empty_manifest_when_file_is_missing() {
+#[tokio::test]
+async fn manifest_store_returns_empty_manifest_when_file_is_missing() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("missing-manifest.json");
 
@@ -117,8 +117,8 @@ fn manifest_store_returns_empty_manifest_when_file_is_missing() {
     assert!(manifest.packages.is_empty());
 }
 
-#[test]
-fn manifest_insert_replace_remove_and_lookup_package_records() {
+#[tokio::test]
+async fn manifest_insert_replace_remove_and_lookup_package_records() {
     let mut manifest = ManifestV1::empty();
     let id = package_id("inter");
 
@@ -145,8 +145,8 @@ fn manifest_insert_replace_remove_and_lookup_package_records() {
     assert!(manifest.get_package(&id).is_none());
 }
 
-#[test]
-fn manifest_source_shapes_are_explicit_and_serializable() {
+#[tokio::test]
+async fn manifest_source_shapes_are_explicit_and_serializable() {
     let sources = vec![
         ManifestSource::GitHub {
             owner: "rsms".to_string(),
@@ -168,8 +168,8 @@ fn manifest_source_shapes_are_explicit_and_serializable() {
     assert_eq!(round_trip, sources);
 }
 
-#[test]
-fn manifest_source_json_shape_is_stable() {
+#[tokio::test]
+async fn manifest_source_json_shape_is_stable() {
     let record = package_record("inter", "1.0.0");
 
     let json = serde_json::to_value(&record).expect("record should serialize");
@@ -189,8 +189,8 @@ fn manifest_source_json_shape_is_stable() {
     assert_eq!(json["activationArtifacts"][0]["strategy"], "Symlink");
 }
 
-#[test]
-fn manifest_store_rejects_missing_schema_version() {
+#[tokio::test]
+async fn manifest_store_rejects_missing_schema_version() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     fs::write(&path, r#"{"packages":[]}"#).expect("write invalid manifest");
@@ -206,8 +206,8 @@ fn manifest_store_rejects_missing_schema_version() {
     ));
 }
 
-#[test]
-fn manifest_store_rejects_newer_schema_version() {
+#[tokio::test]
+async fn manifest_store_rejects_newer_schema_version() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     fs::write(&path, r#"{"schemaVersion":2,"packages":[]}"#).expect("write invalid manifest");
@@ -223,8 +223,8 @@ fn manifest_store_rejects_newer_schema_version() {
     ));
 }
 
-#[test]
-fn manifest_store_rejects_package_key_record_mismatch_on_read() {
+#[tokio::test]
+async fn manifest_store_rejects_package_key_record_mismatch_on_read() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     fs::write(
@@ -254,8 +254,8 @@ fn manifest_store_rejects_package_key_record_mismatch_on_read() {
     assert!(error.to_string().contains("package key"));
 }
 
-#[test]
-fn manifest_store_rejects_invalid_package_map_key() {
+#[tokio::test]
+async fn manifest_store_rejects_invalid_package_map_key() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     fs::write(
@@ -285,8 +285,8 @@ fn manifest_store_rejects_invalid_package_map_key() {
     assert!(error.to_string().contains("invalid package id"));
 }
 
-#[test]
-fn manifest_store_rejects_package_key_record_mismatch_on_write() {
+#[tokio::test]
+async fn manifest_store_rejects_package_key_record_mismatch_on_write() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     let mut packages = BTreeMap::new();
@@ -305,8 +305,8 @@ fn manifest_store_rejects_package_key_record_mismatch_on_write() {
     assert!(error.to_string().contains("package key"));
 }
 
-#[test]
-fn manifest_writes_replace_final_file_without_partial_content() {
+#[tokio::test]
+async fn manifest_writes_replace_final_file_without_partial_content() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let path = temp_dir.path().join("manifest.json");
     let mut old_manifest = ManifestV1::empty();

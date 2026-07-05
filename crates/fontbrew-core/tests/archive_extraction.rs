@@ -66,8 +66,8 @@ fn extract_archive(
     ZipArchiveExtractor::new(options).extract(archive_path, staging_dir)
 }
 
-#[test]
-fn archives_extract_safe_desktop_fonts_into_staging() {
+#[tokio::test]
+async fn archives_extract_safe_desktop_fonts_into_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("fonts.zip");
     let staging_dir = temp.path().join("staging");
@@ -105,8 +105,8 @@ fn archives_extract_safe_desktop_fonts_into_staging() {
     );
 }
 
-#[test]
-fn archives_reject_path_traversal_entries_without_writing_outside_staging() {
+#[tokio::test]
+async fn archives_reject_path_traversal_entries_without_writing_outside_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("evil.zip");
     let staging_dir = temp.path().join("staging");
@@ -134,8 +134,8 @@ fn archives_reject_path_traversal_entries_without_writing_outside_staging() {
     );
 }
 
-#[test]
-fn archives_reject_absolute_path_entries_without_writing_outside_staging() {
+#[tokio::test]
+async fn archives_reject_absolute_path_entries_without_writing_outside_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("absolute.zip");
     let staging_dir = temp.path().join("staging");
@@ -164,8 +164,8 @@ fn archives_reject_absolute_path_entries_without_writing_outside_staging() {
     );
 }
 
-#[test]
-fn archives_ignore_webfont_only_archives() {
+#[tokio::test]
+async fn archives_ignore_webfont_only_archives() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("web.zip");
     let staging_dir = temp.path().join("staging");
@@ -197,8 +197,8 @@ fn archives_ignore_webfont_only_archives() {
     assert!(!staging_dir.join("web/styles.css").exists());
 }
 
-#[test]
-fn archives_extract_desktop_fonts_from_mixed_web_and_desktop_archives() {
+#[tokio::test]
+async fn archives_extract_desktop_fonts_from_mixed_web_and_desktop_archives() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("mixed.zip");
     let staging_dir = temp.path().join("staging");
@@ -237,8 +237,8 @@ fn archives_extract_desktop_fonts_from_mixed_web_and_desktop_archives() {
     assert!(!staging_dir.join("README.md").exists());
 }
 
-#[test]
-fn archives_extract_ttc_and_otc_desktop_formats() {
+#[tokio::test]
+async fn archives_extract_ttc_and_otc_desktop_formats() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("collections.zip");
     let staging_dir = temp.path().join("staging");
@@ -272,8 +272,8 @@ fn archives_extract_ttc_and_otc_desktop_formats() {
     assert_eq!(files[1].format, FontFileFormat::Otc);
 }
 
-#[test]
-fn archives_reject_entries_larger_than_single_file_limit() {
+#[tokio::test]
+async fn archives_reject_entries_larger_than_single_file_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("oversized.zip");
     let staging_dir = temp.path().join("staging");
@@ -300,8 +300,8 @@ fn archives_reject_entries_larger_than_single_file_limit() {
     assert!(!staging_dir.join("Big.ttf").exists());
 }
 
-#[test]
-fn archives_reject_archives_over_total_size_limit() {
+#[tokio::test]
+async fn archives_reject_archives_over_total_size_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("oversized-total.zip");
     let staging_dir = temp.path().join("staging");
@@ -334,8 +334,8 @@ fn archives_reject_archives_over_total_size_limit() {
     assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
 }
 
-#[test]
-fn archives_reject_when_desktop_font_count_exceeds_limit() {
+#[tokio::test]
+async fn archives_reject_when_desktop_font_count_exceeds_limit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("too-many.zip");
     let staging_dir = temp.path().join("staging");
@@ -368,8 +368,8 @@ fn archives_reject_when_desktop_font_count_exceeds_limit() {
     assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
 }
 
-#[test]
-fn archives_reject_special_file_unix_modes() {
+#[tokio::test]
+async fn archives_reject_special_file_unix_modes() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("fifo.zip");
     let staging_dir = temp.path().join("staging");
@@ -386,8 +386,8 @@ fn archives_reject_special_file_unix_modes() {
     assert!(!staging_dir.join("Pipe.ttf").exists());
 }
 
-#[test]
-fn archives_reject_symlink_entries() {
+#[tokio::test]
+async fn archives_reject_symlink_entries() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("symlink.zip");
     let staging_dir = temp.path().join("staging");
@@ -405,8 +405,8 @@ fn archives_reject_symlink_entries() {
 }
 
 #[cfg(unix)]
-#[test]
-fn archives_reject_destinations_that_cross_existing_symlink_ancestor() {
+#[tokio::test]
+async fn archives_reject_destinations_that_cross_existing_symlink_ancestor() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -437,8 +437,8 @@ fn archives_reject_destinations_that_cross_existing_symlink_ancestor() {
 }
 
 #[cfg(unix)]
-#[test]
-fn archives_reject_symlink_staging_root_without_writing_outside() {
+#[tokio::test]
+async fn archives_reject_symlink_staging_root_without_writing_outside() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("fonts.zip");
     let outside_dir = temp.path().join("outside-staging");
@@ -466,8 +466,8 @@ fn archives_reject_symlink_staging_root_without_writing_outside() {
 }
 
 #[cfg(unix)]
-#[test]
-fn archives_reject_symlink_staging_parent_without_writing_outside() {
+#[tokio::test]
+async fn archives_reject_symlink_staging_parent_without_writing_outside() {
     let temp = tempfile::tempdir().expect("tempdir");
     let archive_path = temp.path().join("fonts.zip");
     let outside_parent = temp.path().join("outside-parent");

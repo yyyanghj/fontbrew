@@ -21,8 +21,8 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     )
 }
 
-#[test]
-fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
+#[tokio::test]
+async fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = FontbrewPaths::for_tests(
         temp.path().join("data"),
@@ -54,8 +54,18 @@ fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
     );
 }
 
-#[test]
-fn missing_config_file_uses_deterministic_v1_defaults() {
+#[tokio::test]
+async fn list_packages_returns_empty_report_from_async_app_seam() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = FontbrewApp::with_paths(test_paths(&temp));
+
+    let report = app.list_packages().await.expect("list packages");
+
+    assert!(report.packages.is_empty());
+}
+
+#[tokio::test]
+async fn missing_config_file_uses_deterministic_v1_defaults() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
 
@@ -76,8 +86,8 @@ fn missing_config_file_uses_deterministic_v1_defaults() {
     assert_eq!(config.update_concurrency, 4);
 }
 
-#[test]
-fn config_file_parses_v1_toml_shape() {
+#[tokio::test]
+async fn config_file_parses_v1_toml_shape() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -107,8 +117,8 @@ update_concurrency = 2
     assert_eq!(config.update_concurrency, 2);
 }
 
-#[test]
-fn config_file_rejects_reserved_copy_activation_strategy() {
+#[tokio::test]
+async fn config_file_rejects_reserved_copy_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -131,8 +141,8 @@ activation_strategy = "copy"
     assert!(message.contains("not supported"));
 }
 
-#[test]
-fn missing_and_newer_schema_versions_are_structured_config_errors() {
+#[tokio::test]
+async fn missing_and_newer_schema_versions_are_structured_config_errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing_schema_path = temp.path().join("missing-schema.toml");
     let newer_schema_path = temp.path().join("newer-schema.toml");
@@ -147,8 +157,8 @@ fn missing_and_newer_schema_versions_are_structured_config_errors() {
     assert!(matches!(newer_error, FontbrewError::Config { .. }));
 }
 
-#[test]
-fn unknown_grouped_config_fields_are_structured_config_errors() {
+#[tokio::test]
+async fn unknown_grouped_config_fields_are_structured_config_errors() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -167,8 +177,8 @@ metadata_ttl = 12
     assert!(matches!(error, FontbrewError::Config { .. }));
 }
 
-#[test]
-fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
+#[tokio::test]
+async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -178,6 +188,7 @@ fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
             key: "install.format_preference".to_string(),
             value: "ttf,otf".to_string(),
         })
+        .await
         .expect("set format preference");
 
     assert_eq!(set_report.key, "install.format_preference");
@@ -200,6 +211,7 @@ fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
         .config_get(ConfigGetRequest {
             key: "install.format_preference".to_string(),
         })
+        .await
         .expect("get format preference");
 
     assert_eq!(get_report.key, "install.format_preference");
@@ -209,8 +221,8 @@ fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
     );
 }
 
-#[test]
-fn config_set_and_get_support_all_known_scalar_keys() {
+#[tokio::test]
+async fn config_set_and_get_support_all_known_scalar_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app = FontbrewApp::with_paths(test_paths(&temp));
 
@@ -228,6 +240,7 @@ fn config_set_and_get_support_all_known_scalar_keys() {
                 key: key.to_string(),
                 value: raw_value.to_string(),
             })
+            .await
             .expect("set known config key");
         assert_eq!(set_report.key, key);
         assert_eq!(set_report.value, expected_value);
@@ -236,14 +249,15 @@ fn config_set_and_get_support_all_known_scalar_keys() {
             .config_get(ConfigGetRequest {
                 key: key.to_string(),
             })
+            .await
             .expect("get known config key");
         assert_eq!(get_report.key, key);
         assert_eq!(get_report.value, expected_value);
     }
 }
 
-#[test]
-fn config_set_rejects_reserved_copy_activation_strategy() {
+#[tokio::test]
+async fn config_set_rejects_reserved_copy_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -253,6 +267,7 @@ fn config_set_rejects_reserved_copy_activation_strategy() {
             key: "install.activation_strategy".to_string(),
             value: "copy".to_string(),
         })
+        .await
         .expect_err("copy activation should be rejected");
 
     assert!(matches!(error, FontbrewError::Config { .. }));
@@ -263,8 +278,8 @@ fn config_set_rejects_reserved_copy_activation_strategy() {
     assert!(!paths.config_path().exists());
 }
 
-#[test]
-fn config_set_uses_global_write_lock() {
+#[tokio::test]
+async fn config_set_uses_global_write_lock() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -277,14 +292,15 @@ fn config_set_uses_global_write_lock() {
             key: "network.metadata_ttl_hours".to_string(),
             value: "6".to_string(),
         })
+        .await
         .expect_err("config set should fail while global lock is held");
 
     assert!(matches!(error, FontbrewError::Lock { .. }));
     assert!(!paths.config_path().exists());
 }
 
-#[test]
-fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
+#[tokio::test]
+async fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app = FontbrewApp::with_paths(test_paths(&temp));
 
@@ -292,18 +308,21 @@ fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
         .config_get(ConfigGetRequest {
             key: "install.unknown".to_string(),
         })
+        .await
         .expect_err("unknown get key should fail");
     let unknown_set = app
         .config_set(ConfigSetRequest {
             key: "install.unknown".to_string(),
             value: "true".to_string(),
         })
+        .await
         .expect_err("unknown set key should fail");
     let malformed_set = app
         .config_set(ConfigSetRequest {
             key: "network.update_concurrency".to_string(),
             value: "many".to_string(),
         })
+        .await
         .expect_err("malformed set value should fail");
 
     assert!(matches!(unknown_get, FontbrewError::Config { .. }));
@@ -311,8 +330,8 @@ fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
     assert!(matches!(malformed_set, FontbrewError::Config { .. }));
 }
 
-#[test]
-fn persisted_config_rejects_empty_or_zero_values() {
+#[tokio::test]
+async fn persisted_config_rejects_empty_or_zero_values() {
     let temp = tempfile::tempdir().expect("tempdir");
 
     for (name, content) in [
@@ -357,8 +376,8 @@ update_concurrency = 0
     }
 }
 
-#[test]
-fn atomic_write_replaces_final_file_without_partial_content() {
+#[tokio::test]
+async fn atomic_write_replaces_final_file_without_partial_content() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("nested/manifest.json");
 
@@ -371,8 +390,8 @@ fn atomic_write_replaces_final_file_without_partial_content() {
     assert_eq!(final_content, r#"{"packages":[{"id":"inter"}]}"#);
 }
 
-#[test]
-fn second_global_write_lock_attempt_fails_while_first_lock_is_held() {
+#[tokio::test]
+async fn second_global_write_lock_attempt_fails_while_first_lock_is_held() {
     let temp = tempfile::tempdir().expect("tempdir");
     let lock_path = temp.path().join("fontbrew.lock");
 

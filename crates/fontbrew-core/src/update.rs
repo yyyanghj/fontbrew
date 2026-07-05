@@ -2,7 +2,7 @@ use crate::{
     activation::{deactivate, ActivationArtifact, ActivationPlan},
     config::FontbrewConfig,
     error::{FontbrewError, Result},
-    fetch::HttpClient,
+    fetch::NetworkClient,
     fs::{ensure_existing_path_does_not_cross_symlink, AtomicWriteCommitStatus, GlobalFileLock},
     github, install,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
@@ -16,22 +16,25 @@ use crate::{
     platform::FontbrewPaths,
     providers::FontsourceProvider,
     sources::GitHubRepo,
-    tasks,
     version::{compare_versions, VersionComparison},
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
+use futures::{stream, StreamExt};
 use std::{
     fs,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 static UPDATE_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn outdated(
+pub async fn outdated(
     paths: &FontbrewPaths,
     request: OutdatedRequest,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
 ) -> Result<OutdatedReport> {
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let records = selected_records(&manifest, &request.package_ids)?;
@@ -39,7 +42,8 @@ pub fn outdated(
     let mut not_updatable = Vec::new();
 
     for record in records {
-        let Some(latest_version) = latest_update_version(paths, &record, http_client)? else {
+        let Some(latest_version) = latest_update_version(paths, &record, network_client).await?
+        else {
             not_updatable.push(not_updatable_package(&record, "no update source"));
             continue;
         };
@@ -68,15 +72,16 @@ pub fn outdated(
     })
 }
 
-fn latest_update_version(
+async fn latest_update_version(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
 ) -> Result<Option<PackageVersion>> {
     if let Some(provider_id) = fontsource_provider_id(record) {
         return Ok(Some(
-            FontsourceProvider::new(paths, http_client)
-                .resolve_update_package(provider_id)?
+            FontsourceProvider::new(paths, network_client)
+                .resolve_update_package(provider_id)
+                .await?
                 .version,
         ));
     }
@@ -85,10 +90,9 @@ fn latest_update_version(
         return Ok(None);
     };
 
-    Ok(Some(github::resolve_latest_stable_release_version(
-        http_client,
-        &repo,
-    )?))
+    Ok(Some(
+        github::resolve_latest_stable_release_version(network_client, &repo).await?,
+    ))
 }
 
 fn selected_records(
@@ -110,22 +114,22 @@ fn selected_records(
     Ok(records)
 }
 
-pub fn update_plan(
+pub async fn update_plan(
     paths: &FontbrewPaths,
     request: UpdateRequest,
-    http_client: &dyn HttpClient,
+    network_client: &NetworkClient,
     progress: &mut dyn ProgressSink,
-    cancellation: &dyn CancellationToken,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<UpdatePlan> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     install::cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let records = selected_records(&manifest, &request.package_ids)?;
     let config_jobs = FontbrewConfig::load(&paths.config_path())?.update_concurrency;
     let jobs = request.jobs.unwrap_or(config_jobs).max(1);
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     for record in &records {
         progress.emit(ProgressEvent::PreparingUpdate {
@@ -133,9 +137,13 @@ pub fn update_plan(
         });
     }
 
-    let outcomes = tasks::map_bounded(records, jobs, |record| {
-        prepare_update_package(paths, record, http_client, cancellation)
-    });
+    let outcomes = stream::iter(records.into_iter().map(|record| {
+        let cancellation = cancellation.clone();
+        async move { prepare_update_package(paths, record, network_client, cancellation).await }
+    }))
+    .buffered(jobs)
+    .collect::<Vec<_>>()
+    .await;
 
     let mut prepared = Vec::new();
     let mut prepared_packages = Vec::new();
@@ -154,7 +162,7 @@ pub fn update_plan(
             PrepareOutcome::UpToDate => {}
         }
     }
-    if let Err(error) = ensure_not_cancelled(cancellation) {
+    if let Err(error) = ensure_not_cancelled(cancellation.as_ref()) {
         for prepared_update in &prepared_packages {
             install::cleanup_staging(&prepared_update.prepared.staging_dir);
         }
@@ -201,13 +209,13 @@ enum PrepareOutcome {
     UpToDate,
 }
 
-fn prepare_update_package(
+async fn prepare_update_package(
     paths: &FontbrewPaths,
     record: ManifestPackageRecord,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> PrepareOutcome {
-    match prepare_update_package_inner(paths, &record, http_client, cancellation) {
+    match prepare_update_package_inner(paths, &record, network_client, cancellation).await {
         Ok(Some(prepared)) => PrepareOutcome::Prepared(Box::new(prepared)),
         Ok(None) => PrepareOutcome::UpToDate,
         Err(error) => PrepareOutcome::Failed(UpdatePlanFailure {
@@ -217,21 +225,22 @@ fn prepare_update_package(
     }
 }
 
-fn prepare_update_package_inner(
+async fn prepare_update_package_inner(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<Option<PreparedUpdatePackage>> {
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     if let Some(provider_id) = fontsource_provider_id(record) {
         return prepare_fontsource_update_package_inner(
             paths,
             record,
             provider_id,
-            http_client,
+            network_client,
             cancellation,
-        );
+        )
+        .await;
     }
 
     let Some(repo) = github_update_repo(record)? else {
@@ -240,9 +249,10 @@ fn prepare_update_package_inner(
         });
     };
 
-    ensure_not_cancelled(cancellation)?;
-    let asset = github::resolve_release_asset(http_client, &repo, None, &record.package_id)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let asset =
+        github::resolve_release_asset(network_client, &repo, None, &record.package_id).await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     match compare_versions(&record.version, &asset.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
         VersionComparison::Unknown => {
@@ -266,10 +276,11 @@ fn prepare_update_package_inner(
         asset,
         source,
         options,
-        http_client,
-        cancellation,
-    )?;
-    if let Err(error) = ensure_not_cancelled(cancellation) {
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+    if let Err(error) = ensure_not_cancelled(cancellation.as_ref()) {
         install::cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }
@@ -290,17 +301,18 @@ fn prepare_update_package_inner(
     }))
 }
 
-fn prepare_fontsource_update_package_inner(
+async fn prepare_fontsource_update_package_inner(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
     provider_id: &str,
-    http_client: &dyn HttpClient,
-    cancellation: &dyn CancellationToken,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
 ) -> Result<Option<PreparedUpdatePackage>> {
-    ensure_not_cancelled(cancellation)?;
-    let resolved =
-        FontsourceProvider::new(paths, http_client).resolve_update_package(provider_id)?;
-    ensure_not_cancelled(cancellation)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let resolved = FontsourceProvider::new(paths, network_client)
+        .resolve_update_package(provider_id)
+        .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
     match compare_versions(&record.version, &resolved.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
         VersionComparison::Unknown => {
@@ -322,10 +334,11 @@ fn prepare_fontsource_update_package_inner(
         paths,
         resolved,
         options,
-        http_client,
-        cancellation,
-    )?;
-    if let Err(error) = ensure_not_cancelled(cancellation) {
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+    if let Err(error) = ensure_not_cancelled(cancellation.as_ref()) {
         install::cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }
