@@ -1,11 +1,11 @@
 ---
 name: release-flow
-description: Standardize Fontbrew releases from release gate through published artifact verification. Use when cutting, publishing, tagging, shipping, or preparing a Fontbrew release, or when changelog, version, release notes, tags, and release automation must stay in sync.
+description: Standardize Fontbrew releases through the local release gate, release prep commit, annotated tag, and a single push of both refs. Use when cutting, publishing, tagging, shipping, or preparing a Fontbrew release, or when changelog, version, release notes, tags, and release automation must stay in sync without waiting for asynchronous CI or Release completion.
 ---
 
 # Release Flow
 
-Use this as Fontbrew's release gate: do not push a release tag until version files, changelog, build, tests, and release notes are coherent.
+Use this as Fontbrew's release gate: do not push a release tag until version files, changelog, build, tests, and release notes are coherent. End the flow once the release prep commit and annotated tag are pushed in a single remote push; do not poll CI, Release workflow runs, GitHub Release status, or published assets unless the user explicitly asks.
 
 ## Steps
 
@@ -34,25 +34,22 @@ Use this as Fontbrew's release gate: do not push a release tag until version fil
    - Run `cargo build --release -p fontbrew-cli` when binary packaging changed or before a release tag.
    - Completion criterion: every required command passes, or a specific external blocker is recorded with its command and output.
 
-5. Commit and push release prep.
+5. Commit and tag locally.
    - Stage only release-related files.
    - Use the repository's conventional-style commit subject.
-   - Push `main` and watch required CI until it succeeds.
-   - Completion criterion: `origin/main` contains the release prep commit and CI is green.
-
-6. Tag and publish.
    - Create an annotated tag matching the Cargo version, such as `v0.0.1`.
-   - Push the tag only after the release gate and CI pass.
-   - Watch the Release workflow through completion.
-   - Completion criterion: the GitHub Release exists, is not draft unless requested, points at the intended tag, and contains expected assets.
+   - Do not push yet.
+   - Completion criterion: the release prep commit exists locally on `main` and the annotated tag points at that commit.
 
-7. Verify as a user.
-   - Query the published release and asset names.
-   - Check README install instructions against the published assets.
-   - When practical, install from the release and run `fontbrew --help`.
-   - Completion criterion: a user following README can discover and install the release.
+6. Push release refs once.
+   - Push `main` and the tag in one command after the local release gate passes, such as `git push --atomic origin main v0.0.1`.
+   - If `--atomic` is unsupported or the combined push fails, stop and record the exact blocker instead of splitting the branch and tag into separate pushes without explicit user direction.
+   - Do not wait for remote CI, the Release workflow, GitHub Release, or asset publication unless the user explicitly asks.
+   - Completion criterion: both `origin/main` and the intended remote tag contain the release refs, or the exact push blocker is recorded.
 
-8. Report precisely.
-   - Include the commit, tag, release URL, CI status, and any residual warnings.
+7. Report precisely.
+   - Include the pushed commit, pushed tag, local release gate results, and any residual warnings.
+   - Mention the single push command used or why it failed.
+   - State that CI and Release automation were left to run asynchronously when not explicitly checked.
    - Mention skipped checks explicitly.
-   - Completion criterion: the user can tell exactly what shipped and what remains.
+   - Completion criterion: the user can tell exactly which refs were pushed and what remote work remains asynchronous.
