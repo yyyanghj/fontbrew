@@ -1,0 +1,21 @@
+crates/fontbrew-cli/src/exit.rs
+  s_63096f0de80f95::t_cbe142ad29bac5 3,53-55,159-201
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.5",
+  "base_commit_sha": "a2f4f91c4829099d8239136fce053f2e4d319807",
+  "prompts": {},
+  "sessions": {
+    "s_63096f0de80f95": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3ac5-d993-7130-848f-d849dd674274",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
