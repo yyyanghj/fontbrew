@@ -2,6 +2,13 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.9 - 2026-07-07
+
+- 修复 GitHub API 限流时的错误提示，明确说明可通过 `GITHUB_TOKEN`
+  使用认证请求，并保留 GitHub 文档链接。
+- 优化 GitHub Release 多个可安装资产匹配时的错误提示，提示用户使用
+  `--asset <name-or-glob>` 选择资产，并列出匹配项示例。
+
 ## 0.0.8 - 2026-07-05
 
 - Changed the multi-family install flag from `--all-families` to `--all` with
