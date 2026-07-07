@@ -77,6 +77,12 @@ struct GitHubReleaseAsset {
     browser_download_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GitHubErrorResponse {
+    message: String,
+    documentation_url: Option<String>,
+}
+
 async fn fetch_latest_stable_release(
     network_client: &NetworkClient,
     repo: &GitHubRepo,
@@ -176,8 +182,40 @@ fn successful_response_body(status: u16, body: Vec<u8>, url: &str) -> Result<Vec
     }
 
     Err(FontbrewError::Network {
-        message: format!("HTTP request failed with status {status} for {url}"),
+        message: github_api_error_message(status, &body, url),
     })
+}
+
+fn github_api_error_message(status: u16, body: &[u8], url: &str) -> String {
+    let fallback = || format!("HTTP request failed with status {status} for {url}");
+    let Ok(error) = serde_json::from_slice::<GitHubErrorResponse>(body) else {
+        return fallback();
+    };
+    let github_message = error.message.trim();
+    if github_message.is_empty() {
+        return fallback();
+    }
+
+    let mut message = if github_message
+        .to_ascii_lowercase()
+        .contains("rate limit exceeded")
+    {
+        format!(
+            "GitHub API rate limit exceeded for {url}; set GITHUB_TOKEN to use authenticated requests. GitHub response: {github_message}"
+        )
+    } else {
+        format!("HTTP request failed with status {status} for {url}: {github_message}")
+    };
+
+    if let Some(documentation_url) = error.documentation_url.as_deref() {
+        let documentation_url = documentation_url.trim();
+        if !documentation_url.is_empty() {
+            message.push_str("; docs: ");
+            message.push_str(documentation_url);
+        }
+    }
+
+    message
 }
 
 fn github_headers() -> Vec<HttpHeader> {

@@ -549,6 +549,33 @@ async fn github_token_is_sent_as_authorization_header_without_persisting_to_mani
 }
 
 #[tokio::test]
+async fn github_api_rate_limit_error_mentions_github_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    server.respond_status(
+        &github_releases_path("githubnext", "monaspace"),
+        403,
+        r#"{"message":"API rate limit exceeded for 127.0.0.1. Authenticated requests get a higher rate limit.","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}"#,
+    );
+    let app = app_with_server(paths.clone(), &server);
+
+    let error = app
+        .install_plan(github_request("githubnext", "monaspace", None))
+        .await
+        .expect_err("rate-limited GitHub API request should fail");
+
+    assert!(matches!(&error, FontbrewError::Network { .. }));
+    let message = error.to_string();
+    assert!(message.contains("GitHub API rate limit exceeded"));
+    assert!(message.contains("GITHUB_TOKEN"));
+    assert!(message
+        .contains("https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"));
+    assert!(!paths.manifest_path().exists());
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[tokio::test]
 async fn direct_github_install_plan_is_noop_without_network_when_package_is_already_managed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
