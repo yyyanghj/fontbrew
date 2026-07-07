@@ -1,6 +1,6 @@
 use std::io;
 
-use fontbrew_core::{FamilyName, FontbrewError, PlanRisk};
+use fontbrew_core::{FamilyName, FontbrewError, PackageId, PlanRisk};
 
 pub const SUCCESS: u8 = 0;
 pub const FAILURE: u8 = 1;
@@ -49,6 +49,9 @@ impl CliError {
         match self {
             Self::Core(FontbrewError::FamilySelectionRequired { families }) => {
                 family_selection_message(families)
+            }
+            Self::Core(FontbrewError::AmbiguousAssets { package_id, assets }) => {
+                ambiguous_assets_message(package_id, assets)
             }
             Self::Core(error) => error.to_string(),
             Self::Io(error) => error.to_string(),
@@ -152,4 +155,47 @@ fn family_selection_message(families: &[FamilyName]) -> String {
     format!(
         "source contains multiple font families; select one or more with --family, or install all with --all: {family_list}"
     )
+}
+
+fn ambiguous_assets_message(package_id: &PackageId, assets: &[String]) -> String {
+    let mut message = format!(
+        "multiple release assets matched for {}; choose one with --asset <name-or-glob>",
+        package_id.as_str()
+    );
+
+    if !assets.is_empty() {
+        message.push_str(". Matching assets: ");
+        message.push_str(&assets.join(", "));
+        message.push_str(". Example: --asset \"");
+        message.push_str(&assets[0]);
+        message.push('"');
+    }
+
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use fontbrew_core::{FontbrewError, PackageId};
+
+    use super::CliError;
+
+    #[test]
+    fn ambiguous_assets_error_points_to_asset_selector_without_debug_shape() {
+        let error = CliError::from(FontbrewError::AmbiguousAssets {
+            package_id: PackageId::parse("monaspace").expect("package id"),
+            assets: vec![
+                "monaspace-static-v1.400.zip".to_string(),
+                "monaspace-variable-v1.400.zip".to_string(),
+            ],
+        });
+
+        let message = error.message();
+
+        assert_eq!(error.kind(), "ambiguous_assets");
+        assert!(message.contains("--asset <name-or-glob>"));
+        assert!(message.contains("--asset \"monaspace-static-v1.400.zip\""));
+        assert!(message.contains("monaspace-variable-v1.400.zip"));
+        assert!(!message.contains("PackageId"));
+    }
 }
