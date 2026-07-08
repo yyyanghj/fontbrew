@@ -2,6 +2,16 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.10 - 2026-07-08
+
+- 为安装、移除、搜索、检查更新、自更新等可能耗时的 CLI 阶段增加活动
+  loading 提示，TTY 下使用动态 spinner，非 TTY verbose 输出保持可读日志。
+- 优化多 family 安装流程，交互式选择 family 后复用第一次下载和解析得到的
+  pending archive，避免 GitHub Release 资产被重复下载。
+- 优化批量 family 安装计划生成，同一 archive 只下载和解析一次，并合并扫描
+  已安装字体风险，减少重复解析和重复扫描开销。
+- 改进安装进度阶段展示，显式区分准备安装计划、检查已安装字体和实际安装阶段。
+
 ## 0.0.9 - 2026-07-07
 
 - 修复 GitHub API 限流时的错误提示，明确说明可通过 `GITHUB_TOKEN`
