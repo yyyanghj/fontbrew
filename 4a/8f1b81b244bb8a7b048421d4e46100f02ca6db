@@ -1,0 +1,25 @@
+CHANGELOG.md
+  s_89ee02598b84d8::t_120de4542a79ee 5-14
+Cargo.lock
+  s_89ee02598b84d8::t_26a3e98aca25ad 455,477
+Cargo.toml
+  s_89ee02598b84d8::t_986f6f511bed77 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4a8f1b81b244bb8a7b048421d4e46100f02ca6db",
+  "prompts": {},
+  "sessions": {
+    "s_89ee02598b84d8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3b7a-781e-7a50-b99f-f09c6e480d6d",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
