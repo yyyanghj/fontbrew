@@ -1,0 +1,37 @@
+crates/fontbrew-cli/src/cli.rs
+  s_89ee02598b84d8::t_912db1edf0803a 14-16,21,327-330,332,334,336-337,403-407,426-477,484,494-522,555,609-619,628,641-642,647-649,664-667,688-689,694-697,711-712
+crates/fontbrew-cli/src/progress.rs
+  s_89ee02598b84d8::t_c6cda287f03d9d 21-23,25-28,33-38
+crates/fontbrew-cli/src/reporter.rs
+  s_89ee02598b84d8::t_52390f5c53b205 33-38
+crates/fontbrew-cli/src/reporter/human.rs
+  s_89ee02598b84d8::t_477b0e158bd3fb 4-9,24-26,33,35-36,41,47-48,50-109,112-128,133,168,201,250,274,298,338,384,398,412,421,434,441,446-459,461-474,480,483,495,498-499,502,506,509-515,518,521,524-525,534
+crates/fontbrew-cli/src/self_update.rs
+  s_89ee02598b84d8::t_47d1e1177ab0f1 236
+crates/fontbrew-core/src/app.rs
+  s_89ee02598b84d8::t_3331eba5cc3aa9 19,27-85,180-320
+crates/fontbrew-core/src/install.rs
+  s_89ee02598b84d8::t_98eb4ccc8f3b21 91-140,171-209,246,266-378,432,541-543,787-819,825,835-845,847-855,884-888,972,990-1024,1029,1044,1054-1056,1061-1065,1069,1200-1234,1420-1456,1503-1507,1530,1549-1599,1607,1614-1625,1663-1690,1693,1699,1752,1762,1771,1795-1839,1854-1882,1937-1966,2024,2090-2306,2314-2324,3253-3261,3266,3334,3341-3388,3390-3394,3428
+crates/fontbrew-core/src/lib.rs
+  s_89ee02598b84d8::t_91e7afbd62095f 23
+crates/fontbrew-core/src/model.rs
+  s_89ee02598b84d8::t_feccc78640e36f 411-413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "be9a1cda1b7ed018ddb906badbce08b49ce7549c",
+  "prompts": {},
+  "sessions": {
+    "s_89ee02598b84d8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3b7a-781e-7a50-b99f-f09c6e480d6d",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
