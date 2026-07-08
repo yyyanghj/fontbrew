@@ -408,6 +408,9 @@ pub enum ProgressEvent {
     ParsingFonts {
         package_id: PackageId,
     },
+    CheckingInstallRisks {
+        package_id: PackageId,
+    },
     PreparingUpdate {
         package_id: PackageId,
     },

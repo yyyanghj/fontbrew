@@ -30,6 +30,12 @@ pub trait Reporter {
     fn render_error(&mut self, error: &CliError) -> CliResult<()>;
     #[allow(dead_code)]
     fn warn(&mut self, warning: &str) -> CliResult<()>;
+    fn start_activity(&mut self, _message: &str) -> CliResult<()> {
+        Ok(())
+    }
+    fn finish_activity(&mut self) -> CliResult<()> {
+        Ok(())
+    }
     fn progress(&mut self, event: &ProgressEvent) -> CliResult<()>;
     fn self_update_progress(&mut self, message: &str) -> CliResult<()>;
 }

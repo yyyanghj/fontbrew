@@ -16,11 +16,71 @@ use crate::platform::FontbrewPaths;
 use crate::providers::{FontsourceProvider, ProviderSearchRequest};
 use crate::sources::ProviderSource;
 use crate::update;
+use crate::{FamilyName, PackageId};
 
 #[derive(Clone)]
 pub struct FontbrewApp {
     paths: Option<FontbrewPaths>,
     network_client: Option<Arc<NetworkClient>>,
+}
+
+pub enum InstallPreparation {
+    Plan(InstallPlan),
+    FamilySelection(PendingFamilySelection),
+}
+
+pub struct PendingFamilySelection {
+    families: Vec<FamilyName>,
+    package_id_override: Option<PackageId>,
+    parsed_archive: Option<install::ParsedFontArchive>,
+}
+
+impl PendingFamilySelection {
+    fn new(
+        parsed_archive: install::ParsedFontArchive,
+        package_id_override: Option<PackageId>,
+    ) -> Self {
+        Self {
+            families: parsed_archive.archive_families.clone(),
+            package_id_override,
+            parsed_archive: Some(parsed_archive),
+        }
+    }
+
+    pub fn families(&self) -> &[FamilyName] {
+        &self.families
+    }
+
+    fn take_parsed_archive(&mut self) -> Result<install::ParsedFontArchive> {
+        self.parsed_archive
+            .take()
+            .ok_or_else(|| FontbrewError::Config {
+                message: "pending family selection has already been consumed".to_string(),
+            })
+    }
+}
+
+impl Drop for PendingFamilySelection {
+    fn drop(&mut self) {
+        if let Some(parsed_archive) = &self.parsed_archive {
+            install::cleanup_staging(&parsed_archive.staging_dir);
+        }
+    }
+}
+
+impl From<install::InstallPlanCandidate> for InstallPreparation {
+    fn from(candidate: install::InstallPlanCandidate) -> Self {
+        match candidate {
+            install::InstallPlanCandidate::Plan(plan) => Self::Plan(plan),
+            install::InstallPlanCandidate::FamilySelection {
+                parsed_archive,
+                package_id_override,
+            } => Self::FamilySelection(PendingFamilySelection::new(
+                parsed_archive,
+                package_id_override,
+            )),
+        }
+    }
 }
 
 impl FontbrewApp {
@@ -115,6 +175,147 @@ impl FontbrewApp {
                 .await
             }
         }
+    }
+
+    pub async fn prepare_install(
+        &self,
+        request: InstallRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<InstallPreparation> {
+        ensure_not_cancelled(cancellation.as_ref())?;
+        let paths = self.paths()?;
+        install::ensure_package_id_override_allowed_for_source(&request)?;
+        match request.source.clone() {
+            crate::InstallSource::LocalPath(_) => {
+                let (result, events) = spawn_blocking_result(move || {
+                    let mut recording = RecordingProgressSink::default();
+                    let InstallRequest {
+                        source,
+                        package_id_override,
+                        format_preference,
+                        selected_families,
+                        reinstall,
+                        ..
+                    } = request;
+                    let crate::InstallSource::LocalPath(path) = source else {
+                        unreachable!("local install branch should receive a local path");
+                    };
+                    let result = install::local_archive_install_plan_candidate(
+                        &paths,
+                        path,
+                        package_id_override,
+                        reinstall,
+                        format_preference,
+                        selected_families,
+                        &mut recording,
+                        cancellation.as_ref(),
+                    )
+                    .map(InstallPreparation::from);
+                    Ok((result, recording.events))
+                })
+                .await?;
+                replay_progress(progress, events);
+                result
+            }
+            crate::InstallSource::GitHubRepo { owner, repo } => {
+                let github_repo = crate::sources::GitHubRepo::parse(format!("{owner}/{repo}"))?;
+                install::github_repo_install_plan_candidate(
+                    &paths,
+                    github_repo,
+                    request,
+                    progress,
+                    self.network_client()?.as_ref(),
+                    cancellation.clone(),
+                )
+                .await
+                .map(InstallPreparation::from)
+            }
+            crate::InstallSource::Provider { .. } => {
+                let plan = self
+                    .install_plan_with_progress_and_cancellation(request, progress, cancellation)
+                    .await?;
+                Ok(InstallPreparation::Plan(plan))
+            }
+        }
+    }
+
+    pub async fn install_plans_with_progress_and_cancellation(
+        &self,
+        request: InstallRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<Vec<InstallPlan>> {
+        ensure_not_cancelled(cancellation.as_ref())?;
+        let paths = self.paths()?;
+        install::ensure_package_id_override_allowed_for_source(&request)?;
+        match request.source.clone() {
+            crate::InstallSource::LocalPath(_) => {
+                let (result, events) = spawn_blocking_result(move || {
+                    let mut recording = RecordingProgressSink::default();
+                    let result = install::install_plans_with_progress(
+                        &paths,
+                        request,
+                        &mut recording,
+                        cancellation.as_ref(),
+                    );
+                    Ok((result, recording.events))
+                })
+                .await?;
+                replay_progress(progress, events);
+                result
+            }
+            crate::InstallSource::GitHubRepo { owner, repo } => {
+                let github_repo = crate::sources::GitHubRepo::parse(format!("{owner}/{repo}"))?;
+                install::github_repo_install_plans(
+                    &paths,
+                    github_repo,
+                    request,
+                    progress,
+                    self.network_client()?.as_ref(),
+                    cancellation.clone(),
+                )
+                .await
+            }
+            crate::InstallSource::Provider { .. } => {
+                let plan = self
+                    .install_plan_with_progress_and_cancellation(request, progress, cancellation)
+                    .await?;
+                Ok(vec![plan])
+            }
+        }
+    }
+
+    pub async fn prepare_selected_families(
+        &self,
+        mut pending: PendingFamilySelection,
+        selected_families: Vec<FamilyName>,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<Vec<InstallPlan>> {
+        ensure_not_cancelled(cancellation.as_ref())?;
+        if pending.package_id_override.is_some() && !selected_families.is_empty() {
+            return Err(FontbrewError::Config {
+                message: "--id cannot be combined with --family".to_string(),
+            });
+        }
+
+        let paths = self.paths()?;
+        let parsed_archive = pending.take_parsed_archive()?;
+        let (result, events) = spawn_blocking_result(move || {
+            let mut recording = RecordingProgressSink::default();
+            let result = install::family_install_plans_from_parsed_archive(
+                &paths,
+                parsed_archive,
+                selected_families,
+                &mut recording,
+                cancellation.as_ref(),
+            );
+            Ok((result, recording.events))
+        })
+        .await?;
+        replay_progress(progress, events);
+        result
     }
 
     pub async fn apply_install(

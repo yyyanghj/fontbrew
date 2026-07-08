@@ -11,13 +11,14 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
     CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FontFormat, FontbrewApp,
-    FontbrewError, InfoRequest, InstallBatchReport, InstallPlan, InstallReport, InstallRequest,
-    InstallSource, OutdatedRequest, PackageId, RemoveRequest, SearchRequest, UpdateRequest,
+    InfoRequest, InstallBatchReport, InstallPlan, InstallPreparation, InstallReport,
+    InstallRequest, InstallSource, OutdatedRequest, PackageId, PendingFamilySelection,
+    RemoveRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
     confirm::{ConfirmationOptions, Confirmer, HumanConfirmer, JsonConfirmer},
-    exit::{self, CliError, CliResult},
+    exit::{self, CliResult},
     progress::ProgressAdapter,
     reporter::{human::HumanReporter, json::JsonReporter, Reporter},
     self_update::{self as self_update_command, SelfUpdateRequest},
@@ -323,17 +324,17 @@ async fn install(
     }
 
     let request = install_request_from_args(&args, Vec::new())?;
-    let plan_result = build_install_plan(request, app, reporter, cancellation.clone()).await;
-    let plan = match plan_result {
-        Ok(plan) => plan,
-        Err(CliError::Core(FontbrewError::FamilySelectionRequired { families })) => {
+    let preparation = prepare_install(request, app, reporter, cancellation.clone()).await?;
+    let plan = match preparation {
+        InstallPreparation::Plan(plan) => plan,
+        InstallPreparation::FamilySelection(pending) => {
             let selected_families = if args.all_families {
-                families
+                pending.families().to_vec()
             } else {
-                confirmer.select_families(&families)?
+                confirmer.select_families(pending.families())?
             };
-            let plans = build_family_install_plans(
-                &args,
+            let plans = prepare_selected_families(
+                pending,
                 selected_families,
                 app,
                 reporter,
@@ -344,7 +345,6 @@ async fn install(
                 apply_install_plans(&args, plans, app, reporter, confirmer, cancellation).await?;
             return render_install_reports(reporter, reports);
         }
-        Err(error) => return Err(error),
     };
 
     let reports =
@@ -400,6 +400,11 @@ async fn build_family_install_plans(
     reporter: &mut dyn Reporter,
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<Vec<InstallPlan>> {
+    if selected_families.len() > 1 {
+        let request = install_request_from_args(args, selected_families)?;
+        return build_install_plans(request, app, reporter, cancellation).await;
+    }
+
     let mut plans = Vec::new();
 
     for family in selected_families {
@@ -418,12 +423,65 @@ async fn build_family_install_plans(
     Ok(plans)
 }
 
+async fn prepare_install(
+    request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<InstallPreparation> {
+    reporter.start_activity(&install_plan_activity_message(&request))?;
+    let mut progress = ProgressAdapter::new(reporter);
+    let preparation = app
+        .prepare_install(request, &mut progress, cancellation)
+        .await?;
+    progress.finish()?;
+
+    Ok(preparation)
+}
+
+async fn prepare_selected_families(
+    pending: PendingFamilySelection,
+    selected_families: Vec<FamilyName>,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<Vec<InstallPlan>> {
+    reporter.start_activity(&format!(
+        "Preparing install plan for {}",
+        family_activity_label(&selected_families)
+    ))?;
+    let mut progress = ProgressAdapter::new(reporter);
+    let plans = app
+        .prepare_selected_families(pending, selected_families, &mut progress, cancellation)
+        .await?;
+    progress.finish()?;
+
+    Ok(plans)
+}
+
+async fn build_install_plans(
+    request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<Vec<InstallPlan>> {
+    reporter.start_activity(&install_plan_activity_message(&request))?;
+    let mut progress = ProgressAdapter::new(reporter);
+    let plans = app
+        .install_plans_with_progress_and_cancellation(request, &mut progress, cancellation)
+        .await?;
+    progress.finish()?;
+
+    Ok(plans)
+}
+
 async fn build_install_plan(
     request: InstallRequest,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<InstallPlan> {
+    reporter.start_activity(&install_plan_activity_message(&request))?;
     let mut progress = ProgressAdapter::new(reporter);
     let plan = app
         .install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)
@@ -431,6 +489,35 @@ async fn build_install_plan(
     progress.finish()?;
 
     Ok(plan)
+}
+
+fn install_plan_activity_message(request: &InstallRequest) -> String {
+    let target = if request.selected_families.is_empty() {
+        install_source_label(&request.source)
+    } else {
+        family_activity_label(&request.selected_families)
+    };
+
+    format!("Preparing install plan for {target}")
+}
+
+fn family_activity_label(families: &[FamilyName]) -> String {
+    families
+        .iter()
+        .map(|family| family.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn install_source_label(source: &InstallSource) -> String {
+    match source {
+        InstallSource::LocalPath(path) => path.display().to_string(),
+        InstallSource::GitHubRepo { owner, repo } => format!("{owner}/{repo}"),
+        InstallSource::Provider {
+            provider: fontbrew_core::ProviderKind::Fontsource,
+            id,
+        } => format!("fontsource:{id}"),
+    }
 }
 
 async fn apply_install_plans(
@@ -465,6 +552,7 @@ async fn apply_install_plans(
     let mut reports = Vec::new();
     while let Some(plan) = plans.pop() {
         let result: CliResult<InstallReport> = {
+            reporter.start_activity(&format!("Applying install {}", plan.package_id.as_str()))?;
             let mut progress = ProgressAdapter::new(reporter);
             let report = app
                 .apply_install(plan, policy.clone(), &mut progress, cancellation.clone())
@@ -518,9 +606,17 @@ async fn remove(
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
-    let plan = app
-        .remove_plan_with_cancellation(RemoveRequest { package_id }, cancellation.clone())
-        .await?;
+    reporter.start_activity(&format!("Planning removal {}", package_id.as_str()))?;
+    let plan_result = app
+        .remove_plan_with_cancellation(
+            RemoveRequest {
+                package_id: package_id.clone(),
+            },
+            cancellation.clone(),
+        )
+        .await;
+    reporter.finish_activity()?;
+    let plan = plan_result?;
     let policy = confirmer.execution_policy(
         &plan.risks,
         ConfirmationOptions {
@@ -529,6 +625,7 @@ async fn remove(
         },
     )?;
     let report = {
+        reporter.start_activity(&format!("Removing {}", plan.package_id.as_str()))?;
         let mut progress = ProgressAdapter::new(reporter);
         let report = app
             .apply_remove(plan, policy, &mut progress, cancellation)
@@ -541,12 +638,15 @@ async fn remove(
 }
 
 async fn search(args: SearchArgs, app: &FontbrewApp, reporter: &mut dyn Reporter) -> CliResult<()> {
-    let report = app
+    reporter.start_activity("Searching packages")?;
+    let report_result = app
         .search(SearchRequest {
             query: args.query.unwrap_or_default(),
             limit: args.limit,
         })
-        .await?;
+        .await;
+    reporter.finish_activity()?;
+    let report = report_result?;
 
     reporter.render_search_report(report)
 }
@@ -561,7 +661,10 @@ async fn outdated(
         .into_iter()
         .map(PackageId::parse)
         .collect::<fontbrew_core::Result<Vec<_>>>()?;
-    let report = app.outdated(OutdatedRequest { package_ids }).await?;
+    reporter.start_activity("Checking for updates")?;
+    let report_result = app.outdated(OutdatedRequest { package_ids }).await;
+    reporter.finish_activity()?;
+    let report = report_result?;
 
     reporter.render_outdated_report(report)
 }
@@ -582,11 +685,16 @@ async fn update(
         package_ids,
         jobs: args.jobs,
     };
-    let report = {
+    let plan = {
+        reporter.start_activity("Preparing updates")?;
         let mut progress = ProgressAdapter::new(reporter);
         let plan = app
             .update_plan(request, &mut progress, cancellation.clone())
             .await?;
+        progress.finish()?;
+        plan
+    };
+    let report = {
         let policy = match confirmer.execution_policy(
             &plan.risks,
             ConfirmationOptions {
@@ -600,6 +708,8 @@ async fn update(
                 return Err(error);
             }
         };
+        reporter.start_activity("Applying updates")?;
+        let mut progress = ProgressAdapter::new(reporter);
         let report = app
             .apply_update(plan, policy, &mut progress, cancellation)
             .await?;

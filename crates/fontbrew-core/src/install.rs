@@ -88,6 +88,56 @@ pub fn install_plan_with_progress(
     }
 }
 
+pub fn install_plans_with_progress(
+    paths: &FontbrewPaths,
+    request: InstallRequest,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<Vec<InstallPlan>> {
+    ensure_not_cancelled(cancellation)?;
+    ensure_package_id_override_allowed_for_source(&request)?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation)?;
+
+    let InstallRequest {
+        source,
+        package_id_override,
+        format_preference,
+        selected_families,
+        reinstall,
+        ..
+    } = request;
+
+    match source {
+        InstallSource::LocalPath(path) => {
+            progress.emit(ProgressEvent::ResolvingSource {
+                source: path.display().to_string(),
+            });
+            local_archive_install_plans(
+                paths,
+                path,
+                package_id_override,
+                reinstall,
+                format_preference,
+                selected_families,
+                progress,
+                cancellation,
+            )
+        }
+        _ => Err(FontbrewError::NotImplemented {
+            operation: "install_source",
+        }),
+    }
+}
+
+pub(crate) enum InstallPlanCandidate {
+    Plan(InstallPlan),
+    FamilySelection {
+        parsed_archive: ParsedFontArchive,
+        package_id_override: Option<PackageId>,
+    },
+}
+
 pub(crate) fn ensure_package_id_override_allowed_for_source(
     request: &InstallRequest,
 ) -> Result<()> {
@@ -116,6 +166,45 @@ pub(crate) fn ensure_package_id_override_allowed_for_source(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn local_archive_install_plan_candidate(
+    paths: &FontbrewPaths,
+    archive_path: PathBuf,
+    package_id_override: Option<PackageId>,
+    reinstall: bool,
+    format_preference: Vec<FontFormat>,
+    selected_families: Vec<FamilyName>,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<InstallPlanCandidate> {
+    let archive_path = resolve_local_archive_path(&archive_path)?;
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: archive_path.display().to_string(),
+    });
+    ensure_not_cancelled(cancellation)?;
+    let family_boundary = InstallFamilyBoundary::from_selected_families(selected_families);
+    let parsed_archive = prepare_local_archive_as_parsed_archive(
+        paths,
+        archive_path,
+        package_id_override.clone(),
+        reinstall,
+        format_preference,
+        progress,
+        cancellation,
+    )?;
+
+    install_plan_candidate_from_parsed_archive(
+        paths,
+        parsed_archive,
+        package_id_override.clone(),
+        package_id_override,
+        family_boundary.as_ref(),
+        None,
+        progress,
+        cancellation,
+    )
 }
 
 pub async fn github_repo_install_plan(
@@ -154,7 +243,7 @@ pub async fn github_repo_install_plan(
         source: repo.label(),
     });
     let options = if has_selected_families {
-        options
+        options.with_progress_package_id(package_id.clone())
     } else {
         options.with_package_id(package_id.clone())
     };
@@ -174,7 +263,119 @@ pub async fn github_repo_install_plan(
     .await?;
     ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
 
-    install_plan_from_prepared(paths, prepared)
+    install_plan_from_prepared(paths, prepared, progress)
+}
+
+pub async fn github_repo_install_plan_candidate(
+    paths: &FontbrewPaths,
+    repo: GitHubRepo,
+    request: InstallRequest,
+    progress: &mut dyn ProgressSink,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<InstallPlanCandidate> {
+    ensure_not_cancelled(cancellation.as_ref())?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    let has_selected_families = !request.selected_families.is_empty();
+    let options = RemoteInstallOptions::from_request(request)?;
+    let package_id = package_id_from_repo_name(&repo.repo)?;
+    let requested_source = ManifestSource::GitHub {
+        owner: repo.owner.clone(),
+        repo: repo.repo.clone(),
+    };
+    let requested_update_source = Some(requested_source.clone());
+    if !has_selected_families {
+        if let Some(plan) = already_installed_plan(
+            paths,
+            &package_id,
+            options.reinstall,
+            &requested_source,
+            requested_update_source.as_ref(),
+        )? {
+            return Ok(InstallPlanCandidate::Plan(plan));
+        }
+    }
+
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: repo.label(),
+    });
+    let options = if has_selected_families {
+        options.with_progress_package_id(package_id.clone())
+    } else {
+        options.with_package_id(package_id.clone())
+    };
+    let family_boundary = options.family_boundary.clone();
+    let package_id_hint = options.package_id.clone();
+    let parsed_archive = prepare_github_release_parsed_archive(
+        paths,
+        &repo,
+        package_id,
+        PreparedInstallSource::GitHub {
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+        },
+        options,
+        progress,
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+
+    install_plan_candidate_from_parsed_archive(
+        paths,
+        parsed_archive,
+        package_id_hint,
+        None,
+        family_boundary.as_ref(),
+        None,
+        progress,
+        cancellation.as_ref(),
+    )
+}
+
+pub async fn github_repo_install_plans(
+    paths: &FontbrewPaths,
+    repo: GitHubRepo,
+    request: InstallRequest,
+    progress: &mut dyn ProgressSink,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<Vec<InstallPlan>> {
+    ensure_not_cancelled(cancellation.as_ref())?;
+    cleanup_stale_install_staging(paths)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    let selected_families = request.selected_families.clone();
+    let options = RemoteInstallOptions::from_request(request)?;
+    let package_id = package_id_from_repo_name(&repo.repo)?;
+    progress.emit(ProgressEvent::ResolvingSource {
+        source: repo.label(),
+    });
+    let options = options.with_progress_package_id(package_id.clone());
+    let parsed_archive = prepare_github_release_parsed_archive(
+        paths,
+        &repo,
+        package_id,
+        PreparedInstallSource::GitHub {
+            owner: repo.owner.clone(),
+            repo: repo.repo.clone(),
+        },
+        options,
+        progress,
+        network_client,
+        cancellation.clone(),
+    )
+    .await?;
+
+    family_install_plans_from_parsed_archive(
+        paths,
+        parsed_archive,
+        selected_families,
+        progress,
+        cancellation.as_ref(),
+    )
 }
 
 pub async fn fontsource_install_plan(
@@ -228,7 +429,7 @@ pub async fn fontsource_install_plan(
     .await?;
     ensure_not_cancelled_after_prepare(cancellation.as_ref(), &prepared)?;
 
-    install_plan_from_prepared(paths, prepared)
+    install_plan_from_prepared(paths, prepared, progress)
 }
 
 fn already_installed_plan(
@@ -337,6 +538,9 @@ pub fn apply_install(
         cleanup_staging(&prepared.staging_dir);
         return Err(error);
     }
+    progress.emit(ProgressEvent::CheckingInstallRisks {
+        package_id: prepared_package_id(&prepared),
+    });
     match current_install_risks(paths, &manifest, &prepared) {
         Ok(risks) => current_risks.extend(risks),
         Err(error) => {
@@ -580,12 +784,45 @@ fn local_archive_install_plan(
         cancellation,
     )?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
-    install_plan_from_prepared(paths, prepared)
+    install_plan_from_prepared(paths, prepared, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_archive_install_plans(
+    paths: &FontbrewPaths,
+    archive_path: PathBuf,
+    package_id_override: Option<PackageId>,
+    reinstall: bool,
+    format_preference: Vec<FontFormat>,
+    selected_families: Vec<FamilyName>,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<Vec<InstallPlan>> {
+    let archive_path = resolve_local_archive_path(&archive_path)?;
+    ensure_not_cancelled(cancellation)?;
+    let parsed_archive = prepare_local_archive_as_parsed_archive(
+        paths,
+        archive_path,
+        package_id_override,
+        reinstall,
+        format_preference,
+        progress,
+        cancellation,
+    )?;
+
+    family_install_plans_from_parsed_archive(
+        paths,
+        parsed_archive,
+        selected_families,
+        progress,
+        cancellation,
+    )
 }
 
 fn install_plan_from_prepared(
     paths: &FontbrewPaths,
     prepared: PreparedInstallPackage,
+    progress: &mut dyn ProgressSink,
 ) -> Result<InstallPlan> {
     let package_id = prepared_package_id(&prepared);
     let manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
@@ -595,7 +832,27 @@ fn install_plan_from_prepared(
             return Err(error);
         }
     };
+    progress.emit(ProgressEvent::CheckingInstallRisks {
+        package_id: package_id.clone(),
+    });
+    let unmanaged_overlap_risks =
+        match unmanaged_same_family_overlap_risks(paths, &manifest, &prepared) {
+            Ok(risks) => risks,
+            Err(error) => {
+                cleanup_staging(&prepared.staging_dir);
+                return Err(error);
+            }
+        };
 
+    install_plan_from_prepared_with_manifest(&manifest, prepared, unmanaged_overlap_risks)
+}
+
+fn install_plan_from_prepared_with_manifest(
+    manifest: &ManifestV1,
+    prepared: PreparedInstallPackage,
+    unmanaged_overlap_risks: Vec<PlanRisk>,
+) -> Result<InstallPlan> {
+    let package_id = prepared_package_id(&prepared);
     let requested_source = manifest_source_from_prepared(&prepared.source);
     let requested_update_source = manifest_update_source_from_prepared(&prepared.source);
 
@@ -624,7 +881,11 @@ fn install_plan_from_prepared(
         }
     }
 
-    let risks = match current_install_risks(paths, &manifest, &prepared) {
+    let risks = match current_install_risks_with_unmanaged_overlap_risks(
+        manifest,
+        &prepared,
+        unmanaged_overlap_risks,
+    ) {
         Ok(risks) => risks,
         Err(error) => {
             cleanup_staging(&prepared.staging_dir);
@@ -708,6 +969,7 @@ fn prepare_local_archive(
         staging_cleanup.path().to_path_buf(),
         PackageVersion::new(LOCAL_ARCHIVE_VERSION),
         PreparedInstallSource::LocalArchive { path: archive_path },
+        package_id_override.clone(),
         package_id_override,
         reinstall,
         ArchiveFormatPreference {
@@ -725,10 +987,46 @@ fn prepare_local_archive(
     result
 }
 
+fn prepare_local_archive_as_parsed_archive(
+    paths: &FontbrewPaths,
+    archive_path: PathBuf,
+    package_id_override: Option<PackageId>,
+    reinstall: bool,
+    format_preference: Vec<FontFormat>,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<ParsedFontArchive> {
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation)?;
+    let result = extract_archive_to_parsed_archive(
+        paths,
+        archive_path.clone(),
+        staging_cleanup.path().to_path_buf(),
+        PackageVersion::new(LOCAL_ARCHIVE_VERSION),
+        PreparedInstallSource::LocalArchive { path: archive_path },
+        package_id_override,
+        reinstall,
+        ArchiveFormatPreference {
+            explicit_format_preference: format_preference,
+        },
+        progress,
+        cancellation,
+    );
+
+    if result.is_ok() {
+        staging_cleanup.disarm();
+    }
+
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteInstallOptions {
     pub(crate) asset_selector: Option<String>,
     pub(crate) package_id: Option<PackageId>,
+    pub(crate) progress_package_id: Option<PackageId>,
     pub(crate) reinstall: bool,
     pub(crate) explicit_format_preference: Vec<FontFormat>,
     pub(crate) family_boundary: Option<InstallFamilyBoundary>,
@@ -743,6 +1041,7 @@ impl RemoteInstallOptions {
         Ok(Self {
             asset_selector: request.asset_selector,
             package_id: None,
+            progress_package_id: None,
             reinstall: request.reinstall,
             explicit_format_preference: dedupe_formats(request.format_preference),
             family_boundary: InstallFamilyBoundary::from_selected_families(
@@ -752,13 +1051,22 @@ impl RemoteInstallOptions {
     }
 
     fn with_package_id(mut self, package_id: PackageId) -> Self {
+        if self.progress_package_id.is_none() {
+            self.progress_package_id = Some(package_id.clone());
+        }
         self.package_id = Some(package_id);
+        self
+    }
+
+    fn with_progress_package_id(mut self, package_id: PackageId) -> Self {
+        self.progress_package_id = Some(package_id);
         self
     }
 
     pub(crate) fn for_update(package_id: PackageId) -> Self {
         Self {
             asset_selector: None,
+            progress_package_id: Some(package_id.clone()),
             package_id: Some(package_id),
             reinstall: false,
             explicit_format_preference: Vec::new(),
@@ -870,6 +1178,41 @@ async fn prepare_github_release_archive(
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
     ensure_not_cancelled(cancellation.as_ref())?;
     let result = download_and_parse_github_archive(
+        paths,
+        repo,
+        fallback_package_id,
+        source,
+        options,
+        progress,
+        network_client,
+        staging_cleanup.path().to_path_buf(),
+        cancellation.clone(),
+    )
+    .await;
+
+    if result.is_ok() {
+        staging_cleanup.disarm();
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_github_release_parsed_archive(
+    paths: &FontbrewPaths,
+    repo: &GitHubRepo,
+    fallback_package_id: PackageId,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<ParsedFontArchive> {
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let result = download_and_parse_github_archive_to_parsed_archive(
         paths,
         repo,
         fallback_package_id,
@@ -1074,6 +1417,43 @@ async fn download_and_parse_github_archive(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn download_and_parse_github_archive_to_parsed_archive(
+    paths: &FontbrewPaths,
+    repo: &GitHubRepo,
+    fallback_package_id: PackageId,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
+    network_client: &NetworkClient,
+    staging_dir: PathBuf,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<ParsedFontArchive> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    let asset = github::resolve_release_asset(
+        network_client,
+        repo,
+        options.asset_selector.as_deref(),
+        &fallback_package_id,
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    download_and_parse_resolved_github_archive_to_parsed_archive(
+        paths,
+        asset,
+        source,
+        options,
+        progress,
+        network_client,
+        staging_dir,
+        cancellation,
+    )
+    .await
+}
+
 pub(crate) async fn prepare_resolved_github_release_archive(
     paths: &FontbrewPaths,
     asset: github::ResolvedGitHubAsset,
@@ -1120,7 +1500,11 @@ async fn download_and_parse_resolved_github_archive(
     ensure_not_cancelled(cancellation.as_ref())?;
     fs::create_dir_all(&staging_dir)?;
     let archive_path = staging_dir.join("download.zip");
-    if let Some(package_id) = &options.package_id {
+    let progress_package_id = options
+        .progress_package_id
+        .clone()
+        .or_else(|| options.package_id.clone());
+    if let Some(package_id) = &progress_package_id {
         progress.emit(ProgressEvent::DownloadStarted {
             package_id: package_id.clone(),
             bytes: None,
@@ -1143,6 +1527,7 @@ async fn download_and_parse_resolved_github_archive(
         version: asset.version,
         source,
         package_id_hint: options.package_id,
+        progress_package_id,
         reinstall: options.reinstall,
         archive_format_preference: ArchiveFormatPreference {
             explicit_format_preference: options.explicit_format_preference,
@@ -1161,6 +1546,57 @@ async fn download_and_parse_resolved_github_archive(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn download_and_parse_resolved_github_archive_to_parsed_archive(
+    paths: &FontbrewPaths,
+    asset: github::ResolvedGitHubAsset,
+    source: PreparedInstallSource,
+    options: RemoteInstallOptions,
+    progress: &mut dyn ProgressSink,
+    network_client: &NetworkClient,
+    staging_dir: PathBuf,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<ParsedFontArchive> {
+    ensure_not_cancelled(cancellation.as_ref())?;
+    fs::create_dir_all(&staging_dir)?;
+    let archive_path = staging_dir.join("download.zip");
+    let progress_package_id = options
+        .progress_package_id
+        .clone()
+        .or_else(|| options.package_id.clone());
+    if let Some(package_id) = &progress_package_id {
+        progress.emit(ProgressEvent::DownloadStarted {
+            package_id: package_id.clone(),
+            bytes: None,
+        });
+    }
+    github::download_release_asset_to_file(
+        network_client,
+        &asset.download_url,
+        &archive_path,
+        cancellation.clone(),
+    )
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    let (result, events) = extract_archive_to_parsed_archive_blocking(RemoteParsedArchiveInput {
+        paths: paths.clone(),
+        archive_path,
+        staging_dir,
+        version: asset.version,
+        source,
+        progress_package_id,
+        reinstall: options.reinstall,
+        archive_format_preference: ArchiveFormatPreference {
+            explicit_format_preference: options.explicit_format_preference,
+        },
+        cancellation: cancellation.clone(),
+    })
+    .await?;
+    replay_progress(progress, events);
+    result
+}
+
 struct RemoteArchiveParseInput {
     paths: FontbrewPaths,
     archive_path: PathBuf,
@@ -1168,9 +1604,22 @@ struct RemoteArchiveParseInput {
     version: PackageVersion,
     source: PreparedInstallSource,
     package_id_hint: Option<PackageId>,
+    progress_package_id: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<InstallFamilyBoundary>,
+    cancellation: Arc<dyn CancellationToken>,
+}
+
+struct RemoteParsedArchiveInput {
+    paths: FontbrewPaths,
+    archive_path: PathBuf,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    progress_package_id: Option<PackageId>,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
     cancellation: Arc<dyn CancellationToken>,
 }
 
@@ -1223,9 +1672,33 @@ async fn extract_and_parse_archive_blocking(
             input.version,
             input.source,
             input.package_id_hint,
+            input.progress_package_id,
             input.reinstall,
             input.archive_format_preference,
             input.family_boundary,
+            &mut progress,
+            input.cancellation.as_ref(),
+        );
+        Ok((result, progress.events))
+    })
+    .await
+    .map_err(blocking_join_error)?
+}
+
+async fn extract_archive_to_parsed_archive_blocking(
+    input: RemoteParsedArchiveInput,
+) -> Result<(Result<ParsedFontArchive>, Vec<ProgressEvent>)> {
+    tokio::task::spawn_blocking(move || {
+        let mut progress = RecordingProgressSink::default();
+        let result = extract_archive_to_parsed_archive(
+            &input.paths,
+            input.archive_path,
+            input.staging_dir,
+            input.version,
+            input.source,
+            input.progress_package_id,
+            input.reinstall,
+            input.archive_format_preference,
             &mut progress,
             input.cancellation.as_ref(),
         );
@@ -1276,6 +1749,7 @@ fn extract_and_parse_archive(
     version: PackageVersion,
     source: PreparedInstallSource,
     package_id_hint: Option<PackageId>,
+    progress_package_id: Option<PackageId>,
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<InstallFamilyBoundary>,
@@ -1285,7 +1759,7 @@ fn extract_and_parse_archive(
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
     ensure_not_cancelled(cancellation)?;
 
-    if let Some(package_id) = &package_id_hint {
+    if let Some(package_id) = &progress_package_id {
         progress.emit(ProgressEvent::ExtractingArchive {
             package_id: package_id.clone(),
         });
@@ -1294,7 +1768,7 @@ fn extract_and_parse_archive(
         .extract(&archive_path, &staging_dir)?;
     ensure_not_cancelled(cancellation)?;
 
-    if let Some(package_id) = &package_id_hint {
+    if let Some(package_id) = &progress_package_id {
         progress.emit(ProgressEvent::ParsingFonts {
             package_id: package_id.clone(),
         });
@@ -1319,6 +1793,51 @@ fn extract_and_parse_archive(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn extract_archive_to_parsed_archive(
+    paths: &FontbrewPaths,
+    archive_path: PathBuf,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    progress_package_id: Option<PackageId>,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<ParsedFontArchive> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
+
+    if let Some(package_id) = &progress_package_id {
+        progress.emit(ProgressEvent::ExtractingArchive {
+            package_id: package_id.clone(),
+        });
+    }
+    let extracted_fonts = ZipArchiveExtractor::new(ArchiveExtractionOptions::default())
+        .extract(&archive_path, &staging_dir)?;
+    ensure_not_cancelled(cancellation)?;
+
+    if let Some(package_id) = &progress_package_id {
+        progress.emit(ProgressEvent::ParsingFonts {
+            package_id: package_id.clone(),
+        });
+    }
+    let staged_fonts = extracted_fonts
+        .into_iter()
+        .map(StagedFontFile::from_extracted)
+        .collect();
+    parse_staged_font_archive(
+        staged_fonts,
+        staging_dir,
+        version,
+        source,
+        reinstall,
+        archive_format_preference,
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn parse_staged_font_files(
     paths: &FontbrewPaths,
     staged_fonts: Vec<StagedFontFile>,
@@ -1332,6 +1851,35 @@ fn parse_staged_font_files(
     package_families: Option<Vec<FamilyName>>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
+    let parsed_archive = parse_staged_font_archive(
+        staged_fonts,
+        staging_dir,
+        version,
+        source,
+        reinstall,
+        archive_format_preference,
+        cancellation,
+    )?;
+
+    prepare_package_from_parsed_archive(
+        paths,
+        parsed_archive,
+        package_id_hint,
+        family_boundary.as_ref(),
+        package_families,
+        cancellation,
+    )
+}
+
+fn parse_staged_font_archive(
+    staged_fonts: Vec<StagedFontFile>,
+    staging_dir: PathBuf,
+    version: PackageVersion,
+    source: PreparedInstallSource,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    cancellation: &dyn CancellationToken,
+) -> Result<ParsedFontArchive> {
     if staged_fonts.is_empty() {
         cleanup_staging(&staging_dir);
         return Err(FontbrewError::ArchiveRejected {
@@ -1386,7 +1934,36 @@ fn parse_staged_font_files(
         });
     };
 
-    if let Some(boundary) = &family_boundary {
+    Ok(ParsedFontArchive {
+        staging_dir,
+        version,
+        source,
+        reinstall,
+        archive_format_preference,
+        archive_families,
+        parsed_files,
+    })
+}
+
+fn prepare_package_from_parsed_archive(
+    paths: &FontbrewPaths,
+    parsed_archive: ParsedFontArchive,
+    package_id_hint: Option<PackageId>,
+    family_boundary: Option<&InstallFamilyBoundary>,
+    package_families: Option<Vec<FamilyName>>,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    let ParsedFontArchive {
+        staging_dir,
+        version,
+        source,
+        reinstall,
+        archive_format_preference,
+        archive_families,
+        mut parsed_files,
+    } = parsed_archive;
+
+    if let Some(boundary) = family_boundary {
         if let Err(error) = validate_archive_family_boundary(boundary, &archive_families) {
             cleanup_staging(&staging_dir);
             return Err(error);
@@ -1444,7 +2021,7 @@ fn parse_staged_font_files(
                 return Err(error);
             }
         };
-    if let Some(boundary) = &family_boundary {
+    if let Some(boundary) = family_boundary {
         let selected_families = selected_family_names(&parsed_files);
         if let Err(error) =
             validate_expected_family_boundary(boundary, &selected_families, "selected font files")
@@ -1510,11 +2087,239 @@ fn parse_staged_font_files(
     })
 }
 
+pub(crate) fn family_install_plans_from_parsed_archive(
+    paths: &FontbrewPaths,
+    parsed_archive: ParsedFontArchive,
+    selected_families: Vec<FamilyName>,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<Vec<InstallPlan>> {
+    let selected_families = dedupe_family_names(selected_families);
+    let Some(all_selected_boundary) =
+        InstallFamilyBoundary::from_selected_families(selected_families.clone())
+    else {
+        cleanup_staging(&parsed_archive.staging_dir);
+        return Err(FontbrewError::ArchiveRejected {
+            reason: "selected family boundary matched no font files".to_string(),
+        });
+    };
+    if let Err(error) =
+        validate_archive_family_boundary(&all_selected_boundary, &parsed_archive.archive_families)
+    {
+        cleanup_staging(&parsed_archive.staging_dir);
+        return Err(error);
+    }
+
+    let mut prepared_packages = Vec::new();
+    for family in selected_families {
+        let prepared_result = prepare_family_package_from_parsed_archive(
+            paths,
+            &parsed_archive,
+            family,
+            cancellation,
+        );
+        match prepared_result {
+            Ok(prepared) => prepared_packages.push(prepared),
+            Err(error) => {
+                cleanup_staging(&parsed_archive.staging_dir);
+                cleanup_prepared_packages(&prepared_packages);
+                return Err(error);
+            }
+        }
+    }
+    cleanup_staging(&parsed_archive.staging_dir);
+
+    install_plans_from_prepared_packages(paths, prepared_packages, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_plan_candidate_from_parsed_archive(
+    paths: &FontbrewPaths,
+    parsed_archive: ParsedFontArchive,
+    package_id_hint: Option<PackageId>,
+    package_id_override: Option<PackageId>,
+    family_boundary: Option<&InstallFamilyBoundary>,
+    package_families: Option<Vec<FamilyName>>,
+    progress: &mut dyn ProgressSink,
+    cancellation: &dyn CancellationToken,
+) -> Result<InstallPlanCandidate> {
+    if family_boundary.is_none() && parsed_archive_requires_family_selection(&parsed_archive) {
+        return Ok(InstallPlanCandidate::FamilySelection {
+            parsed_archive,
+            package_id_override,
+        });
+    }
+
+    let prepared = prepare_package_from_parsed_archive(
+        paths,
+        parsed_archive,
+        package_id_hint,
+        family_boundary,
+        package_families,
+        cancellation,
+    )?;
+    ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
+    install_plan_from_prepared(paths, prepared, progress).map(InstallPlanCandidate::Plan)
+}
+
+fn parsed_archive_requires_family_selection(parsed_archive: &ParsedFontArchive) -> bool {
+    should_reject_unbounded_multiple_families(&parsed_archive.source)
+        && parsed_archive.archive_families.len() > 1
+}
+
+fn prepare_family_package_from_parsed_archive(
+    paths: &FontbrewPaths,
+    parsed_archive: &ParsedFontArchive,
+    family: FamilyName,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
+    ensure_not_cancelled(cancellation)?;
+    let staging_dir = create_active_staging_dir(paths)?;
+    let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
+    let copied_archive = copy_parsed_archive_to_staging(
+        paths,
+        parsed_archive,
+        staging_cleanup.path(),
+        cancellation,
+    )?;
+    let boundary =
+        InstallFamilyBoundary::from_selected_families(vec![family]).ok_or_else(|| {
+            FontbrewError::ArchiveRejected {
+                reason: "selected family boundary matched no font files".to_string(),
+            }
+        })?;
+    let prepared = prepare_package_from_parsed_archive(
+        paths,
+        copied_archive,
+        None,
+        Some(&boundary),
+        None,
+        cancellation,
+    );
+
+    if prepared.is_ok() {
+        staging_cleanup.disarm();
+    }
+
+    prepared
+}
+
+fn copy_parsed_archive_to_staging(
+    paths: &FontbrewPaths,
+    parsed_archive: &ParsedFontArchive,
+    staging_dir: &Path,
+    cancellation: &dyn CancellationToken,
+) -> Result<ParsedFontArchive> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), staging_dir)?;
+    fs::create_dir_all(staging_dir)?;
+
+    let mut parsed_files = Vec::with_capacity(parsed_archive.parsed_files.len());
+    for parsed_file in &parsed_archive.parsed_files {
+        ensure_not_cancelled(cancellation)?;
+        let relative_path = parsed_file
+            .staging_path
+            .strip_prefix(&parsed_archive.staging_dir)
+            .map_err(|_| FontbrewError::PathResolution {
+                message: format!(
+                    "staged font path is outside staging directory: {}",
+                    parsed_file.staging_path.display()
+                ),
+            })?;
+        let copied_path = staging_dir.join(relative_path);
+        ensure_path_inside(staging_dir, &copied_path)?;
+        if let Some(parent) = copied_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&parsed_file.staging_path, &copied_path)?;
+        parsed_files.push(ParsedFontFile {
+            staging_path: copied_path,
+            faces: parsed_file.faces.clone(),
+            format: parsed_file.format,
+        });
+    }
+
+    Ok(ParsedFontArchive {
+        staging_dir: staging_dir.to_path_buf(),
+        version: parsed_archive.version.clone(),
+        source: parsed_archive.source.clone(),
+        reinstall: parsed_archive.reinstall,
+        archive_format_preference: parsed_archive.archive_format_preference.clone(),
+        archive_families: parsed_archive.archive_families.clone(),
+        parsed_files,
+    })
+}
+
+fn install_plans_from_prepared_packages(
+    paths: &FontbrewPaths,
+    prepared_packages: Vec<PreparedInstallPackage>,
+    progress: &mut dyn ProgressSink,
+) -> Result<Vec<InstallPlan>> {
+    let manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            cleanup_prepared_packages(&prepared_packages);
+            return Err(error);
+        }
+    };
+    let unmanaged_overlap_risks = match unmanaged_same_family_overlap_risks_for_prepared_packages(
+        paths,
+        &manifest,
+        &prepared_packages,
+    ) {
+        Ok(risks) => risks,
+        Err(error) => {
+            cleanup_prepared_packages(&prepared_packages);
+            return Err(error);
+        }
+    };
+
+    let mut plans = Vec::new();
+    for prepared in prepared_packages {
+        progress.emit(ProgressEvent::CheckingInstallRisks {
+            package_id: prepared_package_id(&prepared),
+        });
+        let package_overlap_risks =
+            unmanaged_overlap_risks_for_families(&unmanaged_overlap_risks, &prepared.families);
+        match install_plan_from_prepared_with_manifest(&manifest, prepared, package_overlap_risks) {
+            Ok(plan) => plans.push(plan),
+            Err(error) => {
+                cleanup_install_plans(&plans);
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(plans)
+}
+
+fn cleanup_prepared_packages(prepared_packages: &[PreparedInstallPackage]) {
+    for prepared in prepared_packages {
+        cleanup_staging(&prepared.staging_dir);
+    }
+}
+
+fn cleanup_install_plans(plans: &[InstallPlan]) {
+    for plan in plans {
+        cleanup_install_plan_staging(plan);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedFontFile {
     staging_path: PathBuf,
     faces: Vec<FontFaceMetadata>,
     format: FontFormat,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedFontArchive {
+    pub(crate) staging_dir: PathBuf,
+    version: PackageVersion,
+    pub(crate) source: PreparedInstallSource,
+    reinstall: bool,
+    archive_format_preference: ArchiveFormatPreference,
+    pub(crate) archive_families: Vec<FamilyName>,
+    parsed_files: Vec<ParsedFontFile>,
 }
 
 fn validate_archive_family_boundary(
@@ -2446,12 +3251,19 @@ fn current_install_risks(
     manifest: &ManifestV1,
     prepared: &PreparedInstallPackage,
 ) -> Result<Vec<PlanRisk>> {
+    let unmanaged_overlap_risks = unmanaged_same_family_overlap_risks(paths, manifest, prepared)?;
+    current_install_risks_with_unmanaged_overlap_risks(manifest, prepared, unmanaged_overlap_risks)
+}
+
+fn current_install_risks_with_unmanaged_overlap_risks(
+    manifest: &ManifestV1,
+    prepared: &PreparedInstallPackage,
+    unmanaged_overlap_risks: Vec<PlanRisk>,
+) -> Result<Vec<PlanRisk>> {
     let package_id = prepared_package_id(prepared);
     let mut risks = managed_activation_path_conflict_risks(manifest, prepared);
     risks.extend(current_activation_artifact_risks(prepared)?);
-    risks.extend(unmanaged_same_family_overlap_risks(
-        paths, manifest, prepared,
-    )?);
+    risks.extend(unmanaged_overlap_risks);
 
     if prepared.package_store_dir.exists() && manifest.get_package(&package_id).is_none() {
         risks.push(PlanRisk::Conflict {
@@ -2519,19 +3331,67 @@ fn unmanaged_same_family_overlap_risks(
     manifest: &ManifestV1,
     prepared: &PreparedInstallPackage,
 ) -> Result<Vec<PlanRisk>> {
-    let mut managed_paths = manifest
-        .packages
-        .values()
-        .flat_map(|record| record.activation_artifacts.iter())
-        .map(|artifact| artifact.path.clone())
-        .collect::<BTreeSet<_>>();
+    let mut managed_paths = managed_activation_artifact_paths(manifest);
     managed_paths.extend(
         prepared
             .activation_artifacts
             .iter()
             .map(|artifact| artifact.path.clone()),
     );
+    unmanaged_same_family_overlap_risks_for_families(paths, &managed_paths, &prepared.families)
+}
 
+fn unmanaged_same_family_overlap_risks_for_prepared_packages(
+    paths: &FontbrewPaths,
+    manifest: &ManifestV1,
+    prepared_packages: &[PreparedInstallPackage],
+) -> Result<Vec<PlanRisk>> {
+    let mut managed_paths = managed_activation_artifact_paths(manifest);
+    let mut families = Vec::new();
+    for prepared in prepared_packages {
+        managed_paths.extend(
+            prepared
+                .activation_artifacts
+                .iter()
+                .map(|artifact| artifact.path.clone()),
+        );
+        families.extend(prepared.families.iter().cloned());
+    }
+
+    let families = dedupe_family_names(families);
+    unmanaged_same_family_overlap_risks_for_families(paths, &managed_paths, &families)
+}
+
+fn unmanaged_overlap_risks_for_families(
+    risks: &[PlanRisk],
+    families: &[FamilyName],
+) -> Vec<PlanRisk> {
+    risks
+        .iter()
+        .filter(|risk| match risk {
+            PlanRisk::UnmanagedFontOverlap { family_name, .. } => {
+                family_matches_any(families, family_name)
+            }
+            PlanRisk::Conflict { .. } | PlanRisk::AmbiguousAsset { .. } => false,
+        })
+        .cloned()
+        .collect()
+}
+
+fn managed_activation_artifact_paths(manifest: &ManifestV1) -> BTreeSet<PathBuf> {
+    manifest
+        .packages
+        .values()
+        .flat_map(|record| record.activation_artifacts.iter())
+        .map(|artifact| artifact.path.clone())
+        .collect()
+}
+
+fn unmanaged_same_family_overlap_risks_for_families(
+    paths: &FontbrewPaths,
+    managed_paths: &BTreeSet<PathBuf>,
+    families: &[FamilyName],
+) -> Result<Vec<PlanRisk>> {
     let mut scan_dirs = BTreeSet::new();
     scan_dirs.insert(paths.activation_dir());
     if let Some(user_fonts_dir) = paths.activation_dir().parent() {
@@ -2565,7 +3425,7 @@ fn unmanaged_same_family_overlap_risks(
                 continue;
             }
 
-            if let Some(family) = overlapping_family(&reader, &path, &prepared.families) {
+            if let Some(family) = overlapping_family(&reader, &path, families) {
                 let key = (family.as_str().to_string(), path.clone());
                 if seen.insert(key) {
                     risks.push(PlanRisk::UnmanagedFontOverlap {

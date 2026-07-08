@@ -1,6 +1,12 @@
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use fontbrew_core::{
@@ -15,30 +21,116 @@ use crate::{
     self_update::{SelfUpdateReport, SelfUpdateStatus},
 };
 
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+
 pub struct HumanReporter {
     stdout: io::Stdout,
     stderr: io::Stderr,
     quiet: bool,
     verbose: bool,
     show_progress: bool,
+    stderr_is_terminal: bool,
     resolved_sources: BTreeSet<String>,
+    activity: Option<ActivitySpinner>,
+    last_logged_activity: Option<String>,
 }
 
 impl HumanReporter {
     pub fn new(quiet: bool, verbose: bool) -> Self {
+        let stderr_is_terminal = io::stderr().is_terminal();
         Self {
             stdout: io::stdout(),
             stderr: io::stderr(),
             quiet,
             verbose,
-            show_progress: verbose || io::stderr().is_terminal(),
+            show_progress: verbose || stderr_is_terminal,
+            stderr_is_terminal,
             resolved_sources: BTreeSet::new(),
+            activity: None,
+            last_logged_activity: None,
         }
+    }
+
+    fn finish_activity_line(&mut self) -> CliResult<()> {
+        if let Some(activity) = self.activity.take() {
+            activity.stop();
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for HumanReporter {
+    fn drop(&mut self) {
+        let _ = self.finish_activity_line();
+    }
+}
+
+struct ActivitySpinner {
+    message: Arc<Mutex<String>>,
+    stopped: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl ActivitySpinner {
+    fn start(message: &str) -> Self {
+        let message = Arc::new(Mutex::new(message.to_string()));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thread_message = Arc::clone(&message);
+        let thread_stopped = Arc::clone(&stopped);
+        let handle = thread::spawn(move || {
+            let mut frame_index = 0;
+
+            while !thread_stopped.load(Ordering::SeqCst) {
+                let message = thread_message
+                    .lock()
+                    .map(|message| message.clone())
+                    .unwrap_or_default();
+                {
+                    let mut stderr = io::stderr().lock();
+                    let _ = write!(
+                        stderr,
+                        "\r\x1b[2K{} {}",
+                        SPINNER_FRAMES[frame_index % SPINNER_FRAMES.len()],
+                        message
+                    );
+                    let _ = stderr.flush();
+                }
+
+                frame_index += 1;
+                thread::sleep(SPINNER_INTERVAL);
+            }
+        });
+
+        Self {
+            message,
+            stopped,
+            handle: Some(handle),
+        }
+    }
+
+    fn update(&self, message: &str) {
+        if let Ok(mut current_message) = self.message.lock() {
+            *current_message = message.to_string();
+        }
+    }
+
+    fn stop(mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r\x1b[2K");
+        let _ = stderr.flush();
     }
 }
 
 impl Reporter for HumanReporter {
     fn render_install_report(&mut self, report: InstallReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
         let families = families_label(&report.families);
 
@@ -73,6 +165,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_list_report(&mut self, report: ListReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         if report.packages.is_empty() {
@@ -105,6 +198,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_info_report(&mut self, report: InfoReport) -> CliResult<()> {
+        self.finish_activity()?;
         let verbose = self.verbose;
         let mut stdout = self.stdout.lock();
         let package = report.package;
@@ -153,6 +247,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_remove_report(&mut self, report: RemoveReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         if report.planned {
@@ -176,6 +271,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_search_report(&mut self, report: SearchReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         if report.results.is_empty() {
@@ -199,6 +295,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_outdated_report(&mut self, report: OutdatedReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         if report.packages.is_empty() && report.not_updatable.is_empty() {
@@ -238,6 +335,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_update_report(&mut self, report: UpdateReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         if report.planned.is_empty() && report.updated.is_empty() {
@@ -283,6 +381,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_config_get_report(&mut self, report: ConfigReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         writeln!(
@@ -296,6 +395,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_config_set_report(&mut self, report: ConfigReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         writeln!(
@@ -309,6 +409,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stdout = self.stdout.lock();
 
         writeln!(stdout, "{}", self_update_status_message(&report))?;
@@ -317,6 +418,7 @@ impl Reporter for HumanReporter {
     }
 
     fn render_error(&mut self, error: &CliError) -> CliResult<()> {
+        self.finish_activity()?;
         let mut stderr = self.stderr.lock();
 
         writeln!(stderr, "error: {}", error.message())?;
@@ -329,10 +431,40 @@ impl Reporter for HumanReporter {
             return Ok(());
         }
 
+        self.finish_activity()?;
         let mut stderr = self.stderr.lock();
         writeln!(stderr, "warning: {warning}")?;
 
         Ok(())
+    }
+
+    fn start_activity(&mut self, message: &str) -> CliResult<()> {
+        if self.quiet || !self.show_progress {
+            return Ok(());
+        }
+
+        if self.stderr_is_terminal {
+            if let Some(activity) = &self.activity {
+                activity.update(message);
+            } else {
+                self.activity = Some(ActivitySpinner::start(message));
+            }
+            return Ok(());
+        }
+
+        if self.last_logged_activity.as_deref() == Some(message) {
+            return Ok(());
+        }
+
+        self.last_logged_activity = Some(message.to_string());
+        let mut stderr = self.stderr.lock();
+        writeln!(stderr, "{message}")?;
+
+        Ok(())
+    }
+
+    fn finish_activity(&mut self) -> CliResult<()> {
+        self.finish_activity_line()
     }
 
     fn progress(&mut self, event: &ProgressEvent) -> CliResult<()> {
@@ -340,16 +472,15 @@ impl Reporter for HumanReporter {
             return Ok(());
         }
 
-        let mut stderr = self.stderr.lock();
         match event {
             ProgressEvent::ResolvingSource { source } => {
                 if !self.resolved_sources.insert(source.clone()) {
                     return Ok(());
                 }
-                writeln!(stderr, "Resolving {source}")?;
+                self.start_activity(&format!("Resolving {source}"))?;
             }
             ProgressEvent::DownloadStarted { package_id, .. } => {
-                writeln!(stderr, "Downloading {}", package_id.as_str())?;
+                self.start_activity(&format!("Downloading {}", package_id.as_str()))?;
             }
             ProgressEvent::DownloadProgress {
                 package_id,
@@ -361,31 +492,37 @@ impl Reporter for HumanReporter {
                 }
 
                 match total {
-                    Some(total) => writeln!(
-                        stderr,
+                    Some(total) => self.start_activity(&format!(
                         "Downloading {}: {downloaded}/{total} bytes",
                         package_id.as_str()
-                    )?,
-                    None => writeln!(
-                        stderr,
+                    ))?,
+                    None => self.start_activity(&format!(
                         "Downloading {}: {downloaded} bytes",
                         package_id.as_str()
-                    )?,
+                    ))?,
                 }
             }
             ProgressEvent::ExtractingArchive { package_id } => {
-                writeln!(stderr, "Extracting {}", package_id.as_str())?;
+                self.start_activity(&format!("Extracting {}", package_id.as_str()))?;
             }
             ProgressEvent::ParsingFonts { package_id } => {
-                writeln!(stderr, "Parsing {}", package_id.as_str())?;
+                self.start_activity(&format!("Parsing {}", package_id.as_str()))?;
+            }
+            ProgressEvent::CheckingInstallRisks { package_id } => {
+                self.start_activity(&format!(
+                    "Checking installed fonts for {}",
+                    package_id.as_str()
+                ))?;
             }
             ProgressEvent::PreparingUpdate { package_id } => {
-                writeln!(stderr, "Preparing {}", package_id.as_str())?;
+                self.start_activity(&format!("Preparing {}", package_id.as_str()))?;
             }
             ProgressEvent::ApplyingUpdate { package_id } => {
-                writeln!(stderr, "Applying {}", package_id.as_str())?;
+                self.start_activity(&format!("Applying {}", package_id.as_str()))?;
             }
             ProgressEvent::FinishedPackage { package_id } => {
+                self.finish_activity()?;
+                let mut stderr = self.stderr.lock();
                 writeln!(stderr, "Finished {}", package_id.as_str())?;
             }
         }
@@ -394,14 +531,7 @@ impl Reporter for HumanReporter {
     }
 
     fn self_update_progress(&mut self, message: &str) -> CliResult<()> {
-        if self.quiet || !self.show_progress {
-            return Ok(());
-        }
-
-        let mut stderr = self.stderr.lock();
-        writeln!(stderr, "{message}")?;
-
-        Ok(())
+        self.start_activity(message)
     }
 }
 

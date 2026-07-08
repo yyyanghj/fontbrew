@@ -20,7 +20,7 @@ pub mod tasks;
 mod update;
 pub mod version;
 
-pub use app::FontbrewApp;
+pub use app::{FontbrewApp, InstallPreparation, PendingFamilySelection};
 pub use error::{FontbrewError, Result};
 pub use model::*;
 pub use version::*;

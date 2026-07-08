@@ -18,11 +18,21 @@ impl<'a> ProgressAdapter<'a> {
         }
     }
 
-    pub fn finish(self) -> CliResult<()> {
-        match self.error {
+    pub fn finish(mut self) -> CliResult<()> {
+        let activity_error = self.reporter.finish_activity().err();
+        match self.error.take() {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => match activity_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            },
         }
+    }
+}
+
+impl Drop for ProgressAdapter<'_> {
+    fn drop(&mut self) {
+        let _ = self.reporter.finish_activity();
     }
 }
 

@@ -233,6 +233,7 @@ async fn run_with_network_client_with_target_override(
         });
     }
 
+    reporter.finish_activity()?;
     confirmer.confirm_self_update(
         &request.current_executable,
         &latest_version,
