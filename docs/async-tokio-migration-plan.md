@@ -8,7 +8,7 @@ Implemented design record. This document started as the migration plan on 2026-0
 
 ## Context
 
-Fontbrew now uses async Rust APIs across the CLI and app boundary. The CLI entry point owns the Tokio runtime with `#[tokio::main]`, `FontbrewApp` exposes async methods, and remote paths use a concrete async `NetworkClient` built on `reqwest::Client`.
+Fontbrew now uses async Rust APIs across the CLI and core API boundary. The CLI entry point owns the Tokio runtime with `#[tokio::main]`, `Fontbrew` exposes async command-flow methods, and remote paths use a concrete async `NetworkClient` built on `reqwest::Client`.
 
 Blocking work is still broader than HTTP:
 
@@ -43,12 +43,12 @@ The most important safety rule is that planning may prepare staged files, but ap
 
 ### Async-first core
 
-`fontbrew-core` accepted a breaking change. Public app methods are async instead of keeping parallel sync and async variants.
+`fontbrew-core` accepted a breaking change. Public command-flow methods are async instead of keeping parallel sync and async variants.
 
-Representative current app shape:
+Representative current core API shape:
 
 ```rust
-impl FontbrewApp {
+impl Fontbrew {
     pub async fn install_plan_with_progress_and_cancellation(
         &self,
         request: InstallRequest,
@@ -56,7 +56,7 @@ impl FontbrewApp {
         cancellation: Arc<dyn CancellationToken>,
     ) -> Result<InstallPlan>;
 
-    pub async fn apply_install(
+    pub async fn apply_install_plan(
         &self,
         plan: InstallPlan,
         policy: ExecutionPolicy,
@@ -68,7 +68,7 @@ impl FontbrewApp {
 
 Do not create Tokio runtimes inside library functions. The CLI owns the runtime through `#[tokio::main]`.
 
-`ProgressSink` stays as a borrowed, synchronous CLI-facing interface and must not cross a `spawn_blocking` call. The async app method may emit progress before and after awaited work, but blocking helpers must accept owned inputs and return progress events for the caller to emit after the await.
+`ProgressSink` stays as a borrowed, synchronous CLI-facing interface and must not cross a `spawn_blocking` call. The async `Fontbrew` method may emit progress before and after awaited work, but blocking helpers must accept owned inputs and return progress events for the caller to emit after the await.
 
 ### Tokio in both crates
 
@@ -240,13 +240,13 @@ The public async interface is not drop-cancel-safe. Fontbrew's supported cancell
 - Provider metadata snapshot freshness semantics are preserved.
 - Provider and GitHub functions receive `NetworkClient` instead of constructing their own clients.
 
-### 4. Async app interface
+### 4. Async core interface
 
-- `FontbrewApp` methods are async.
-- `FontbrewApp` stores an optional `Arc<NetworkClient>` or lazily creates one through a helper.
+- `Fontbrew` command-flow methods are async.
+- `Fontbrew` owns default network client creation; network client injection is a test hook, not a user option.
 - Cancellation is passed as `Arc<dyn CancellationToken>` where async and blocking work need owned, cloneable cancellation handles.
-- The testable constructor is `with_paths_and_network_client`.
-- Synchronous app compatibility wrappers were not added.
+- The public constructor is `Fontbrew::new(FontbrewOptions::default())`, with flat path options for tests and alternate stores.
+- Synchronous compatibility wrappers were not added.
 
 ### 5. Plan-stage blocking isolation
 

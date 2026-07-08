@@ -5,8 +5,8 @@ use fontbrew_core::{
     config::{ActivationStrategy, FontbrewConfig},
     fs::{write_atomically, GlobalFileLock},
     platform::FontbrewPaths,
-    ConfigGetRequest, ConfigSetRequest, ConfigValue, FontFormat, FontbrewApp, FontbrewError,
-    PackageId, PackageVersion,
+    ConfigGetRequest, ConfigSetRequest, ConfigValue, FontFormat, Fontbrew, FontbrewError,
+    FontbrewOptions, PackageId, PackageVersion,
 };
 
 fn package_id(id: &str) -> PackageId {
@@ -19,6 +19,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
         temp.path().join("config"),
         temp.path().join("home"),
     )
+}
+
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
 }
 
 #[test]
@@ -55,9 +64,9 @@ fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
 }
 
 #[tokio::test]
-async fn list_packages_returns_empty_report_from_async_app_seam() {
+async fn list_packages_returns_empty_report_from_core_api() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let app = FontbrewApp::with_paths(test_paths(&temp));
+    let app = fontbrew_with_paths(test_paths(&temp));
 
     let report = app.list_packages().await.expect("list packages");
 
@@ -177,7 +186,7 @@ metadata_ttl = 12
 async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
 
     let set_report = app
         .config_set(ConfigSetRequest {
@@ -220,7 +229,7 @@ async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
 #[tokio::test]
 async fn config_set_and_get_support_all_known_scalar_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let app = FontbrewApp::with_paths(test_paths(&temp));
+    let app = fontbrew_with_paths(test_paths(&temp));
 
     for (key, raw_value, expected_value) in [
         (
@@ -256,7 +265,7 @@ async fn config_set_and_get_support_all_known_scalar_keys() {
 async fn config_set_accepts_symlink_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
 
     let report = app
         .config_set(ConfigSetRequest {
@@ -280,7 +289,7 @@ async fn config_set_accepts_symlink_activation_strategy() {
 async fn config_set_uses_global_write_lock() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let _held_lock =
         GlobalFileLock::try_exclusive(&paths.managed_store_dir().join(".fontbrew.lock"))
             .expect("hold global write lock");
@@ -300,7 +309,7 @@ async fn config_set_uses_global_write_lock() {
 #[tokio::test]
 async fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let app = FontbrewApp::with_paths(test_paths(&temp));
+    let app = fontbrew_with_paths(test_paths(&temp));
 
     let unknown_get = app
         .config_get(ConfigGetRequest {

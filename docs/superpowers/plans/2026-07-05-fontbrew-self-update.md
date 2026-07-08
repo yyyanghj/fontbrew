@@ -4,7 +4,7 @@
 
 Add a `fontbrew self-update` command that updates the `fontbrew` CLI binary itself to the latest stable GitHub release.
 
-This is CLI-owned behavior. It must not be modeled as a managed font package update, must not write the font manifest, and must not route through `FontbrewApp` application tasks.
+This is CLI-owned behavior. It must not be modeled as a managed font package update, must not write the font manifest, and must not route through `Fontbrew` font install/update flows.
 
 ## Command Shape
 
@@ -302,7 +302,7 @@ crates/fontbrew-cli/src/reporter/json.rs
 crates/fontbrew-cli/src/exit.rs
 ```
 
-Do not add `FontbrewApp::self_update_*` methods and do not add self-update request/report models to `fontbrew-core`.
+Do not add `Fontbrew::self_update_*` methods and do not add self-update request/report models to `fontbrew-core`.
 
 Allowed reuse from `fontbrew-core`:
 

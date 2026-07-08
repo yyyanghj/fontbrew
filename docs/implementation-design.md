@@ -4,7 +4,7 @@ Fontbrew is a Rust 2021 workspace with a reusable core crate and a thin CLI crat
 
 ## Crates
 
-- `crates/fontbrew-core`: source resolution, provider metadata, archive handling, font parsing, manifest persistence, activation, update planning, config, and app tasks.
+- `crates/fontbrew-core`: source resolution, provider metadata, archive handling, font parsing, manifest persistence, activation, update planning, config, and core command flows.
 - `crates/fontbrew-cli`: argument parsing, confirmation flow, progress rendering, exit mapping, and human/JSON reporters.
 
 ## Source Resolution
@@ -112,7 +112,7 @@ Supported keys:
 
 ## Async Runtime
 
-`fontbrew-cli` owns the Tokio runtime through `#[tokio::main]`. `FontbrewApp` exposes async high-level methods and uses `NetworkClient` for async HTTP. Blocking filesystem transactions, archive parsing, font parsing, and self-update replacement are moved behind `tokio::task::spawn_blocking` where needed. Reporters remain CLI-owned and are not shared across concurrent prepare tasks.
+`fontbrew-cli` owns the Tokio runtime through `#[tokio::main]`. `Fontbrew` exposes async high-level methods and uses `NetworkClient` for async HTTP. Blocking filesystem transactions, archive parsing, font parsing, and self-update replacement are moved behind `tokio::task::spawn_blocking` where needed. Reporters remain CLI-owned and are not shared across concurrent prepare tasks.
 
 ## Safety Boundaries
 

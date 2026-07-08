@@ -1,11 +1,11 @@
 //! Reusable application core for Fontbrew-owned frontends.
 
 pub mod activation;
-pub mod app;
 pub mod archives;
 pub mod config;
 pub mod error;
 pub mod fetch;
+pub mod fontbrew;
 pub mod fonts;
 pub mod fs;
 mod github;
@@ -20,8 +20,13 @@ pub mod tasks;
 mod update;
 pub mod version;
 
-pub use app::{FontbrewApp, InstallPreparation, PendingFamilySelection};
 pub use error::{FontbrewError, Result};
+pub use fontbrew::{
+    ExtractArchiveRequest, ExtractedArchive, FontFileInput, Fontbrew, FontbrewOptions,
+    InstallPlanSet, InstallPreparation, InstallSourcePreparation, InstallTarget, ParseFontsRequest,
+    ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts, PendingAssetSelection,
+    PendingFamilySelection, PlanInstallRequest, PrepareInstallSourceRequest,
+};
 pub use model::*;
 pub use version::*;
 
@@ -30,9 +35,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::{
-        platform::FontbrewPaths, FamilyName, FontFormat, FontbrewApp, FontbrewError, InfoReport,
-        InfoRequest, InstallPlan, InstallRequest, InstallSource, PackageId, PackageInfo,
-        PackageVersion, PlannedChange, ProviderKind,
+        platform::FontbrewPaths, FamilyName, FontFormat, Fontbrew, FontbrewError, FontbrewOptions,
+        InfoReport, InfoRequest, InstallPlan, InstallRequest, InstallSource, PackageId,
+        PackageInfo, PackageVersion, PlannedChange, ProviderKind,
     };
 
     fn package_id(id: &str) -> PackageId {
@@ -132,16 +137,22 @@ mod tests {
     #[tokio::test]
     async fn package_info_returns_an_info_report_shell() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let app = FontbrewApp::with_paths(FontbrewPaths::for_tests(
+        let paths = FontbrewPaths::for_tests(
             temp.path().join("data"),
             temp.path().join("config"),
             temp.path().join("home"),
-        ));
+        );
+        let fontbrew = Fontbrew::new(FontbrewOptions {
+            store_dir: Some(paths.managed_store_dir()),
+            config_path: Some(paths.config_path()),
+            activation_dir: Some(paths.activation_dir()),
+        })
+        .expect("create Fontbrew");
         let request = InfoRequest {
             package_id: package_id("jetbrains-mono"),
         };
 
-        let result: crate::Result<InfoReport> = app.package_info(request).await;
+        let result: crate::Result<InfoReport> = fontbrew.package_info(request).await;
         let error = result.expect_err("missing package should fail");
 
         assert!(matches!(error, FontbrewError::Manifest { .. }));

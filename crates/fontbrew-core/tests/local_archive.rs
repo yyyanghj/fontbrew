@@ -12,9 +12,9 @@ use fontbrew_core::{
     activation::ActivationStrategy,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FamilyName, FontFormat, FontbrewApp, FontbrewError,
-    InfoRequest, InstallRequest, InstallSource, NoCancellation, PackageId, PackageVersion,
-    PlanRisk, ProgressEvent, ProgressSink, ProviderKind, RemovePlan, RemoveRequest,
+    CancellationToken, ExecutionPolicy, FamilyName, FontFormat, Fontbrew, FontbrewError,
+    FontbrewOptions, InfoRequest, InstallRequest, InstallSource, NoCancellation, PackageId,
+    PackageVersion, PlanRisk, ProgressEvent, ProgressSink, ProviderKind, RemovePlan, RemoveRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -106,6 +106,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
         temp.path().join("config"),
         temp.path().join("home"),
     )
+}
+
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
 }
 
 fn local_archive_request(archive_path: &Path, reinstall: bool) -> InstallRequest {
@@ -255,13 +264,13 @@ fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
     entries
 }
 
-async fn apply_install(app: &FontbrewApp, archive_path: &Path) -> fontbrew_core::Result<()> {
+async fn apply_install(app: &Fontbrew, archive_path: &Path) -> fontbrew_core::Result<()> {
     let plan = app
         .install_plan(local_archive_request(archive_path, false))
         .await?;
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -278,7 +287,7 @@ async fn local_archive_install_plan_error_replays_progress_events() {
     let archive_path = temp.path().join("bad.zip");
     fs::write(&archive_path, b"not a zip archive").expect("write invalid archive");
 
-    let app = FontbrewApp::with_paths(paths);
+    let app = fontbrew_with_paths(paths);
     let mut progress = RecordingProgress::default();
     let error = app
         .install_plan_with_progress_and_cancellation(
@@ -311,7 +320,7 @@ fn no_cancellation_token_never_cancels() {
 #[tokio::test]
 async fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let app = FontbrewApp::with_paths(test_paths(&temp));
+    let app = fontbrew_with_paths(test_paths(&temp));
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -333,7 +342,7 @@ async fn install_plan_serialization_does_not_expose_prepared_internal_paths() {
 async fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_install() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -351,7 +360,7 @@ async fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_instal
     );
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -375,7 +384,7 @@ async fn apply_install_cancelled_before_apply_cleans_staging_and_does_not_instal
 async fn install_plan_cancellation_after_local_staging_creation_cleans_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -402,7 +411,7 @@ async fn install_plan_removes_stale_install_staging_without_touching_unrelated_p
 ) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -446,7 +455,7 @@ async fn install_plan_removes_stale_install_staging_without_touching_unrelated_p
 async fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let first_archive = temp.path().join("source-code-pro.zip");
     let second_archive = temp.path().join("source-code-pro-copy.zip");
     write_fixture_archive(
@@ -475,7 +484,7 @@ async fn install_plan_stale_cleanup_preserves_existing_prepared_plan_staging() {
         2
     );
     app.discard_install_plan(second_plan);
-    app.apply_install(
+    app.apply_install_plan(
         first_plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
@@ -497,7 +506,7 @@ async fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_
 ) {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let first_archive = temp.path().join("source-code-pro.zip");
     let second_archive = temp.path().join("source-code-pro-copy.zip");
     write_fixture_archive(
@@ -533,7 +542,7 @@ async fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_
     );
 
     app.discard_install_plan(second_plan);
-    app.apply_install(
+    app.apply_install_plan(
         first_plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
@@ -554,7 +563,7 @@ async fn install_plan_stale_cleanup_removes_abandoned_marker_but_preserves_live_
 async fn local_archive_install_list_info_remove_round_trip() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -584,7 +593,7 @@ async fn local_archive_install_list_info_remove_round_trip() {
 
     let mut progress = NoProgress;
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -663,7 +672,7 @@ async fn local_archive_install_list_info_remove_round_trip() {
 async fn local_archive_package_id_override_installs_non_normalizable_family_and_records_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("unsafe-family.zip");
     let unsafe_family_font = font_bytes_with_unsafe_family_name("SourceCodePro-Regular.ttf");
     write_archive_entry_bytes(&archive_path, "UnsafeFamily.ttf", &unsafe_family_font);
@@ -690,7 +699,7 @@ async fn local_archive_package_id_override_installs_non_normalizable_family_and_
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -714,7 +723,7 @@ async fn local_archive_package_id_override_installs_non_normalizable_family_and_
 async fn direct_local_archive_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("mixed-families.zip");
     write_fixture_archive(
         &archive_path,
@@ -745,7 +754,7 @@ async fn direct_local_archive_requires_family_selection_for_multiple_families() 
 async fn local_archive_package_id_override_does_not_bypass_multiple_family_boundary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("mixed-families.zip");
     write_fixture_archive(
         &archive_path,
@@ -779,7 +788,7 @@ async fn local_archive_package_id_override_does_not_bypass_multiple_family_bound
 async fn direct_local_archive_selected_family_installs_one_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("mixed-families.zip");
     write_fixture_archive(
         &archive_path,
@@ -800,7 +809,7 @@ async fn direct_local_archive_selected_family_installs_one_package() {
     assert_eq!(plan.package_id, package_id("inter"));
 
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -826,7 +835,7 @@ async fn direct_local_archive_selected_family_installs_one_package() {
 async fn package_id_override_is_rejected_for_provider_sources() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
 
     let error = app
         .install_plan(InstallRequest {
@@ -856,7 +865,7 @@ async fn package_id_override_is_rejected_for_provider_sources() {
 async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -902,7 +911,7 @@ async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction()
 async fn install_uses_copy_activation_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -927,7 +936,7 @@ activation_strategy = "copy"
         .expect("copy activation config should be accepted");
 
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -957,7 +966,7 @@ async fn local_archive_install_uses_global_format_preference_when_formats_have_e
 {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -995,7 +1004,7 @@ format_preference = ["ttf", "otf"]
 async fn local_archive_request_format_preference_overrides_global_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1027,7 +1036,7 @@ format_preference = ["ttf", "otf"]
         .expect("plan otf override");
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -1048,7 +1057,7 @@ format_preference = ["ttf", "otf"]
 async fn local_archive_install_uses_default_format_preference_when_coverage_differs() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1065,7 +1074,7 @@ async fn local_archive_install_uses_default_format_preference_when_coverage_diff
         .expect("format coverage mismatch should still use default preference");
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -1087,7 +1096,7 @@ async fn local_archive_install_uses_default_format_preference_when_coverage_diff
 async fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1108,7 +1117,7 @@ async fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
         .expect("explicit format preference should select requested format");
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -1130,7 +1139,7 @@ async fn local_archive_explicit_format_preference_resolves_coverage_mismatch() {
 async fn local_archive_explicit_unavailable_format_fails_without_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1156,7 +1165,7 @@ async fn local_archive_explicit_unavailable_format_fails_without_fallback() {
 async fn install_rejects_package_store_symlink_without_writing_outside_managed_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1178,7 +1187,7 @@ async fn install_rejects_package_store_symlink_without_writing_outside_managed_r
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -1198,7 +1207,7 @@ async fn install_rejects_package_store_symlink_without_writing_outside_managed_r
 async fn remove_rejects_malformed_manifest_version_without_deleting_outside_directory() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let outside_dir = paths.managed_store_dir().join("outside");
     fs::create_dir_all(paths.managed_store_dir().join("packages/source-code-pro"))
         .expect("create traversal prefix");
@@ -1256,7 +1265,7 @@ async fn failed_reinstall_preserves_existing_activation_and_package_store() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1293,7 +1302,7 @@ async fn failed_reinstall_preserves_existing_activation_and_package_store() {
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let error = app
-        .apply_install(
+        .apply_install_plan(
             reinstall_plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -1316,7 +1325,7 @@ async fn failed_reinstall_preserves_existing_activation_and_package_store() {
 async fn repeated_local_archive_install_without_reinstall_is_noop() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1345,7 +1354,7 @@ async fn repeated_local_archive_install_without_reinstall_is_noop() {
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -1366,7 +1375,7 @@ async fn repeated_local_archive_install_without_reinstall_is_noop() {
 async fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1420,7 +1429,7 @@ async fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
 async fn failed_local_archive_install_does_not_update_manifest() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("broken.zip");
     write_invalid_font_archive(&archive_path);
 
@@ -1443,7 +1452,7 @@ async fn failed_local_archive_install_does_not_update_manifest() {
 async fn activation_conflict_blocks_install_without_manifest_update() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1463,7 +1472,7 @@ async fn activation_conflict_blocks_install_without_manifest_update() {
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut progress,
@@ -1487,7 +1496,7 @@ async fn activation_conflict_blocks_install_without_manifest_update() {
 async fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_under_safe_policy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1522,7 +1531,7 @@ async fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_und
     )));
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -1550,7 +1559,7 @@ async fn install_plan_reports_unmanaged_same_family_overlap_without_mutating_und
 async fn install_plan_reports_activation_artifact_managed_by_another_package() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1602,22 +1611,24 @@ async fn install_plan_reports_activation_artifact_managed_by_another_package() {
         .await
         .expect("plan install with other managed activation conflict");
 
-    assert!(plan.risks.iter().any(|risk| matches!(
-        risk,
-        PlanRisk::Conflict {
-            package_id: risk_package_id,
-            description
-        } if risk_package_id == &package_id("source-code-pro")
-            && description.contains("other-package")
-            && description.contains("SourceCodePro-Regular.ttf")
-    )));
+    assert!(plan.risks.iter().any(|risk| {
+        matches!(
+            risk,
+            PlanRisk::Conflict {
+                package_id: risk_package_id,
+                description
+            } if *risk_package_id == package_id("source-code-pro")
+                && description.contains("other-package")
+                && description.contains("SourceCodePro-Regular.ttf")
+        )
+    }));
 }
 
 #[tokio::test]
 async fn install_plan_reports_already_managed_package_from_different_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let first_archive = temp.path().join("source-code-pro-first.zip");
     let second_archive = temp.path().join("source-code-pro-second.zip");
     write_fixture_archive(
@@ -1637,19 +1648,21 @@ async fn install_plan_reports_already_managed_package_from_different_source() {
         .await
         .expect("plan same package from different source");
 
-    assert!(plan.risks.iter().any(|risk| matches!(
-        risk,
-        PlanRisk::Conflict {
-            package_id: risk_package_id,
-            description
-        } if risk_package_id == &package_id("source-code-pro")
-            && description.contains("different source")
-            && description.contains("source-code-pro-first.zip")
-            && description.contains("source-code-pro-second.zip")
-    )));
+    assert!(plan.risks.iter().any(|risk| {
+        matches!(
+            risk,
+            PlanRisk::Conflict {
+                package_id: risk_package_id,
+                description
+            } if *risk_package_id == package_id("source-code-pro")
+                && description.contains("different source")
+                && description.contains("source-code-pro-first.zip")
+                && description.contains("source-code-pro-second.zip")
+        )
+    }));
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -1668,7 +1681,7 @@ async fn install_plan_reports_already_managed_package_from_different_source() {
 async fn reinstall_from_different_source_does_not_adopt_source_even_with_approved_risk() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let first_archive = temp.path().join("source-code-pro-first.zip");
     let second_archive = temp.path().join("source-code-pro-second.zip");
     write_fixture_archive(
@@ -1690,7 +1703,7 @@ async fn reinstall_from_different_source_does_not_adopt_source_even_with_approve
     assert!(!plan.risks.is_empty());
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::AssumeYes,
             &mut NoProgress,
@@ -1715,7 +1728,7 @@ async fn reinstall_from_different_source_does_not_adopt_source_even_with_approve
 async fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1759,7 +1772,7 @@ async fn install_plan_reports_unmanaged_same_family_symlink_overlap() {
 async fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1786,7 +1799,7 @@ async fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
     .expect("write unmanaged same-family font after planning");
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -1814,7 +1827,7 @@ async fn stale_install_plan_rechecks_same_family_overlap_before_mutation() {
 async fn stale_install_plan_rechecks_managed_activation_conflict_before_copying() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,
@@ -1867,7 +1880,7 @@ async fn stale_install_plan_rechecks_managed_activation_conflict_before_copying(
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
 
     let error = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::AssumeYes,
             &mut NoProgress,
@@ -1905,7 +1918,7 @@ async fn install_plan_scan_error_removes_staging_directory() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
-    let app = FontbrewApp::with_paths(paths.clone());
+    let app = fontbrew_with_paths(paths.clone());
     let archive_path = temp.path().join("source-code-pro.zip");
     write_fixture_archive(
         &archive_path,

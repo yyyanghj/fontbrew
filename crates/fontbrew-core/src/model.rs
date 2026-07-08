@@ -662,3 +662,73 @@ pub struct SearchResult {
     pub version: Option<PackageVersion>,
     pub families: Vec<FamilyName>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstallCandidateId(String);
+
+impl InstallCandidateId {
+    pub(crate) fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstallCandidateSource {
+    LocalArchive { path: PathBuf },
+    GitHub { owner: String, repo: String },
+    Provider { provider: ProviderKind, id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallCandidate {
+    pub id: InstallCandidateId,
+    pub package_id: Option<PackageId>,
+    pub families: Vec<FamilyName>,
+    pub version: Option<PackageVersion>,
+    pub source: InstallCandidateSource,
+    pub fonts: Vec<InstallCandidateFont>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallCandidateFont {
+    pub family: FamilyName,
+    pub style: String,
+    pub weight: u16,
+    pub format: FontFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallPlanSummary {
+    pub package_id: PackageId,
+    pub target_version: Option<PackageVersion>,
+    pub changes: Vec<PlannedChange>,
+    pub risks: Vec<PlanRisk>,
+    pub already_installed: bool,
+}
+
+impl From<&InstallPlan> for InstallPlanSummary {
+    fn from(plan: &InstallPlan) -> Self {
+        Self {
+            package_id: plan.package_id.clone(),
+            target_version: plan.target_version.clone(),
+            changes: plan.changes.clone(),
+            risks: plan.risks.clone(),
+            already_installed: plan.already_installed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallReportSet {
+    pub packages: Vec<InstallReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyOptions {
+    pub policy: ExecutionPolicy,
+}

@@ -12,9 +12,9 @@ use fontbrew_core::{
     fs::{debug_fail_next_atomic_write, DebugAtomicWriteFailure},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    tasks, CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, InstallRequest,
-    InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent, ProgressSink, UpdatePlan,
-    UpdateRequest,
+    tasks, CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewOptions,
+    InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
+    ProgressSink, UpdatePlan, UpdateRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -117,6 +117,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     )
 }
 
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
+}
+
 fn github_releases_path(owner: &str, repo: &str) -> String {
     format!("/repos/{owner}/{repo}/releases")
 }
@@ -125,8 +134,8 @@ fn download_path(name: &str) -> String {
     format!("/downloads/{name}")
 }
 
-fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
-    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+fn fontbrew_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> Fontbrew {
+    fontbrew_with_paths(paths).with_network_client(Arc::new(server.network_client()))
 }
 
 fn seed_github_update(
@@ -146,7 +155,7 @@ fn seed_github_update(
     server.respond_bytes(&download_path(download_name), archive);
 }
 
-fn source_code_pro_update_app(paths: &FontbrewPaths, archive: Vec<u8>) -> FontbrewApp {
+fn source_code_pro_update_fontbrew(paths: &FontbrewPaths, archive: Vec<u8>) -> Fontbrew {
     let server = LocalHttpServer::start();
     seed_github_update(
         &server,
@@ -157,7 +166,7 @@ fn source_code_pro_update_app(paths: &FontbrewPaths, archive: Vec<u8>) -> Fontbr
         "source-code-pro-v2.zip",
         archive,
     );
-    app_with_server(paths.clone(), &server)
+    fontbrew_with_server(paths.clone(), &server)
 }
 
 fn zip_with_fixture_font(entry_name: &str, fixture_name: &str) -> Vec<u8> {
@@ -213,7 +222,7 @@ fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
     entries
 }
 
-async fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (FontbrewApp, UpdatePlan) {
+async fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (Fontbrew, UpdatePlan) {
     install_github_source_code_pro(paths, "v1.0.0").await;
     let update_server = LocalHttpServer::start();
     seed_github_update(
@@ -225,7 +234,7 @@ async fn prepare_source_code_pro_update(paths: &FontbrewPaths) -> (FontbrewApp, 
         "source-code-pro-v2.zip",
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &update_server);
+    let app = fontbrew_with_server(paths.clone(), &update_server);
     let mut progress = NoProgress;
     let plan = app
         .update_plan(
@@ -271,7 +280,7 @@ fn write_manifest(paths: &FontbrewPaths, records: Vec<ManifestPackageRecord>) {
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
 }
 
-async fn install_github_source_code_pro(paths: &FontbrewPaths, version: &str) -> FontbrewApp {
+async fn install_github_source_code_pro(paths: &FontbrewPaths, version: &str) -> Fontbrew {
     install_github_source_code_pro_with_entries(
         paths,
         version,
@@ -284,7 +293,7 @@ async fn install_github_source_code_pro_with_entries(
     paths: &FontbrewPaths,
     version: &str,
     entries: &[(&str, &str)],
-) -> FontbrewApp {
+) -> Fontbrew {
     let _guard = INITIAL_GITHUB_INSTALL_LOCK.lock().await;
     let server = LocalHttpServer::start();
     seed_github_update(
@@ -296,7 +305,7 @@ async fn install_github_source_code_pro_with_entries(
         "source-code-pro.zip",
         zip_with_fixture_fonts(entries),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::GitHubRepo {
@@ -317,7 +326,7 @@ async fn install_github_source_code_pro_with_entries(
             )
         });
     let mut progress = NoProgress;
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -452,7 +461,7 @@ async fn update_plan_cancellation_after_resolved_github_staging_creation_cleans_
     install_github_source_code_pro(&paths, "v1.0.0").await;
     assert!(staging_entries(&paths).is_empty());
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -519,7 +528,7 @@ async fn update_prepare_partial_failure_does_not_block_other_prepared_packages()
         &github_releases_path("rsms", "inter"),
         r#"[{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let mut progress = NoProgress;
     let plan = app
@@ -565,7 +574,7 @@ async fn update_prepare_identity_mismatch_fails_that_package_only() {
             None,
         )],
     );
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
     );
@@ -606,7 +615,7 @@ async fn direct_github_update_reuses_manifest_family_boundary() {
             }),
         )],
     );
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
@@ -664,7 +673,7 @@ async fn update_prepare_uses_bounded_parallelism_for_github_checks() {
     let serial_probe = Arc::new(ServerConcurrencyProbe::new(1));
     let serial_server = LocalHttpServer::start();
     seed_two_successful_updates(&serial_server, serial_probe.clone());
-    let serial_app = app_with_server(paths.clone(), &serial_server);
+    let serial_app = fontbrew_with_server(paths.clone(), &serial_server);
     let mut progress = NoProgress;
     serial_app
         .update_plan(
@@ -679,7 +688,7 @@ async fn update_prepare_uses_bounded_parallelism_for_github_checks() {
     let parallel_probe = Arc::new(ServerConcurrencyProbe::new(2));
     let parallel_server = LocalHttpServer::start();
     seed_two_successful_updates(&parallel_server, parallel_probe.clone());
-    let parallel_app = app_with_server(paths, &parallel_server);
+    let parallel_app = fontbrew_with_server(paths, &parallel_server);
     parallel_app
         .update_plan(
             update_request(Vec::new(), Some(2)),
@@ -745,7 +754,7 @@ async fn update_plan_preserves_input_order_when_second_package_finishes_first() 
         zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
         inter_download_gate.clone(),
     );
-    let app = app_with_server(paths, &server);
+    let app = fontbrew_with_server(paths, &server);
     let release_gate = tokio::task::spawn_blocking(move || {
         source_code_pro_release_gate.wait_for_arrival();
         inter_download_gate.wait_for_completion();
@@ -831,7 +840,7 @@ async fn update_apply_failure_preserves_old_version_activation_and_manifest() {
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     assert_activation_copy_matches(&old_activation_path, &old_store_path);
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular-v2.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -909,7 +918,7 @@ async fn update_apply_new_activation_mid_failure_removes_partial_new_activation_
     let old_regular_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     let old_bold_activation_path = paths.activation_dir().join("SourceCodePro-Bold.ttf");
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-NewA.ttf", "SourceCodePro-Regular.ttf"),
@@ -992,7 +1001,7 @@ async fn update_apply_old_activation_deactivation_mid_failure_restores_removed_o
     let old_regular_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     let old_bold_activation_path = paths.activation_dir().join("SourceCodePro-Bold.ttf");
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_fonts(&[
             ("SourceCodePro-NewA.ttf", "SourceCodePro-Regular.ttf"),
@@ -1052,7 +1061,7 @@ async fn update_apply_copy_failure_removes_partial_new_package_store() {
     let paths = test_paths(&temp);
     install_github_source_code_pro(&paths, "v1.0.0").await;
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -1104,7 +1113,7 @@ async fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manife
     let paths = test_paths(&temp);
     install_github_source_code_pro(&paths, "v1.0.0").await;
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -1172,7 +1181,7 @@ async fn update_apply_manifest_write_not_committed_failure_restores_old_state_an
         .join("files/SourceCodePro-Regular.ttf");
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -1235,7 +1244,7 @@ async fn update_apply_success_points_manifest_and_activation_to_new_version_and_
         &PackageVersion::new("v1.0.0"),
     );
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
@@ -1291,7 +1300,7 @@ async fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
         .join("files/SourceCodePro-Regular.ttf");
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
 
-    let app = source_code_pro_update_app(
+    let app = source_code_pro_update_fontbrew(
         &paths,
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Fontbrew is a Rust 2021 workspace with two crates under `crates/`. `crates/fontbrew-core` contains reusable domain logic for Fontsource, GitHub, local archives, manifests, activation, archive handling, config, and app tasks. `crates/fontbrew-cli` contains the `fontbrew` binary, CLI parsing, confirmation flow, progress handling, exit mapping, and human/JSON reporters. Integration tests live in each crate's `tests/` directory. Offline test assets live in `fixtures/fonts/`; keep fixture provenance documented in `fixtures/fonts/README.md`. Product notes, ADRs, plans, and verification records live under `docs/`.
+Fontbrew is a Rust 2021 workspace with two crates under `crates/`. `crates/fontbrew-core` contains reusable domain logic and core APIs for Fontsource, GitHub, local archives, manifests, activation, archive handling, config, and command flows. `crates/fontbrew-cli` contains the `fontbrew` binary, CLI parsing, confirmation flow, progress handling, exit mapping, and human/JSON reporters. Integration tests live in each crate's `tests/` directory. Offline test assets live in `fixtures/fonts/`; keep fixture provenance documented in `fixtures/fonts/README.md`. Product notes, ADRs, plans, and verification records live under `docs/`.
 
 ## Build, Test, and Development Commands
 
