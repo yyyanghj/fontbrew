@@ -2,6 +2,15 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.12 - 2026-07-09
+
+- 优化直接从 GitHub 安装字体时的多资产交互，human 模式下可在多个匹配的
+  release asset 中直接选择，非交互和 JSON 模式继续使用 `--asset` 明确选择。
+- 支持直接 GitHub 安装时使用 `--id` 指定包 ID，便于为远端字体包设置稳定的
+  本地管理名称。
+- 更新 GitHub 安装资产选择和包 ID 覆盖规则文档，保持 CLI help、产品说明和
+  实现说明一致。
+
 ## 0.0.11 - 2026-07-09
 
 - 将默认字体激活方式从软链改为复制真实字体文件，激活产物仍保留在
