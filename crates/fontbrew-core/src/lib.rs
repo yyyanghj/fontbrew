@@ -8,7 +8,6 @@ pub mod fetch;
 pub mod fontbrew;
 pub mod fonts;
 pub mod fs;
-mod github;
 mod install;
 pub mod manifest;
 pub mod model;

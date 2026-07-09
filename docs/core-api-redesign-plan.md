@@ -114,11 +114,12 @@ pub struct InstallMetadata {
 impl InstallMetadata {
     pub fn source(&self) -> &InstallSource;
     pub fn package_id(&self) -> Option<&PackageId>;
+    pub fn asset_selection_label(&self) -> &str;
     pub fn assets(&self) -> &[String];
 }
 ```
 
-The returned `InstallMetadata` owns resolved release or provider metadata so the next stage can reuse it without repeating network requests.
+The returned `InstallMetadata` owns resolved release or provider metadata so the next stage can reuse it without repeating network requests. `package_id` is present for provider metadata whose package identity is already known. It is `None` for GitHub and local archive metadata because their package IDs are derived from parsed font families after asset preparation. `asset_selection_label` identifies the source in release-asset prompts without pretending that the source is a package.
 
 ### Prepare Install Asset
 
@@ -356,7 +357,7 @@ Behavior that must remain covered:
 - Ambiguous GitHub assets in the atomic prepare API fail when no selector resolves one asset.
 - The higher-level asset-selection flow reuses resolved GitHub release metadata after the caller selects an asset.
 - Preparation with one candidate still stops before planning.
-- Local archive package id override is allowed; provider and GitHub overrides are rejected.
+- Local archive and direct GitHub package id overrides are allowed for a single target; provider overrides are rejected.
 - Multi-target planning from one preparation does not repeat download/extract/parse.
 - Dropping preparation or plan sets cleans staging.
 - Batch install stops on first apply failure and keeps already installed packages.

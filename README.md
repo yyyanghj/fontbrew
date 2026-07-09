@@ -75,6 +75,8 @@ Install from a GitHub Release:
 fontbrew install rsms/inter --format ttf --all
 ```
 
+Each selected font family is installed as its own package. Its default package ID comes from the family name, not the GitHub repository name.
+
 If a release has more than one installable zip asset, select one by name or glob:
 
 ```bash

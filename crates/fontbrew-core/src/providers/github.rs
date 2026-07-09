@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc};
 use crate::{
     error::{FontbrewError, Result},
     fetch::{HttpHeader, HttpRequest, NetworkClient},
-    model::{CancellationToken, PackageId, PackageVersion},
+    model::{CancellationToken, PackageVersion},
     sources::GitHubRepo,
 };
 
@@ -44,11 +44,11 @@ pub(crate) async fn resolve_release_asset(
     network_client: &NetworkClient,
     repo: &GitHubRepo,
     asset_selector: Option<&str>,
-    package_id: &PackageId,
+    source: &str,
 ) -> Result<ResolvedGitHubAsset> {
     let release = resolve_latest_stable_release(network_client, repo).await?;
 
-    select_resolved_release_asset(&release, asset_selector, package_id)
+    select_resolved_release_asset(&release, asset_selector, source)
 }
 
 pub(crate) async fn resolve_latest_stable_release(
@@ -72,9 +72,9 @@ pub(crate) async fn resolve_latest_stable_release(
 pub(crate) fn select_resolved_release_asset(
     release: &ResolvedGitHubRelease,
     asset_selector: Option<&str>,
-    package_id: &PackageId,
+    source: &str,
 ) -> Result<ResolvedGitHubAsset> {
-    let asset = select_release_asset(release, asset_selector, package_id)?;
+    let asset = select_release_asset(release, asset_selector, source)?;
 
     Ok(ResolvedGitHubAsset {
         version: release.version.clone(),
@@ -172,7 +172,7 @@ fn release_version(release: &GitHubRelease) -> Result<PackageVersion> {
 fn select_release_asset(
     release: &ResolvedGitHubRelease,
     asset_selector: Option<&str>,
-    package_id: &PackageId,
+    source: &str,
 ) -> Result<ResolvedGitHubReleaseAsset> {
     let mut candidates = release
         .assets
@@ -200,7 +200,7 @@ fn select_release_asset(
         }),
         1 => Ok(candidates.remove(0)),
         _ => Err(FontbrewError::AmbiguousAssets {
-            package_id: package_id.clone(),
+            source_label: source.to_string(),
             assets: candidates.into_iter().map(|asset| asset.name).collect(),
         }),
     }

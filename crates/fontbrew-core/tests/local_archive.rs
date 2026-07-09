@@ -308,7 +308,9 @@ async fn local_archive_install_plan_error_replays_progress_events() {
     ));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ExtractingArchive { package_id } if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ExtractingArchive {
+            subject,
+        } if subject.label() == "source-code-pro"
     )));
 }
 

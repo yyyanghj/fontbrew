@@ -1937,11 +1937,7 @@ mod tests {
             unreachable!("self-update does not select font families")
         }
 
-        fn select_asset(
-            &mut self,
-            _package_id: &fontbrew_core::PackageId,
-            _assets: &[String],
-        ) -> CliResult<String> {
+        fn select_asset(&mut self, _source: &str, _assets: &[String]) -> CliResult<String> {
             unreachable!("self-update does not select release assets")
         }
     }

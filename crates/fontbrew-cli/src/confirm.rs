@@ -8,7 +8,7 @@ use dialoguer::{
     theme::ColorfulTheme,
     MultiSelect, Select,
 };
-use fontbrew_core::{ExecutionPolicy, FamilyName, PackageId, PlanRisk};
+use fontbrew_core::{ExecutionPolicy, FamilyName, PlanRisk};
 
 use crate::exit::{CliError, CliResult};
 
@@ -32,7 +32,7 @@ pub trait Confirmer {
         assume_yes: bool,
     ) -> CliResult<()>;
 
-    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String>;
+    fn select_asset(&mut self, source: &str, assets: &[String]) -> CliResult<String>;
 
     fn select_families(&mut self, families: &[FamilyName]) -> CliResult<Vec<FamilyName>>;
 }
@@ -140,17 +140,17 @@ impl Confirmer for HumanConfirmer {
             .collect())
     }
 
-    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String> {
+    fn select_asset(&mut self, source: &str, assets: &[String]) -> CliResult<String> {
         if !self.stdin.is_terminal() {
             return Err(CliError::AssetSelectionRequired {
-                package_id: package_id.clone(),
+                source: source.to_string(),
                 assets: assets.to_vec(),
             });
         }
 
         let theme = selection_theme();
         let selection = Select::with_theme(&theme)
-            .with_prompt(format!("Select release asset for {}", package_id.as_str()))
+            .with_prompt(format!("Select release asset for {source}"))
             .items(assets)
             .interact_on_opt(&Term::stderr())
             .map_err(io::Error::other)?;
@@ -268,9 +268,9 @@ impl Confirmer for JsonConfirmer {
         })
     }
 
-    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String> {
+    fn select_asset(&mut self, source: &str, assets: &[String]) -> CliResult<String> {
         Err(CliError::AssetSelectionRequired {
-            package_id: package_id.clone(),
+            source: source.to_string(),
             assets: assets.to_vec(),
         })
     }

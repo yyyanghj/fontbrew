@@ -312,7 +312,7 @@ Allowed reuse from `fontbrew-core`:
 - `fontbrew_core::version` helpers when useful
 - cancellation traits/patterns where useful
 
-Do not make `fontbrew-core/src/github.rs` public just for this feature. That module currently models font package GitHub release assets and filters installable font archives. Self-update has a different release asset contract.
+Do not make `fontbrew-core/src/providers/github.rs` public just for this feature. That module currently models font package GitHub release assets and filters installable font archives. Self-update has a different release asset contract.
 
 The CLI crate will likely need additional dependencies for archive and checksum handling, such as:
 

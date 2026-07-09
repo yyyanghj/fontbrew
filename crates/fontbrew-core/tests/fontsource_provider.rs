@@ -1297,20 +1297,24 @@ async fn fontsource_install_plan_reports_progress_before_apply() {
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::DownloadStarted { package_id, bytes: None }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::DownloadStarted {
+            subject,
+            bytes: None,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
         ProgressEvent::DownloadProgress {
-            package_id,
+            subject,
             downloaded,
             total: None,
-        } if package_id.as_str() == "source-code-pro" && *downloaded == font_bytes.len() as u64
+        } if subject.label() == "source-code-pro" && *downloaded == font_bytes.len() as u64
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ParsingFonts {
+            subject,
+        } if subject.label() == "source-code-pro"
     )));
 }
 
@@ -1376,20 +1380,24 @@ async fn fontsource_install_plan_parse_error_replays_provider_progress_and_clean
     assert!(matches!(error, FontbrewError::FontParse { .. }));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::DownloadStarted { package_id, bytes: None }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::DownloadStarted {
+            subject,
+            bytes: None,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
         ProgressEvent::DownloadProgress {
-            package_id,
+            subject,
             downloaded,
             total: None,
-        } if package_id.as_str() == "source-code-pro" && *downloaded == malformed_font.len() as u64
+        } if subject.label() == "source-code-pro" && *downloaded == malformed_font.len() as u64
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ParsingFonts {
+            subject,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(
         !paths.staging_dir().exists()

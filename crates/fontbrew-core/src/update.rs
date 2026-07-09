@@ -4,7 +4,7 @@ use crate::{
     error::{FontbrewError, Result},
     fetch::NetworkClient,
     fs::{ensure_existing_path_does_not_cross_symlink, AtomicWriteCommitStatus, GlobalFileLock},
-    github, install,
+    install,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     model::{
         ensure_not_cancelled, CancellationToken, ExecutionPolicy, OperationId, PlannedChange,
@@ -14,7 +14,7 @@ use crate::{
     },
     model::{NotUpdatablePackage, OutdatedPackage, OutdatedReport, OutdatedRequest},
     platform::FontbrewPaths,
-    providers::FontsourceProvider,
+    providers::{github, FontsourceProvider},
     sources::GitHubRepo,
     version::{compare_versions, VersionComparison},
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
@@ -250,8 +250,7 @@ async fn prepare_update_package_inner(
     };
 
     ensure_not_cancelled(cancellation.as_ref())?;
-    let asset =
-        github::resolve_release_asset(network_client, &repo, None, &record.package_id).await?;
+    let asset = github::resolve_release_asset(network_client, &repo, None, &repo.label()).await?;
     ensure_not_cancelled(cancellation.as_ref())?;
     match compare_versions(&record.version, &asset.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),

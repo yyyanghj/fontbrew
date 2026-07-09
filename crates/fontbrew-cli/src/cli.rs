@@ -454,15 +454,8 @@ fn install_asset_selector(
         return Ok(None);
     }
 
-    let Some(package_id) = metadata.package_id() else {
-        return Err(FontbrewError::Config {
-            message: "install source has selectable assets but no package id".to_string(),
-        }
-        .into());
-    };
-
     confirmer
-        .select_asset(package_id, metadata.assets())
+        .select_asset(metadata.asset_selection_label(), metadata.assets())
         .map(Some)
 }
 

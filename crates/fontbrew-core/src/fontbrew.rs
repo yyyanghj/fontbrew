@@ -11,7 +11,6 @@ use crate::{
     fetch::NetworkClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
     fs::GlobalFileLock,
-    github,
     install::{self, ParsedArchiveInstallTarget},
     model::{
         ensure_not_cancelled, ApplyOptions, CancellationToken, ConfigGetRequest, ConfigReport,
@@ -19,11 +18,12 @@ use crate::{
         InstallCandidateId, InstallPlan, InstallPlanSummary, InstallReport, InstallReportSet,
         InstallRequest, InstallSource, ListReport, NoCancellation, NoProgress, OutdatedReport,
         OutdatedRequest, PackageId, PlanRisk, PlannedChange, PreparedInstallPackage,
-        PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan, RemoveReport,
-        RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
+        PreparedInstallSource, ProgressEvent, ProgressSink, ProgressSubject, RemovePlan,
+        RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
+        UpdateRequest,
     },
     platform::{DefaultFontbrewLocations, FontbrewPaths},
-    providers::{FontsourceProvider, ProviderSearchRequest, ResolvedProviderPackage},
+    providers::{github, FontsourceProvider, ProviderSearchRequest, ResolvedProviderPackage},
     sources::{GitHubRepo, ProviderSource},
     update, FamilyName, FontFormat, ProviderKind,
 };
@@ -56,6 +56,7 @@ pub struct FetchInstallMetadataRequest {
 pub struct InstallMetadata {
     source: InstallSource,
     package_id: Option<PackageId>,
+    asset_selection_label: String,
     assets: Vec<String>,
     inner: InstallMetadataInner,
 }
@@ -67,7 +68,7 @@ enum InstallMetadataInner {
     },
     GitHub {
         release: github::ResolvedGitHubRelease,
-        package_id: PackageId,
+        source_label: String,
         source: PreparedInstallSource,
     },
     Provider {
@@ -83,7 +84,7 @@ pub struct PrepareInstallAssetRequest {
 }
 
 pub struct PendingAssetSelection {
-    package_id: PackageId,
+    source_label: String,
     assets: Vec<String>,
     pending: Option<install::PendingGitHubAssetSelection>,
 }
@@ -192,6 +193,10 @@ impl InstallMetadata {
     pub fn assets(&self) -> &[String] {
         &self.assets
     }
+
+    pub fn asset_selection_label(&self) -> &str {
+        &self.asset_selection_label
+    }
 }
 
 impl PendingFamilySelection {
@@ -222,14 +227,14 @@ impl PendingFamilySelection {
 impl PendingAssetSelection {
     fn new(pending: install::PendingGitHubAssetSelection) -> Self {
         Self {
-            package_id: pending.package_id().clone(),
+            source_label: pending.source_label().to_string(),
             assets: pending.assets().to_vec(),
             pending: Some(pending),
         }
     }
 
-    pub fn package_id(&self) -> &PackageId {
-        &self.package_id
+    pub fn source_label(&self) -> &str {
+        &self.source_label
     }
 
     pub fn assets(&self) -> &[String] {
@@ -319,12 +324,13 @@ impl Fontbrew {
             InstallSource::LocalPath(path) => Ok(InstallMetadata {
                 source: InstallSource::LocalPath(path.clone()),
                 package_id: None,
+                asset_selection_label: path.display().to_string(),
                 assets: Vec::new(),
                 inner: InstallMetadataInner::LocalArchive { path },
             }),
             InstallSource::GitHubRepo { owner, repo } => {
                 let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
-                let package_id = install::package_id_from_repo_name(&github_repo.repo)?;
+                let source_label = github_repo.label();
                 let release = github::resolve_latest_stable_release(
                     self.network_client()?.as_ref(),
                     &github_repo,
@@ -337,11 +343,12 @@ impl Fontbrew {
                         owner: owner.clone(),
                         repo: repo.clone(),
                     },
-                    package_id: Some(package_id.clone()),
+                    package_id: None,
+                    asset_selection_label: source_label.clone(),
                     assets,
                     inner: InstallMetadataInner::GitHub {
                         release,
-                        package_id,
+                        source_label,
                         source: PreparedInstallSource::GitHub { owner, repo },
                     },
                 })
@@ -359,9 +366,10 @@ impl Fontbrew {
                 Ok(InstallMetadata {
                     source: InstallSource::Provider {
                         provider: ProviderKind::Fontsource,
-                        id,
+                        id: id.clone(),
                     },
                     package_id: Some(package_id),
+                    asset_selection_label: format!("fontsource:{id}"),
                     assets: Vec::new(),
                     inner: InstallMetadataInner::Provider { resolved },
                 })
@@ -404,18 +412,18 @@ impl Fontbrew {
             }
             InstallMetadataInner::GitHub {
                 release,
-                package_id,
+                source_label,
                 source,
             } => {
                 let asset = github::select_resolved_release_asset(
                     &release,
                     request.asset_selector.as_deref(),
-                    &package_id,
+                    &source_label,
                 )?;
                 let options = install::RemoteInstallOptions {
                     asset_selector: None,
                     package_id: None,
-                    progress_package_id: Some(package_id.clone()),
+                    progress_subject: Some(ProgressSubject::source(source_label)),
                     reinstall: false,
                     explicit_format_preference: crate::config::dedupe_formats(
                         request.format_preference,
@@ -432,10 +440,8 @@ impl Fontbrew {
                     cancellation,
                 )
                 .await?;
-                let candidates = install::install_candidates_from_parsed_archive(
-                    &parsed_archive,
-                    Some(package_id),
-                )?;
+                let candidates =
+                    install::install_candidates_from_parsed_archive(&parsed_archive, None)?;
 
                 Ok(InstallSourcePreparation {
                     candidates,
@@ -454,7 +460,7 @@ impl Fontbrew {
                 let options = install::RemoteInstallOptions {
                     asset_selector: None,
                     package_id: Some(package_id.clone()),
-                    progress_package_id: Some(package_id),
+                    progress_subject: Some(ProgressSubject::package(&package_id)),
                     reinstall: false,
                     explicit_format_preference: crate::config::dedupe_formats(
                         request.format_preference,
@@ -511,21 +517,18 @@ impl Fontbrew {
                 let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
                 let network_client = self.network_client()?;
                 let mut progress = NoProgress;
-                let (parsed_archive, package_id_hint) =
-                    install::prepare_github_repo_install_source(
-                        &self.paths,
-                        github_repo,
-                        request.asset_selector,
-                        request.format_preference.unwrap_or_default(),
-                        &mut progress,
-                        network_client.as_ref(),
-                        Arc::new(NoCancellation),
-                    )
-                    .await?;
-                let candidates = install::install_candidates_from_parsed_archive(
-                    &parsed_archive,
-                    Some(package_id_hint),
-                )?;
+                let parsed_archive = install::prepare_github_repo_install_source(
+                    &self.paths,
+                    github_repo,
+                    request.asset_selector,
+                    request.format_preference.unwrap_or_default(),
+                    &mut progress,
+                    network_client.as_ref(),
+                    Arc::new(NoCancellation),
+                )
+                .await?;
+                let candidates =
+                    install::install_candidates_from_parsed_archive(&parsed_archive, None)?;
 
                 Ok(InstallSourcePreparation {
                     candidates,

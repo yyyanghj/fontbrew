@@ -479,11 +479,11 @@ impl Reporter for HumanReporter {
                 }
                 self.start_activity(&format!("Resolving {source}"))?;
             }
-            ProgressEvent::DownloadStarted { package_id, .. } => {
-                self.start_activity(&format!("Downloading {}", package_id.as_str()))?;
+            ProgressEvent::DownloadStarted { subject, .. } => {
+                self.start_activity(&format!("Downloading {}", subject.label()))?;
             }
             ProgressEvent::DownloadProgress {
-                package_id,
+                subject,
                 downloaded,
                 total,
             } => {
@@ -494,19 +494,19 @@ impl Reporter for HumanReporter {
                 match total {
                     Some(total) => self.start_activity(&format!(
                         "Downloading {}: {downloaded}/{total} bytes",
-                        package_id.as_str()
+                        subject.label()
                     ))?,
                     None => self.start_activity(&format!(
                         "Downloading {}: {downloaded} bytes",
-                        package_id.as_str()
+                        subject.label()
                     ))?,
                 }
             }
-            ProgressEvent::ExtractingArchive { package_id } => {
-                self.start_activity(&format!("Extracting {}", package_id.as_str()))?;
+            ProgressEvent::ExtractingArchive { subject } => {
+                self.start_activity(&format!("Extracting {}", subject.label()))?;
             }
-            ProgressEvent::ParsingFonts { package_id } => {
-                self.start_activity(&format!("Parsing {}", package_id.as_str()))?;
+            ProgressEvent::ParsingFonts { subject } => {
+                self.start_activity(&format!("Parsing {}", subject.label()))?;
             }
             ProgressEvent::CheckingInstallRisks { package_id } => {
                 self.start_activity(&format!(

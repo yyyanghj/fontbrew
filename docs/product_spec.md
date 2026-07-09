@@ -61,7 +61,7 @@ CLI source parsing treats explicit local paths as local before trying provider o
 
 ## Package Identity
 
-Fontbrew manages packages, not loose font files. By default, package identity comes from the parsed font family name. Provider packages use the provider ID as the package ID. The CLI keeps family selection caller-owned, so it asks interactive users to confirm the discovered family set and requires non-interactive callers to pass `--family` or `--all`.
+Fontbrew manages packages, not loose font files. By default, package identity comes from the parsed font family name. Each selected family produces one package whose default ID is the family name normalized to kebab-case. Provider packages use the provider ID as the package ID. GitHub owner and repository names identify only the source and are never used as package IDs. The CLI keeps family selection caller-owned, so it asks interactive users to confirm the discovered family set and requires non-interactive callers to pass `--family` or `--all`.
 
 For install family selection:
 

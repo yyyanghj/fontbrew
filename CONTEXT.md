@@ -97,7 +97,7 @@ A condition where installing or activating a package may overlap with an existin
 _Avoid_: Duplicate, overwrite
 
 **Package Identity**:
-The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Fontsource package IDs and selected family names are used to validate that the resolved files still match the package.
+The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Fontsource package IDs and selected family names are used to validate that the resolved files still match the package. GitHub owner and repository names identify a source, not a package.
 _Avoid_: Filename, version
 
 **Remove**:
