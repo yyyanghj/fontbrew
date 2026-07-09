@@ -3,7 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use fontbrew_core::{
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    FamilyName, FontbrewApp, OutdatedRequest, PackageId, PackageVersion, SearchRequest,
+    FamilyName, Fontbrew, FontbrewOptions, OutdatedRequest, PackageId, PackageVersion,
+    SearchRequest,
 };
 
 mod support;
@@ -16,6 +17,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
         temp.path().join("config"),
         temp.path().join("home"),
     )
+}
+
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
 }
 
 fn package_id(id: &str) -> PackageId {
@@ -109,10 +119,8 @@ async fn unprefixed_search_fetches_fontsource_results() {
   }
 }"#,
     );
-    let app = FontbrewApp::with_paths_and_network_client(
-        paths.clone(),
-        Arc::new(server.network_client()),
-    );
+    let app =
+        fontbrew_with_paths(paths.clone()).with_network_client(Arc::new(server.network_client()));
 
     let report = app
         .search(SearchRequest {
@@ -191,7 +199,7 @@ async fn outdated_reports_newer_github_releases_and_local_packages_without_updat
         &github_releases_path("owner", "up-to-date"),
         r#"[{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[]}]"#,
     );
-    let app = FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()));
+    let app = fontbrew_with_paths(paths).with_network_client(Arc::new(server.network_client()));
 
     let report = app
         .outdated(OutdatedRequest {

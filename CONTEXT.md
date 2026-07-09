@@ -20,6 +20,10 @@ _Avoid_: Download cache, managed store
 An installable package candidate returned by Fontsource search. Search results must resolve to an explicit install source; Fontbrew does not return arbitrary GitHub repository matches as search results.
 _Avoid_: GitHub search result, discovery result that cannot be installed
 
+**Install Candidate**:
+A package option discovered from a source before the caller decides which package or packages to install. An install candidate may come from a prepared local archive, GitHub release asset, or provider package and includes enough package, family, and font facts for a caller to choose an install target.
+_Avoid_: Search Result, Installed Package
+
 **Font File**:
 A concrete font binary contained in a package, such as a `.ttf`, `.otf`, `.ttc`, or web font file. Font files are installation artifacts, not the primary thing users manage.
 _Avoid_: Package
@@ -65,7 +69,7 @@ The local record of managed packages that are actually installed on this machine
 _Avoid_: Lockfile, desired state, project manifest
 
 **Config**:
-The local user preference file that controls Fontbrew behavior such as format preference, metadata TTL, and update concurrency. Config stores the activation strategy key too, but the current MVP accepts only `symlink`; `copy` is reserved until copy activation is implemented. Config is separate from the manifest because it records preferences rather than installed package facts.
+The local user preference file that controls Fontbrew behavior such as format preference, metadata TTL, and update concurrency. Config stores the activation strategy key too; `copy` is the current default and `symlink` remains available for compatibility and explicit configuration. Config is the persisted source of default user preferences; command-specific options may override loaded preferences for one operation without changing Config. Config is separate from the manifest because it records preferences rather than installed package facts.
 _Avoid_: Manifest, lockfile
 
 **Update Source**:
@@ -93,7 +97,7 @@ A condition where installing or activating a package may overlap with an existin
 _Avoid_: Duplicate, overwrite
 
 **Package Identity**:
-The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Fontsource package IDs and selected family names are used to validate that the resolved files still match the package.
+The stable identity that lets Fontbrew decide whether a discovered package is the same managed package across installs and updates. Fontsource package IDs and selected family names are used to validate that the resolved files still match the package. GitHub owner and repository names identify a source, not a package.
 _Avoid_: Filename, version
 
 **Remove**:

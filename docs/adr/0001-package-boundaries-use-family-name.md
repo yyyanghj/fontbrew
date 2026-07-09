@@ -1,3 +1,3 @@
 # Package boundaries use family name
 
-Fontbrew manages fonts as packages rather than repositories or loose files. Discovered font files are grouped into packages by their family name. When a GitHub or local archive contains multiple independent families, Fontbrew requires explicit family selection instead of guessing a package boundary.
+Fontbrew manages fonts as packages rather than repositories or loose files. Discovered font files are grouped into packages by their family name, with one selected family producing one package. For GitHub and local archives, the default package ID is the selected family name normalized to kebab-case; GitHub owner and repository names identify the source only and never determine package identity. Fontsource packages retain their provider IDs. When a GitHub or local archive contains multiple independent families, Fontbrew requires explicit family selection instead of guessing a package boundary.

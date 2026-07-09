@@ -51,6 +51,10 @@ impl PackageId {
         Ok(Self(slug))
     }
 
+    pub fn from_family_name(family_name: &FamilyName) -> Result<Self> {
+        Self::normalize(family_name.as_str())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -113,7 +117,7 @@ fn invalid_package_id<T>(input: &str, reason: &str) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::PackageId;
+    use crate::{FamilyName, PackageId, ProgressSubject};
 
     fn package_id(id: &str) -> PackageId {
         PackageId::parse(id).expect("test package id should be valid")
@@ -163,6 +167,15 @@ mod tests {
     }
 
     #[test]
+    fn package_id_from_family_name_uses_the_family_slug() {
+        let family_name = FamilyName::new("JetBrains Mono");
+
+        let id = PackageId::from_family_name(&family_name).expect("family name should normalize");
+
+        assert_eq!(id.as_str(), "jetbrains-mono");
+    }
+
+    #[test]
     fn package_id_normalize_rejects_unsafe_display_names() {
         for input in ["", "Inter/Mono", "Inter_Mono", "Inter..Mono", "字体"] {
             assert!(
@@ -186,6 +199,16 @@ mod tests {
             serde_json::from_str("\"jetbrains-mono\"").expect("valid package id should parse");
 
         assert_eq!(id, package_id("jetbrains-mono"));
+    }
+
+    #[test]
+    fn progress_subject_keeps_the_existing_string_json_shape() {
+        let subject = ProgressSubject::package(&package_id("jetbrains-mono"));
+
+        assert_eq!(
+            serde_json::to_value(subject).expect("progress subject should serialize"),
+            serde_json::json!("jetbrains-mono")
+        );
     }
 }
 
@@ -394,19 +417,19 @@ pub enum ProgressEvent {
         source: String,
     },
     DownloadStarted {
-        package_id: PackageId,
+        subject: ProgressSubject,
         bytes: Option<u64>,
     },
     DownloadProgress {
-        package_id: PackageId,
+        subject: ProgressSubject,
         downloaded: u64,
         total: Option<u64>,
     },
     ExtractingArchive {
-        package_id: PackageId,
+        subject: ProgressSubject,
     },
     ParsingFonts {
-        package_id: PackageId,
+        subject: ProgressSubject,
     },
     CheckingInstallRisks {
         package_id: PackageId,
@@ -420,6 +443,24 @@ pub enum ProgressEvent {
     FinishedPackage {
         package_id: PackageId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProgressSubject(String);
+
+impl ProgressSubject {
+    pub fn source(label: impl Into<String>) -> Self {
+        Self(label.into())
+    }
+
+    pub fn package(package_id: &PackageId) -> Self {
+        Self(package_id.as_str().to_string())
+    }
+
+    pub fn label(&self) -> &str {
+        &self.0
+    }
 }
 
 pub trait ProgressSink {
@@ -661,4 +702,74 @@ pub struct SearchResult {
     pub source: String,
     pub version: Option<PackageVersion>,
     pub families: Vec<FamilyName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstallCandidateId(String);
+
+impl InstallCandidateId {
+    pub(crate) fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstallCandidateSource {
+    LocalArchive { path: PathBuf },
+    GitHub { owner: String, repo: String },
+    Provider { provider: ProviderKind, id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallCandidate {
+    pub id: InstallCandidateId,
+    pub package_id: Option<PackageId>,
+    pub families: Vec<FamilyName>,
+    pub version: Option<PackageVersion>,
+    pub source: InstallCandidateSource,
+    pub fonts: Vec<InstallCandidateFont>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallCandidateFont {
+    pub family: FamilyName,
+    pub style: String,
+    pub weight: u16,
+    pub format: FontFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallPlanSummary {
+    pub package_id: PackageId,
+    pub target_version: Option<PackageVersion>,
+    pub changes: Vec<PlannedChange>,
+    pub risks: Vec<PlanRisk>,
+    pub already_installed: bool,
+}
+
+impl From<&InstallPlan> for InstallPlanSummary {
+    fn from(plan: &InstallPlan) -> Self {
+        Self {
+            package_id: plan.package_id.clone(),
+            target_version: plan.target_version.clone(),
+            changes: plan.changes.clone(),
+            risks: plan.risks.clone(),
+            already_installed: plan.already_installed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallReportSet {
+    pub packages: Vec<InstallReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyOptions {
+    pub policy: ExecutionPolicy,
 }

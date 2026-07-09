@@ -12,9 +12,9 @@ use fontbrew_core::{
         ManifestStore, ManifestV1,
     },
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InfoRequest,
-    InstallRequest, InstallSource, OutdatedRequest, PackageId, PackageVersion, ProgressEvent,
-    ProgressSink, ProviderKind, SearchRequest, UpdateRequest,
+    CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewError, FontbrewOptions,
+    InfoRequest, InstallRequest, InstallSource, OutdatedRequest, PackageId, PackageVersion,
+    ProgressEvent, ProgressSink, ProviderKind, SearchRequest, UpdateRequest,
 };
 
 mod support;
@@ -54,6 +54,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
         temp.path().join("config"),
         temp.path().join("home"),
     )
+}
+
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
 }
 
 fn package_id(id: &str) -> PackageId {
@@ -118,8 +127,8 @@ fn font_download_path(name: &str) -> String {
     format!("/cdn/{name}")
 }
 
-fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
-    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+fn fontbrew_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> Fontbrew {
+    fontbrew_with_paths(paths).with_network_client(Arc::new(server.network_client()))
 }
 
 fn downloaded_font_files(paths: &FontbrewPaths) -> Vec<PathBuf> {
@@ -288,7 +297,7 @@ async fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_met
   }
 }"#,
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let report = app
         .search(SearchRequest {
@@ -372,7 +381,7 @@ async fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
   }
 }"#,
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let first_report = app
         .search(SearchRequest {
             query: "fontsource:Abel".to_string(),
@@ -462,7 +471,7 @@ async fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fa
   }
 }"#,
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     app.search(SearchRequest {
         query: "fontsource:Abel".to_string(),
@@ -544,7 +553,7 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
         &font_download_path("source-code-pro.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(InstallRequest {
@@ -587,7 +596,7 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
     );
 
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -631,6 +640,89 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
 }
 
 #[tokio::test]
+async fn fontsource_install_applies_config_format_preference_before_downloading_fonts() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    fs::create_dir_all(paths.config_path().parent().expect("config parent"))
+        .expect("create config parent");
+    fs::write(
+        paths.config_path(),
+        r#"
+schema_version = 1
+
+[install]
+format_preference = ["ttf", "otf"]
+"#,
+    )
+    .expect("write config");
+    let server = LocalHttpServer::start();
+    let source_code_pro_ttf = server.url(&font_download_path("source-code-pro.ttf"));
+    let source_code_pro_otf = server.url(&font_download_path("source-code-pro.otf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "otf": "__OTF_DOWNLOAD_URL__",
+            "ttf": "__TTF_DOWNLOAD_URL__"
+          }
+        }
+      }
+    }
+  }
+}"#
+        .replace("__OTF_DOWNLOAD_URL__", &source_code_pro_otf)
+        .replace("__TTF_DOWNLOAD_URL__", &source_code_pro_ttf),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro.ttf"),
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro.otf"),
+        fixture_font_bytes("SourceCodePro-Regular.otf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .await
+        .expect("plan Fontsource install");
+
+    assert_eq!(plan.package_id, package_id("source-code-pro"));
+    assert_eq!(
+        server.request_urls(),
+        vec![
+            server.url(&fontsource_detail_path("source-code-pro")),
+            source_code_pro_ttf,
+        ],
+        "Fontsource install should not download provider assets that format preference will discard"
+    );
+}
+
+#[tokio::test]
 async fn fontsource_install_records_provider_variant_weight_for_downloaded_font() {
     let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");
@@ -666,7 +758,7 @@ async fn fontsource_install_records_provider_variant_weight_for_downloaded_font(
         &font_download_path("source-code-pro-200.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(InstallRequest {
@@ -683,7 +775,7 @@ async fn fontsource_install_records_provider_variant_weight_for_downloaded_font(
         .await
         .expect("plan Fontsource install");
 
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
@@ -739,7 +831,7 @@ async fn fontsource_install_records_provider_family_when_font_metadata_is_style_
         &font_download_path("source-code-pro-regular.ttf"),
         font_bytes_with_renamed_source_code_pro_family(),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(InstallRequest {
@@ -757,7 +849,7 @@ async fn fontsource_install_records_provider_family_when_font_metadata_is_style_
         .expect("plan Fontsource install");
 
     let report = app
-        .apply_install(
+        .apply_install_plan(
             plan,
             ExecutionPolicy::SafeOnly,
             &mut NoProgress,
@@ -820,7 +912,7 @@ async fn fontsource_info_recovers_provider_variant_weight_from_legacy_manifest_p
         })
         .expect("insert manifest record");
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
-    let app = FontbrewApp::with_paths(paths);
+    let app = fontbrew_with_paths(paths);
 
     let info = app
         .package_info(InfoRequest { package_id })
@@ -875,7 +967,7 @@ async fn fontsource_info_uses_cached_provider_family_for_legacy_manifest() {
 }"#,
     )
     .expect("write provider metadata");
-    let app = FontbrewApp::with_paths(paths);
+    let app = fontbrew_with_paths(paths);
 
     let info = app
         .package_info(InfoRequest { package_id })
@@ -925,7 +1017,7 @@ async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version()
         &font_download_path("source-code-pro-v1.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &install_server);
+    let app = fontbrew_with_server(paths.clone(), &install_server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::Provider {
@@ -940,7 +1032,7 @@ async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version()
         })
         .await
         .expect("plan initial Fontsource install");
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
@@ -995,7 +1087,7 @@ async fn fontsource_update_uses_provider_metadata_and_replaces_managed_version()
         &font_download_path("source-code-pro-v2.ttf"),
         font_bytes_with_renamed_source_code_pro_family(),
     );
-    let app = app_with_server(paths.clone(), &update_server);
+    let app = fontbrew_with_server(paths.clone(), &update_server);
 
     let outdated = app
         .outdated(OutdatedRequest {
@@ -1091,7 +1183,7 @@ async fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
         &font_download_path("source-code-pro-v1.ttf"),
         fixture_font_bytes("SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &install_server);
+    let app = fontbrew_with_server(paths.clone(), &install_server);
     let plan = app
         .install_plan(InstallRequest {
             source: InstallSource::Provider {
@@ -1106,7 +1198,7 @@ async fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
         })
         .await
         .expect("plan initial Fontsource install");
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut NoProgress,
@@ -1127,7 +1219,7 @@ async fn fontsource_outdated_does_not_use_stale_metadata_when_refresh_fails() {
         500,
         "server error",
     );
-    let app = app_with_server(paths, &update_server);
+    let app = fontbrew_with_server(paths, &update_server);
 
     let error = app
         .outdated(OutdatedRequest {
@@ -1178,7 +1270,7 @@ async fn fontsource_install_plan_reports_progress_before_apply() {
         &font_download_path("source-code-pro.ttf"),
         font_bytes.clone(),
     );
-    let app = app_with_server(paths, &server);
+    let app = fontbrew_with_server(paths, &server);
     let mut progress = RecordingProgress::default();
 
     app.install_plan_with_progress_and_cancellation(
@@ -1205,20 +1297,24 @@ async fn fontsource_install_plan_reports_progress_before_apply() {
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::DownloadStarted { package_id, bytes: None }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::DownloadStarted {
+            subject,
+            bytes: None,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
         ProgressEvent::DownloadProgress {
-            package_id,
+            subject,
             downloaded,
             total: None,
-        } if package_id.as_str() == "source-code-pro" && *downloaded == font_bytes.len() as u64
+        } if subject.label() == "source-code-pro" && *downloaded == font_bytes.len() as u64
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ParsingFonts {
+            subject,
+        } if subject.label() == "source-code-pro"
     )));
 }
 
@@ -1259,7 +1355,7 @@ async fn fontsource_install_plan_parse_error_replays_provider_progress_and_clean
         &font_download_path("source-code-pro.ttf"),
         malformed_font.clone(),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let mut progress = RecordingProgress::default();
 
     let error = app
@@ -1284,20 +1380,24 @@ async fn fontsource_install_plan_parse_error_replays_provider_progress_and_clean
     assert!(matches!(error, FontbrewError::FontParse { .. }));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::DownloadStarted { package_id, bytes: None }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::DownloadStarted {
+            subject,
+            bytes: None,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
         ProgressEvent::DownloadProgress {
-            package_id,
+            subject,
             downloaded,
             total: None,
-        } if package_id.as_str() == "source-code-pro" && *downloaded == malformed_font.len() as u64
+        } if subject.label() == "source-code-pro" && *downloaded == malformed_font.len() as u64
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ParsingFonts { package_id } if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ParsingFonts {
+            subject,
+        } if subject.label() == "source-code-pro"
     )));
     assert!(
         !paths.staging_dir().exists()

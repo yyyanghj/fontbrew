@@ -11,8 +11,10 @@ use std::{
 use fontbrew_core::{
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FamilyName, FontbrewApp, FontbrewError, InstallRequest,
-    InstallSource, PackageId, ProgressEvent, ProgressSink,
+    CancellationToken, ExecutionPolicy, FamilyName, FetchInstallMetadataRequest, Fontbrew,
+    FontbrewError, FontbrewOptions, InstallPreparation, InstallRequest, InstallSource,
+    InstallTarget, PackageId, PlanInstallRequest, PrepareInstallAssetRequest,
+    PrepareInstallSourceRequest, ProgressEvent, ProgressSink,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -87,6 +89,15 @@ fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     )
 }
 
+fn fontbrew_with_paths(paths: FontbrewPaths) -> Fontbrew {
+    Fontbrew::new(FontbrewOptions {
+        store_dir: Some(paths.managed_store_dir()),
+        config_path: Some(paths.config_path()),
+        activation_dir: Some(paths.activation_dir()),
+    })
+    .expect("create Fontbrew")
+}
+
 fn staging_entries(paths: &FontbrewPaths) -> Vec<String> {
     if !paths.staging_dir().exists() {
         return Vec::new();
@@ -137,8 +148,8 @@ fn download_path(name: &str) -> String {
     format!("/downloads/{name}")
 }
 
-fn app_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> FontbrewApp {
-    FontbrewApp::with_paths_and_network_client(paths, Arc::new(server.network_client()))
+fn fontbrew_with_server(paths: FontbrewPaths, server: &LocalHttpServer) -> Fontbrew {
+    fontbrew_with_paths(paths).with_network_client(Arc::new(server.network_client()))
 }
 
 fn github_release_response(version: &str, asset_name: &str, download_url: &str) -> String {
@@ -206,11 +217,11 @@ fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
 }
 
 async fn apply_plan(
-    app: &FontbrewApp,
+    app: &Fontbrew,
     plan: fontbrew_core::InstallPlan,
 ) -> fontbrew_core::InstallReport {
     let mut progress = NoProgress;
-    app.apply_install(
+    app.apply_install_plan(
         plan,
         ExecutionPolicy::SafeOnly,
         &mut progress,
@@ -264,7 +275,7 @@ async fn direct_github_install_selects_latest_stable_release_and_records_github_
         &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
@@ -322,6 +333,30 @@ async fn direct_github_install_selects_latest_stable_release_and_records_github_
 }
 
 #[tokio::test]
+async fn direct_github_install_derives_package_id_from_font_family() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let download_url = server.url(&download_path("font-bundle.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "font-bundle"),
+        github_release_response("v1.2.3", "font-bundle.zip", &download_url),
+    );
+    server.respond_bytes(
+        &download_path("font-bundle.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let plan = app
+        .install_plan(github_request("adobe", "font-bundle", None))
+        .await
+        .expect("plan GitHub install");
+
+    assert_eq!(plan.package_id, package_id("source-code-pro"));
+}
+
+#[tokio::test]
 async fn direct_github_install_uses_package_id_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -335,7 +370,7 @@ async fn direct_github_install_uses_package_id_override() {
         &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let mut request = github_request("adobe", "source-code-pro", None);
     request.package_id_override = Some(package_id("custom-remote"));
 
@@ -381,7 +416,7 @@ async fn direct_github_install_requires_family_selection_for_multiple_families()
             ("Inter-Variable.ttf", "Inter-Variable.ttf"),
         ]),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
@@ -411,7 +446,7 @@ async fn github_install_plan_archive_parse_error_replays_progress_and_cleans_sta
         github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
     server.respond_bytes(&download_path("source-code-pro.zip"), b"not a zip".to_vec());
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let mut progress = RecordingProgress::default();
 
     let error = app
@@ -426,13 +461,16 @@ async fn github_install_plan_archive_parse_error_replays_progress_and_cleans_sta
     assert!(matches!(error, FontbrewError::ArchiveRejected { .. }));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::DownloadStarted { package_id, .. }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::DownloadStarted {
+            subject,
+            ..
+        } if subject.label() == "adobe/source-code-pro"
     )));
     assert!(progress.events.iter().any(|event| matches!(
         event,
-        ProgressEvent::ExtractingArchive { package_id }
-            if package_id.as_str() == "source-code-pro"
+        ProgressEvent::ExtractingArchive {
+            subject,
+        } if subject.label() == "adobe/source-code-pro"
     )));
     assert!(staging_entries(&paths).is_empty());
 }
@@ -454,7 +492,7 @@ async fn direct_github_install_selected_family_installs_one_package() {
             ("Inter-Variable.ttf", "Inter-Variable.ttf"),
         ]),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request_with_selected_families(
@@ -484,7 +522,7 @@ async fn github_install_plan_cancellation_after_staging_creation_cleans_staging(
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let server = LocalHttpServer::start();
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan_with_cancellation(
@@ -518,7 +556,7 @@ async fn github_install_plan_cleans_staging_when_download_is_cancelled() {
         1,
         cancel_flag.clone(),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
     let cancellation: Arc<dyn CancellationToken> =
         Arc::new(AtomicCancellation { flag: cancel_flag });
 
@@ -565,7 +603,7 @@ async fn github_token_is_sent_as_authorization_header_without_persisting_to_mani
         &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
@@ -601,7 +639,7 @@ async fn github_api_rate_limit_error_mentions_github_token() {
         403,
         r#"{"message":"API rate limit exceeded for 127.0.0.1. Authenticated requests get a higher rate limit.","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}"#,
     );
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan(github_request("githubnext", "monaspace", None))
@@ -619,7 +657,7 @@ async fn github_api_rate_limit_error_mentions_github_token() {
 }
 
 #[tokio::test]
-async fn direct_github_install_plan_is_noop_without_network_when_package_is_already_managed() {
+async fn selected_github_family_is_noop_without_network_when_package_is_already_managed() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let first_server = LocalHttpServer::start();
@@ -632,7 +670,7 @@ async fn direct_github_install_plan_is_noop_without_network_when_package_is_alre
         &download_path("source-code-pro.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths.clone(), &first_server);
+    let app = fontbrew_with_server(paths.clone(), &first_server);
     let first_plan = app
         .install_plan(github_request("adobe", "source-code-pro", None))
         .await
@@ -640,9 +678,14 @@ async fn direct_github_install_plan_is_noop_without_network_when_package_is_alre
     apply_plan(&app, first_plan).await;
 
     let no_route_server = LocalHttpServer::start();
-    let app = app_with_server(paths, &no_route_server);
+    let app = fontbrew_with_server(paths, &no_route_server);
     let plan = app
-        .install_plan(github_request("adobe", "source-code-pro", None))
+        .install_plan(github_request_with_selected_families(
+            "adobe",
+            "source-code-pro",
+            None,
+            vec!["Source Code Pro"],
+        ))
         .await
         .expect("already managed direct GitHub install should plan without network");
 
@@ -662,7 +705,7 @@ async fn oversized_github_asset_download_is_rejected_without_manifest_or_package
         github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
     );
     server.respond_content_length(&download_path("source-code-pro.zip"), 600 * 1024 * 1024);
-    let app = app_with_server(paths.clone(), &server);
+    let app = fontbrew_with_server(paths.clone(), &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
@@ -702,7 +745,7 @@ async fn github_install_fails_when_multiple_installable_assets_match() {
   }
 ]"#,
     );
-    let app = app_with_server(paths, &server);
+    let app = fontbrew_with_server(paths, &server);
 
     let error = app
         .install_plan(github_request("adobe", "source-code-pro", None))
@@ -711,10 +754,10 @@ async fn github_install_fails_when_multiple_installable_assets_match() {
 
     match error {
         FontbrewError::AmbiguousAssets {
-            package_id: ambiguous_package_id,
+            source_label,
             assets,
         } => {
-            assert_eq!(ambiguous_package_id, package_id("source-code-pro"));
+            assert_eq!(source_label, "adobe/source-code-pro");
             assert_eq!(
                 assets,
                 vec![
@@ -725,6 +768,11 @@ async fn github_install_fails_when_multiple_installable_assets_match() {
         }
         other => panic!("expected AmbiguousAssets, got {other:?}"),
     }
+    assert_eq!(
+        server.request_urls(),
+        vec![server.url(&github_releases_path("adobe", "source-code-pro"))],
+        "ambiguous asset selection should stop before downloading an archive"
+    );
 }
 
 #[tokio::test]
@@ -759,7 +807,7 @@ async fn github_asset_selector_resolves_asset_ambiguity() {
         &download_path("source-code-pro-desktop.zip"),
         zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
     );
-    let app = app_with_server(paths, &server);
+    let app = fontbrew_with_server(paths, &server);
 
     let plan = app
         .install_plan(github_request(
@@ -778,5 +826,378 @@ async fn github_asset_selector_resolves_asset_ambiguity() {
             server.url(&github_releases_path("adobe", "source-code-pro")),
             desktop_download,
         ]
+    );
+}
+
+#[tokio::test]
+async fn staged_github_install_fetches_metadata_before_downloading_selected_asset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "source-code-pro-desktop.zip",
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
+        "name": "source-code-pro-nerd-font.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
+      }}
+    ]
+  }}
+]"#
+        ),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let metadata = app
+        .fetch_install_metadata(FetchInstallMetadataRequest {
+            source: InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+        })
+        .await
+        .expect("fetch install metadata");
+
+    assert_eq!(metadata.package_id(), None);
+    assert_eq!(metadata.asset_selection_label(), "adobe/source-code-pro");
+    assert_eq!(
+        metadata.assets(),
+        &[
+            "source-code-pro-desktop.zip".to_string(),
+            "source-code-pro-nerd-font.zip".to_string()
+        ]
+    );
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url.clone()],
+        "metadata fetch should not download any release asset"
+    );
+
+    let mut progress = RecordingProgress::default();
+    let preparation = app
+        .prepare_install_asset(
+            PrepareInstallAssetRequest {
+                metadata,
+                asset_selector: Some("source-code-pro-desktop.zip".to_string()),
+                format_preference: Vec::new(),
+            },
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("prepare selected asset");
+    assert_eq!(
+        progress
+            .events
+            .iter()
+            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(preparation.candidates().len(), 1);
+    assert_eq!(
+        preparation.candidates()[0].families,
+        vec![FamilyName::new("Source Code Pro")]
+    );
+    assert_eq!(server.request_urls(), vec![releases_url, desktop_download]);
+
+    let candidate_id = preparation.candidates()[0].id.clone();
+    let plans = app
+        .plan_install(PlanInstallRequest {
+            preparation,
+            targets: vec![InstallTarget {
+                candidate_id,
+                package_id_override: None,
+                reinstall: false,
+            }],
+        })
+        .expect("plan prepared asset");
+    assert_eq!(plans.plans().len(), 1);
+    assert!(plans.risks().is_empty());
+}
+
+#[tokio::test]
+async fn staged_github_install_discovers_package_id_from_font_family() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let download_url = server.url(&download_path("font-bundle.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "font-bundle"),
+        github_release_response("v1.2.3", "font-bundle.zip", &download_url),
+    );
+    server.respond_bytes(
+        &download_path("font-bundle.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let metadata = app
+        .fetch_install_metadata(FetchInstallMetadataRequest {
+            source: InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "font-bundle".to_string(),
+            },
+        })
+        .await
+        .expect("fetch install metadata");
+    assert_eq!(metadata.package_id(), None);
+
+    let mut progress = NoProgress;
+    let preparation = app
+        .prepare_install_asset(
+            PrepareInstallAssetRequest {
+                metadata,
+                asset_selector: None,
+                format_preference: Vec::new(),
+            },
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("prepare GitHub release asset");
+
+    assert_eq!(
+        preparation.candidates()[0].package_id,
+        Some(package_id("source-code-pro"))
+    );
+}
+
+#[tokio::test]
+async fn prepare_github_source_discovers_package_id_from_font_family() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let download_url = server.url(&download_path("font-bundle.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "font-bundle"),
+        github_release_response("v1.2.3", "font-bundle.zip", &download_url),
+    );
+    server.respond_bytes(
+        &download_path("font-bundle.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let preparation = app
+        .prepare_install_source(PrepareInstallSourceRequest {
+            source: InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "font-bundle".to_string(),
+            },
+            asset_selector: None,
+            format_preference: None,
+        })
+        .await
+        .expect("prepare GitHub source");
+
+    assert_eq!(
+        preparation.candidates()[0].package_id,
+        Some(package_id("source-code-pro"))
+    );
+}
+
+#[tokio::test]
+async fn github_asset_selection_flow_downloads_selected_asset_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "source-code-pro-desktop.zip",
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
+        "name": "source-code-pro-nerd-font.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
+      }}
+    ]
+  }}
+]"#
+        ),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let mut ambiguous_progress = RecordingProgress::default();
+    let preparation = app
+        .prepare_install(
+            github_request("adobe", "source-code-pro", None),
+            &mut ambiguous_progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("ambiguous GitHub assets should return pending selection");
+    let pending = match preparation {
+        InstallPreparation::AssetSelection(pending) => pending,
+        _ => panic!("ambiguous GitHub assets should ask the caller to choose"),
+    };
+    assert_eq!(pending.source_label(), "adobe/source-code-pro");
+    assert_eq!(
+        pending.assets(),
+        &[
+            "source-code-pro-desktop.zip".to_string(),
+            "source-code-pro-nerd-font.zip".to_string()
+        ]
+    );
+    assert_eq!(
+        ambiguous_progress
+            .events
+            .iter()
+            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
+            .count(),
+        0,
+        "ambiguous asset selection should not report archive download progress"
+    );
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url.clone()],
+        "ambiguous asset selection should resolve release metadata once without downloading"
+    );
+
+    let mut selected_progress = RecordingProgress::default();
+    let preparation = app
+        .prepare_selected_asset(
+            pending,
+            "source-code-pro-desktop.zip".to_string(),
+            &mut selected_progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("selected asset should prepare install");
+    assert_eq!(
+        selected_progress
+            .events
+            .iter()
+            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
+            .count(),
+        1,
+        "selected asset prepare should report one archive download"
+    );
+    let plan = match preparation {
+        InstallPreparation::Plan(plan) => plan,
+        InstallPreparation::AssetSelection(_) => panic!("selected asset should not ask again"),
+        InstallPreparation::FamilySelection(_) => panic!("single-family archive should plan"),
+    };
+    let report = apply_plan(&app, plan).await;
+
+    assert_eq!(report.package_id, package_id("source-code-pro"));
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url, desktop_download],
+        "interactive asset selection should reuse resolved release metadata and download the selected asset only once"
+    );
+}
+
+#[tokio::test]
+async fn github_asset_selection_with_multiple_families_reuses_release_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "source-code-pro-desktop.zip",
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
+        "name": "source-code-pro-nerd-font.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
+      }}
+    ]
+  }}
+]"#
+        ),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let request = github_request_with_selected_families(
+        "adobe",
+        "source-code-pro",
+        None,
+        vec!["Source Code Pro", "Inter"],
+    );
+    let preparation = app
+        .prepare_install(request, &mut NoProgress, Arc::new(NeverCancelled))
+        .await
+        .expect("ambiguous GitHub assets should return pending selection");
+    let pending = match preparation {
+        InstallPreparation::AssetSelection(pending) => pending,
+        _ => panic!("ambiguous GitHub assets should ask the caller to choose"),
+    };
+
+    let preparation = app
+        .prepare_selected_asset(
+            pending,
+            "source-code-pro-desktop.zip".to_string(),
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("selected asset should prepare families");
+    let pending_families = match preparation {
+        InstallPreparation::FamilySelection(pending) => pending,
+        _ => panic!("multiple selected families should reuse parsed archive"),
+    };
+    let plans = app
+        .prepare_selected_families(
+            pending_families,
+            vec![FamilyName::new("Source Code Pro"), FamilyName::new("Inter")],
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("selected families should plan");
+
+    assert_eq!(plans.len(), 2);
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url, desktop_download],
+        "selected family planning should not re-request release metadata after asset selection"
     );
 }

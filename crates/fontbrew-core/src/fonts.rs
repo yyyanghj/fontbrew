@@ -30,9 +30,12 @@ pub trait FontMetadataReader {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TtfParserMetadataReader;
 
-impl FontMetadataReader for TtfParserMetadataReader {
-    fn read_file(&self, path: &Path) -> Result<Vec<FontFaceMetadata>> {
-        let format = FontFileFormat::from_path(path)?;
+impl TtfParserMetadataReader {
+    pub(crate) fn read_file_with_format(
+        &self,
+        path: &Path,
+        format: FontFileFormat,
+    ) -> Result<Vec<FontFaceMetadata>> {
         let data = std::fs::read(path)?;
         let face_count = match format {
             FontFileFormat::Ttc | FontFileFormat::Otc => ttf_parser::fonts_in_collection(&data)
@@ -60,6 +63,13 @@ impl FontMetadataReader for TtfParserMetadataReader {
         }
 
         Ok(faces)
+    }
+}
+
+impl FontMetadataReader for TtfParserMetadataReader {
+    fn read_file(&self, path: &Path) -> Result<Vec<FontFaceMetadata>> {
+        let format = FontFileFormat::from_path(path)?;
+        self.read_file_with_format(path, format)
     }
 }
 

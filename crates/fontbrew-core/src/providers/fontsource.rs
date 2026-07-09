@@ -7,6 +7,8 @@ use std::{
 
 use serde::Deserialize;
 
+use super::{ProviderFontAsset, ProviderSearchRequest, ResolvedProviderPackage};
+
 use crate::{
     config::FontbrewConfig,
     error::{FontbrewError, Result},
@@ -19,30 +21,6 @@ use crate::{
 };
 
 const DEFAULT_PROVIDER_SEARCH_LIMIT: usize = 25;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProviderSearchRequest<'a> {
-    pub(crate) query: &'a str,
-    pub(crate) limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedProviderPackage {
-    pub(crate) package_id: PackageId,
-    pub(crate) provider: ProviderKind,
-    pub(crate) provider_id: String,
-    pub(crate) version: PackageVersion,
-    pub(crate) families: Vec<FamilyName>,
-    pub(crate) assets: Vec<ProviderFontAsset>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProviderFontAsset {
-    pub(crate) url: String,
-    pub(crate) format: FontFormat,
-    pub(crate) file_name: String,
-    pub(crate) weight: Option<u16>,
-}
 
 pub(crate) type FontsourceResolvedPackage = ResolvedProviderPackage;
 type FontsourceFontAsset = ProviderFontAsset;

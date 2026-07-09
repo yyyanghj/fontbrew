@@ -4,7 +4,7 @@ Fontbrew is a Rust 2021 workspace with a reusable core crate and a thin CLI crat
 
 ## Crates
 
-- `crates/fontbrew-core`: source resolution, provider metadata, archive handling, font parsing, manifest persistence, activation, update planning, config, and app tasks.
+- `crates/fontbrew-core`: source resolution, provider metadata, archive handling, font parsing, manifest persistence, activation, update planning, config, and core command flows.
 - `crates/fontbrew-cli`: argument parsing, confirmation flow, progress rendering, exit mapping, and human/JSON reporters.
 
 ## Source Resolution
@@ -25,12 +25,17 @@ Install source parsing should stay conservative:
 
 ## Core Modules
 
-- `app.rs`: orchestrates high-level use cases and keeps request/response models stable for CLI and tests.
-- `providers.rs`: Fontsource list/detail metadata, metadata snapshots, search, and provider asset download requests.
-- `github.rs`: GitHub release lookup, release asset filtering, asset selector matching, and release metadata.
+- `fontbrew.rs`: exposes the flat `Fontbrew` API, request types, staged install handles, and command-flow helpers used by CLI and tests.
+- `providers/mod.rs`: shared crate-private provider resolution types.
+- `providers/fontsource.rs`: Fontsource list/detail metadata, metadata snapshots, search, and provider asset download requests.
+- `providers/github.rs`: GitHub release lookup, release asset filtering, asset selector matching, and release metadata.
 - `archives.rs`: zip extraction, archive safety checks, and format filtering.
 - `fonts.rs`: desktop font metadata parsing and family/style detection.
-- `install.rs`: install plan construction, staging, package identity validation, and manifest record creation.
+- `install/mod.rs`: install workflow orchestration and shared crate-private install types.
+- `install/prepare.rs`: remote asset download, provider font download, archive extraction, and parsed-font preparation bridges.
+- `install/plan.rs`: family package preparation, candidate construction, plan construction, and family-boundary validation.
+- `install/apply.rs`: managed-store mutation, activation, manifest records, rollback, and install risk checks.
+- `install/staging.rs`: staging allocation, path containment, stale cleanup, and cleanup guards.
 - `update.rs`: update planning and two-phase replacement.
 - `manifest.rs`: manifest schema and persistence.
 - `activation.rs`: Fontbrew-owned activation artifacts.
@@ -48,17 +53,19 @@ Metadata refresh is an implementation detail. Search and install may use fresh s
 
 GitHub package versions use the selected release tag. The resolver chooses the latest stable release by default. A GitHub font package asset is installable when it is a `.zip` archive containing supported desktop font files.
 
-If multiple installable assets are possible, interactive CLI planning asks the user to select one and retries with that asset name. Non-interactive and JSON planning fail unless the user provides an explicit asset selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
+GitHub install is staged so callers can fetch release metadata before downloading an asset. If multiple installable assets are possible, interactive CLI mode asks the user to select one after metadata resolution. Non-interactive and JSON mode require an explicit `--asset` selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
 
 ## Local Archives
 
 Local archives are copied or read through staging and parsed with the same archive and font pipeline as remote archives. Local archives have no update source.
 
-Package ID override is allowed for local archives and direct GitHub installs, and cannot be combined with an explicit family selection. Provider identities come from their source model and parsed package metadata.
+Package ID override is allowed for local archives and direct GitHub installs. It can only be applied when the final selected install target count is one. Provider identities come from their source model and parsed package metadata.
 
 ## Package Boundary
 
-Fontbrew groups parsed font files by font family. A single-family source can plan directly. A multi-family GitHub or local archive requires explicit family selection when non-interactive; interactive human mode may prompt for one or more families.
+Fontbrew groups parsed font files by font family. Core preparation returns install candidates and does not choose a family boundary for the caller. The CLI asks interactive users to confirm the family selection and requires non-interactive callers to pass `--family` or `--all`, even when preparation finds one family.
+
+Each selected family becomes one package. For GitHub and local archive sources, the default package ID is the selected family name normalized to kebab-case. A GitHub owner or repository name is source identity only and must never become a package ID. Fontsource packages retain their provider IDs. An explicit `--id` may override the derived ID for a single GitHub or local archive target.
 
 Selected families become the package boundary recorded in the manifest. Update validation reuses the manifest family boundary to avoid silently replacing a package with unrelated font files.
 
@@ -112,7 +119,7 @@ Supported keys:
 
 ## Async Runtime
 
-`fontbrew-cli` owns the Tokio runtime through `#[tokio::main]`. `FontbrewApp` exposes async high-level methods and uses `NetworkClient` for async HTTP. Blocking filesystem transactions, archive parsing, font parsing, and self-update replacement are moved behind `tokio::task::spawn_blocking` where needed. Reporters remain CLI-owned and are not shared across concurrent prepare tasks.
+`fontbrew-cli` owns the Tokio runtime through `#[tokio::main]`. `Fontbrew` exposes async high-level methods and uses `NetworkClient` for async HTTP. Blocking filesystem transactions, archive parsing, font parsing, and self-update replacement are moved behind `tokio::task::spawn_blocking` where needed. Reporters remain CLI-owned and are not shared across concurrent prepare tasks.
 
 ## Safety Boundaries
 

@@ -9,9 +9,9 @@ pub enum FontbrewError {
     #[error("package is already installed: {package_id:?}")]
     PackageAlreadyInstalled { package_id: PackageId },
 
-    #[error("multiple installable assets matched for {package_id:?}: {assets:?}")]
+    #[error("multiple installable assets matched for {source_label}: {assets:?}")]
     AmbiguousAssets {
-        package_id: PackageId,
+        source_label: String,
         assets: Vec<String>,
     },
 

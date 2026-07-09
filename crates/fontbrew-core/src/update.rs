@@ -1,10 +1,10 @@
 use crate::{
-    activation::{deactivate, ActivationArtifact, ActivationPlan},
+    activation::{deactivate, replace_activation, restore_activation, ActivationPlan},
     config::FontbrewConfig,
     error::{FontbrewError, Result},
     fetch::NetworkClient,
     fs::{ensure_existing_path_does_not_cross_symlink, AtomicWriteCommitStatus, GlobalFileLock},
-    github, install,
+    install,
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     model::{
         ensure_not_cancelled, CancellationToken, ExecutionPolicy, OperationId, PlannedChange,
@@ -14,7 +14,7 @@ use crate::{
     },
     model::{NotUpdatablePackage, OutdatedPackage, OutdatedReport, OutdatedRequest},
     platform::FontbrewPaths,
-    providers::FontsourceProvider,
+    providers::{github, FontsourceProvider},
     sources::GitHubRepo,
     version::{compare_versions, VersionComparison},
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
@@ -250,8 +250,7 @@ async fn prepare_update_package_inner(
     };
 
     ensure_not_cancelled(cancellation.as_ref())?;
-    let asset =
-        github::resolve_release_asset(network_client, &repo, None, &record.package_id).await?;
+    let asset = github::resolve_release_asset(network_client, &repo, None, &repo.label()).await?;
     ensure_not_cancelled(cancellation.as_ref())?;
     match compare_versions(&record.version, &asset.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
@@ -598,23 +597,23 @@ fn apply_prepared_update(
         remove_package_store(paths, &prepared.package_store_dir);
         return Err(error);
     }
-    let new_activation_artifacts = match replace_activation(
-        paths,
-        package_id,
-        &old_activation_artifacts,
-        &new_activation_plan,
-        policy,
-    ) {
-        Ok(artifacts) => artifacts,
-        Err(error) => {
-            remove_package_store(paths, &prepared.package_store_dir);
-            return Err(error);
-        }
-    };
+    let new_activation_artifacts =
+        match replace_activation(&old_activation_artifacts, &new_activation_plan, policy) {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                remove_package_store(paths, &prepared.package_store_dir);
+                return Err(error);
+            }
+        };
 
     if let Err(error) = ensure_not_cancelled(cancellation) {
         let cleanup_error = deactivate(&paths.activation_dir(), &new_activation_artifacts).err();
-        let restore_error = restore_activation(paths, package_id, &old_activation_artifacts).err();
+        let restore_error = restore_activation(
+            &paths.activation_dir(),
+            package_id,
+            &old_activation_artifacts,
+        )
+        .err();
         remove_package_store(paths, &prepared.package_store_dir);
         if cleanup_error.is_none() && restore_error.is_none() {
             return Err(error);
@@ -635,8 +634,9 @@ fn apply_prepared_update(
             AtomicWriteCommitStatus::NotCommitted => {
                 let cleanup_error = deactivate(&paths.activation_dir(), &new_activation_artifacts)
                     .err();
-                let restore_error = restore_activation(paths, package_id, &old_activation_artifacts)
-                    .err();
+                let restore_error =
+                    restore_activation(&paths.activation_dir(), package_id, &old_activation_artifacts)
+                        .err();
                 remove_package_store(paths, &prepared.package_store_dir);
                 manifest.insert_package(current_record.clone())?;
 
@@ -671,80 +671,6 @@ fn apply_prepared_update(
         previous_version: current_record.version,
         installed_version: prepared_update.summary.target_version.clone(),
     })
-}
-
-fn replace_activation(
-    paths: &FontbrewPaths,
-    package_id: &PackageId,
-    old_artifacts: &[ActivationArtifact],
-    new_plan: &ActivationPlan,
-    policy: ExecutionPolicy,
-) -> Result<Vec<ActivationArtifact>> {
-    let mut removed_old_artifacts = Vec::new();
-    for old_artifact in old_artifacts {
-        if let Err(error) = deactivate(&paths.activation_dir(), std::slice::from_ref(old_artifact))
-        {
-            let restore_error = restore_activation(paths, package_id, &removed_old_artifacts).err();
-            return Err(activation_transaction_error(
-                package_id,
-                "deactivate old activation",
-                error,
-                None,
-                restore_error,
-            ));
-        }
-
-        removed_old_artifacts.push(old_artifact.clone());
-    }
-
-    let mut created_new_artifacts = Vec::new();
-    for new_artifact in &new_plan.artifacts {
-        let single_plan = ActivationPlan {
-            package_id: new_plan.package_id.clone(),
-            activation_dir: new_plan.activation_dir.clone(),
-            strategy: new_plan.strategy,
-            artifacts: vec![new_artifact.clone()],
-            risks: Vec::new(),
-        };
-
-        match single_plan.apply(policy.clone()) {
-            Ok(mut artifacts) => created_new_artifacts.append(&mut artifacts),
-            Err(error) => {
-                let cleanup_error =
-                    deactivate(&paths.activation_dir(), &created_new_artifacts).err();
-                let restore_error = restore_activation(paths, package_id, old_artifacts).err();
-                return Err(activation_transaction_error(
-                    package_id,
-                    "activate new activation",
-                    error,
-                    cleanup_error,
-                    restore_error,
-                ));
-            }
-        }
-    }
-
-    Ok(created_new_artifacts)
-}
-
-fn restore_activation(
-    paths: &FontbrewPaths,
-    package_id: &PackageId,
-    artifacts: &[ActivationArtifact],
-) -> Result<()> {
-    if artifacts.is_empty() {
-        return Ok(());
-    }
-
-    let plan = ActivationPlan {
-        package_id: package_id.clone(),
-        activation_dir: paths.activation_dir(),
-        strategy: artifacts[0].strategy,
-        artifacts: artifacts.to_vec(),
-        risks: Vec::new(),
-    };
-    plan.apply(ExecutionPolicy::AssumeYes)?;
-    Ok(())
 }
 
 fn activation_transaction_error(

@@ -1,6 +1,6 @@
 use std::io;
 
-use fontbrew_core::{FamilyName, FontbrewError, PackageId, PlanRisk};
+use fontbrew_core::{FamilyName, FontbrewError, PlanRisk};
 
 pub const SUCCESS: u8 = 0;
 pub const FAILURE: u8 = 1;
@@ -12,41 +12,18 @@ pub enum CliError {
     Core(FontbrewError),
     Io(io::Error),
     Json(serde_json::Error),
-    ApprovalRequired {
-        risks: Vec<PlanRisk>,
-    },
-    PromptUnavailable {
-        risks: Vec<PlanRisk>,
-    },
-    AssetSelectionRequired {
-        package_id: PackageId,
-        assets: Vec<String>,
-    },
-    FamilySelectionRequired {
-        families: Vec<FamilyName>,
-    },
-    SelfUpdateApprovalRequired {
-        message: String,
-    },
-    SelfUpdatePromptUnavailable {
-        message: String,
-    },
-    SelfUpdateUnavailable {
-        message: String,
-    },
-    SelfUpdateInvalidRelease {
-        message: String,
-    },
-    SelfUpdateChecksumMismatch {
-        message: String,
-    },
-    SelfUpdateFailed {
-        message: String,
-    },
+    ApprovalRequired { risks: Vec<PlanRisk> },
+    PromptUnavailable { risks: Vec<PlanRisk> },
+    AssetSelectionRequired { source: String, assets: Vec<String> },
+    FamilySelectionRequired { families: Vec<FamilyName> },
+    SelfUpdateApprovalRequired { message: String },
+    SelfUpdatePromptUnavailable { message: String },
+    SelfUpdateUnavailable { message: String },
+    SelfUpdateInvalidRelease { message: String },
+    SelfUpdateChecksumMismatch { message: String },
+    SelfUpdateFailed { message: String },
     Cancelled,
-    Usage {
-        message: String,
-    },
+    Usage { message: String },
 }
 
 impl CliError {
@@ -75,9 +52,10 @@ impl CliError {
             Self::Core(FontbrewError::FamilySelectionRequired { families }) => {
                 family_selection_message(families)
             }
-            Self::Core(FontbrewError::AmbiguousAssets { package_id, assets }) => {
-                ambiguous_assets_message(package_id, assets)
-            }
+            Self::Core(FontbrewError::AmbiguousAssets {
+                source_label,
+                assets,
+            }) => ambiguous_assets_message(source_label, assets),
             Self::Core(error) => error.to_string(),
             Self::Io(error) => error.to_string(),
             Self::Json(error) => error.to_string(),
@@ -86,8 +64,8 @@ impl CliError {
                 "{}; rerun with --yes or --dry-run, or use an interactive terminal",
                 approval_message(risks)
             ),
-            Self::AssetSelectionRequired { package_id, assets } => {
-                ambiguous_assets_message(package_id, assets)
+            Self::AssetSelectionRequired { source, assets } => {
+                ambiguous_assets_message(source, assets)
             }
             Self::FamilySelectionRequired { families } => family_selection_message(families),
             Self::SelfUpdateApprovalRequired { message }
@@ -181,14 +159,14 @@ fn family_selection_message(families: &[FamilyName]) -> String {
         .join(", ");
 
     format!(
-        "source contains multiple font families; select one or more with --family, or install all with --all: {family_list}"
+        "font family selection is required; select one or more with --family, or install all discovered families with --all: {family_list}"
     )
 }
 
-fn ambiguous_assets_message(package_id: &PackageId, assets: &[String]) -> String {
+fn ambiguous_assets_message(source: &str, assets: &[String]) -> String {
     let mut message = format!(
         "multiple release assets matched for {}; choose one with --asset <name-or-glob>",
-        package_id.as_str()
+        source
     );
 
     if !assets.is_empty() {
@@ -204,14 +182,14 @@ fn ambiguous_assets_message(package_id: &PackageId, assets: &[String]) -> String
 
 #[cfg(test)]
 mod tests {
-    use fontbrew_core::{FontbrewError, PackageId};
+    use fontbrew_core::FontbrewError;
 
     use super::CliError;
 
     #[test]
     fn ambiguous_assets_error_points_to_asset_selector_without_debug_shape() {
         let error = CliError::from(FontbrewError::AmbiguousAssets {
-            package_id: PackageId::parse("monaspace").expect("package id"),
+            source_label: "github:githubnext/monaspace".to_string(),
             assets: vec![
                 "monaspace-static-v1.400.zip".to_string(),
                 "monaspace-variable-v1.400.zip".to_string(),

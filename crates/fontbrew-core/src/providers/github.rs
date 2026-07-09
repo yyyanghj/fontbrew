@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc};
 use crate::{
     error::{FontbrewError, Result},
     fetch::{HttpHeader, HttpRequest, NetworkClient},
-    model::{CancellationToken, PackageId, PackageVersion},
+    model::{CancellationToken, PackageVersion},
     sources::GitHubRepo,
 };
 
@@ -18,19 +18,67 @@ pub(crate) struct ResolvedGitHubAsset {
     pub download_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedGitHubRelease {
+    pub version: PackageVersion,
+    assets: Vec<ResolvedGitHubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedGitHubReleaseAsset {
+    name: String,
+    download_url: String,
+}
+
+impl ResolvedGitHubRelease {
+    pub(crate) fn installable_asset_names(&self) -> Vec<String> {
+        self.assets
+            .iter()
+            .filter(|asset| is_installable_archive_asset(&asset.name))
+            .map(|asset| asset.name.clone())
+            .collect()
+    }
+}
+
 pub(crate) async fn resolve_release_asset(
     network_client: &NetworkClient,
     repo: &GitHubRepo,
     asset_selector: Option<&str>,
-    package_id: &PackageId,
+    source: &str,
 ) -> Result<ResolvedGitHubAsset> {
+    let release = resolve_latest_stable_release(network_client, repo).await?;
+
+    select_resolved_release_asset(&release, asset_selector, source)
+}
+
+pub(crate) async fn resolve_latest_stable_release(
+    network_client: &NetworkClient,
+    repo: &GitHubRepo,
+) -> Result<ResolvedGitHubRelease> {
     let release = fetch_latest_stable_release(network_client, repo).await?;
     let version = release_version(&release)?;
-    let asset = select_release_asset(&release, asset_selector, package_id)?;
+    let assets = release
+        .assets
+        .into_iter()
+        .map(|asset| ResolvedGitHubReleaseAsset {
+            name: asset.name,
+            download_url: asset.browser_download_url,
+        })
+        .collect();
+
+    Ok(ResolvedGitHubRelease { version, assets })
+}
+
+pub(crate) fn select_resolved_release_asset(
+    release: &ResolvedGitHubRelease,
+    asset_selector: Option<&str>,
+    source: &str,
+) -> Result<ResolvedGitHubAsset> {
+    let asset = select_release_asset(release, asset_selector, source)?;
 
     Ok(ResolvedGitHubAsset {
-        version,
-        download_url: asset.browser_download_url,
+        version: release.version.clone(),
+        download_url: asset.download_url,
     })
 }
 
@@ -122,10 +170,10 @@ fn release_version(release: &GitHubRelease) -> Result<PackageVersion> {
 }
 
 fn select_release_asset(
-    release: &GitHubRelease,
+    release: &ResolvedGitHubRelease,
     asset_selector: Option<&str>,
-    package_id: &PackageId,
-) -> Result<GitHubReleaseAsset> {
+    source: &str,
+) -> Result<ResolvedGitHubReleaseAsset> {
     let mut candidates = release
         .assets
         .iter()
@@ -147,12 +195,12 @@ fn select_release_asset(
         0 => Err(FontbrewError::ArchiveRejected {
             reason: format!(
                 "GitHub release {} has no matching installable zip assets",
-                release.tag_name
+                release.version.as_str()
             ),
         }),
         1 => Ok(candidates.remove(0)),
         _ => Err(FontbrewError::AmbiguousAssets {
-            package_id: package_id.clone(),
+            source_label: source.to_string(),
             assets: candidates.into_iter().map(|asset| asset.name).collect(),
         }),
     }
