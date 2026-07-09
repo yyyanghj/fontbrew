@@ -2,6 +2,18 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.13 - 2026-07-10
+
+- 将 `fontbrew-core` 的单体 `FontbrewApp` 接口替换为可组合的 `Fontbrew` API，
+  支持分别获取安装元数据、准备资产、选择候选 family、生成计划和执行安装，
+  并公开归档解压与字体解析等底层能力。
+- 统一按字体 family 生成安装候选和独立管理包；直接从 GitHub 安装时，默认
+  package ID 现在由字体 family 而非仓库名称派生，单个 family 仍可使用 `--id`
+  覆盖。
+- 调整 CLI family 选择流程：交互模式会在发现字体后请求确认，脚本、非交互和
+  JSON 模式需使用 `--family <name>` 或 `--all` 明确选择；GitHub 多资产选择会在
+  下载归档前完成，并复用已解析的 release 元数据。
+
 ## 0.0.12 - 2026-07-09
 
 - 优化直接从 GitHub 安装字体时的多资产交互，human 模式下可在多个匹配的
