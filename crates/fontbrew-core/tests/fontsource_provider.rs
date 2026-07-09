@@ -640,6 +640,89 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
 }
 
 #[tokio::test]
+async fn fontsource_install_applies_config_format_preference_before_downloading_fonts() {
+    let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    fs::create_dir_all(paths.config_path().parent().expect("config parent"))
+        .expect("create config parent");
+    fs::write(
+        paths.config_path(),
+        r#"
+schema_version = 1
+
+[install]
+format_preference = ["ttf", "otf"]
+"#,
+    )
+    .expect("write config");
+    let server = LocalHttpServer::start();
+    let source_code_pro_ttf = server.url(&font_download_path("source-code-pro.ttf"));
+    let source_code_pro_otf = server.url(&font_download_path("source-code-pro.otf"));
+    server.respond_text(
+        &fontsource_detail_path("source-code-pro"),
+        r#"{
+  "id": "source-code-pro",
+  "family": "Source Code Pro",
+  "subsets": ["latin"],
+  "weights": [400],
+  "styles": ["normal"],
+  "lastModified": "2025-05-30",
+  "version": "v2",
+  "license": "OFL-1.1",
+  "variants": {
+    "400": {
+      "normal": {
+        "latin": {
+          "url": {
+            "otf": "__OTF_DOWNLOAD_URL__",
+            "ttf": "__TTF_DOWNLOAD_URL__"
+          }
+        }
+      }
+    }
+  }
+}"#
+        .replace("__OTF_DOWNLOAD_URL__", &source_code_pro_otf)
+        .replace("__TTF_DOWNLOAD_URL__", &source_code_pro_ttf),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro.ttf"),
+        fixture_font_bytes("SourceCodePro-Regular.ttf"),
+    );
+    server.respond_bytes(
+        &font_download_path("source-code-pro.otf"),
+        fixture_font_bytes("SourceCodePro-Regular.otf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let plan = app
+        .install_plan(InstallRequest {
+            source: InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id: "source-code-pro".to_string(),
+            },
+            package_id_override: None,
+            format_preference: Vec::new(),
+            asset_selector: None,
+            selected_families: Vec::new(),
+            reinstall: false,
+        })
+        .await
+        .expect("plan Fontsource install");
+
+    assert_eq!(plan.package_id, package_id("source-code-pro"));
+    assert_eq!(
+        server.request_urls(),
+        vec![
+            server.url(&fontsource_detail_path("source-code-pro")),
+            source_code_pro_ttf,
+        ],
+        "Fontsource install should not download provider assets that format preference will discard"
+    );
+}
+
+#[tokio::test]
 async fn fontsource_install_records_provider_variant_weight_for_downloaded_font() {
     let _guard = FONTSOURCE_HTTP_FIXTURE_LOCK.lock().await;
     let temp = tempfile::tempdir().expect("tempdir");

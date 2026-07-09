@@ -105,10 +105,22 @@ impl ManifestStore {
             Err(error) => return Err(error.into()),
         };
 
-        validate_schema_version(&content)?;
+        let value: serde_json::Value =
+            serde_json::from_str(&content).map_err(|source| FontbrewError::Manifest {
+                message: format!("could not parse manifest JSON: {source}"),
+            })?;
+        let found = value
+            .get("schemaVersion")
+            .and_then(serde_json::Value::as_u64);
+        if found != Some(MANIFEST_SCHEMA_VERSION) {
+            return Err(FontbrewError::ManifestSchema {
+                found,
+                supported: MANIFEST_SCHEMA_VERSION,
+            });
+        }
 
         let manifest: ManifestV1 =
-            serde_json::from_str(&content).map_err(|source| FontbrewError::Manifest {
+            serde_json::from_value(value).map_err(|source| FontbrewError::Manifest {
                 message: format!("could not parse manifest at {}: {source}", path.display()),
             })?;
 
@@ -189,23 +201,4 @@ fn validate_package_keys(manifest: &ManifestV1) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn validate_schema_version(content: &str) -> Result<()> {
-    let value: serde_json::Value =
-        serde_json::from_str(content).map_err(|source| FontbrewError::Manifest {
-            message: format!("could not parse manifest JSON: {source}"),
-        })?;
-
-    let found = value
-        .get("schemaVersion")
-        .and_then(serde_json::Value::as_u64);
-
-    match found {
-        Some(MANIFEST_SCHEMA_VERSION) => Ok(()),
-        _ => Err(FontbrewError::ManifestSchema {
-            found,
-            supported: MANIFEST_SCHEMA_VERSION,
-        }),
-    }
 }

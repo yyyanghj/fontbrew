@@ -11,8 +11,8 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
     CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FontFormat, Fontbrew,
-    FontbrewError, FontbrewOptions, InfoRequest, InstallBatchReport, InstallPlan,
-    InstallPreparation, InstallReport, InstallRequest, InstallSource, OutdatedRequest, PackageId,
+    FontbrewOptions, InfoRequest, InstallBatchReport, InstallPlan, InstallPreparation,
+    InstallReport, InstallRequest, InstallSource, OutdatedRequest, PackageId,
     PendingAssetSelection, PendingFamilySelection, RemoveRequest, SearchRequest, UpdateRequest,
 };
 
@@ -437,42 +437,26 @@ async fn build_family_install_plans(
     confirmer: &mut dyn Confirmer,
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<Vec<InstallPlan>> {
-    if selected_families.len() > 1 {
-        let request = install_request_from_args(args, selected_families)?;
-        return build_install_plans_with_asset_selection(
-            request,
-            fontbrew,
-            reporter,
-            confirmer,
-            cancellation,
-        )
-        .await;
-    }
+    let request = install_request_from_args(args, selected_families.clone())?;
+    let preparation = prepare_install_with_asset_selection(
+        request,
+        fontbrew,
+        reporter,
+        confirmer,
+        cancellation.clone(),
+    )
+    .await?;
 
-    let mut plans = Vec::new();
-
-    for family in selected_families {
-        let request = install_request_from_args(args, vec![family])?;
-        match build_install_plan_with_asset_selection(
-            request,
-            fontbrew,
-            reporter,
-            confirmer,
-            cancellation.clone(),
-        )
-        .await
-        {
-            Ok(plan) => plans.push(plan),
-            Err(error) => {
-                for plan in plans {
-                    fontbrew.discard_install_plan(plan);
-                }
-                return Err(error);
-            }
+    match preparation {
+        InstallPreparation::Plan(plan) => Ok(vec![plan]),
+        InstallPreparation::FamilySelection(pending) => {
+            prepare_selected_families(pending, selected_families, fontbrew, reporter, cancellation)
+                .await
+        }
+        InstallPreparation::AssetSelection(_) => {
+            unreachable!("asset selection should be resolved before install preparation returns")
         }
     }
-
-    Ok(plans)
 }
 
 async fn prepare_install_with_asset_selection(
@@ -558,93 +542,6 @@ async fn prepare_selected_asset(
     progress.finish()?;
 
     Ok(preparation)
-}
-
-async fn build_install_plans_with_asset_selection(
-    mut request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    confirmer: &mut dyn Confirmer,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<Vec<InstallPlan>> {
-    loop {
-        match build_install_plans(request.clone(), fontbrew, reporter, cancellation.clone()).await {
-            Ok(plans) => return Ok(plans),
-            Err(error) => {
-                let asset_selector =
-                    asset_selector_from_ambiguous_assets(error, &request, confirmer)?;
-                request.asset_selector = Some(asset_selector);
-            }
-        }
-    }
-}
-
-async fn build_install_plans(
-    request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<Vec<InstallPlan>> {
-    reporter.start_activity(&install_plan_activity_message(&request))?;
-    let mut progress = ProgressAdapter::new(reporter);
-    let plans = fontbrew
-        .install_plans_with_progress_and_cancellation(request, &mut progress, cancellation)
-        .await?;
-    progress.finish()?;
-
-    Ok(plans)
-}
-
-async fn build_install_plan_with_asset_selection(
-    mut request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    confirmer: &mut dyn Confirmer,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<InstallPlan> {
-    loop {
-        match build_install_plan(request.clone(), fontbrew, reporter, cancellation.clone()).await {
-            Ok(plan) => return Ok(plan),
-            Err(error) => {
-                let asset_selector =
-                    asset_selector_from_ambiguous_assets(error, &request, confirmer)?;
-                request.asset_selector = Some(asset_selector);
-            }
-        }
-    }
-}
-
-async fn build_install_plan(
-    request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<InstallPlan> {
-    reporter.start_activity(&install_plan_activity_message(&request))?;
-    let mut progress = ProgressAdapter::new(reporter);
-    let plan = fontbrew
-        .install_plan_with_progress_and_cancellation(request, &mut progress, cancellation)
-        .await?;
-    progress.finish()?;
-
-    Ok(plan)
-}
-
-fn asset_selector_from_ambiguous_assets(
-    error: crate::exit::CliError,
-    request: &InstallRequest,
-    confirmer: &mut dyn Confirmer,
-) -> CliResult<String> {
-    if request.asset_selector.is_some() {
-        return Err(error);
-    }
-
-    match error {
-        crate::exit::CliError::Core(FontbrewError::AmbiguousAssets { package_id, assets }) => {
-            confirmer.select_asset(&package_id, &assets)
-        }
-        error => Err(error),
-    }
 }
 
 fn install_plan_activity_message(request: &InstallRequest) -> String {

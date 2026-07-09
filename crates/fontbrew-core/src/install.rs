@@ -14,7 +14,7 @@ use crate::{
         deactivate, ActivationArtifact, ActivationPlan, ActivationPlanner, ActivationRequest,
     },
     archives::{ArchiveExtractionOptions, ExtractedFontFile, ZipArchiveExtractor},
-    config::{dedupe_formats, font_format_label, FontbrewConfig},
+    config::{dedupe_formats, font_format_label, FontbrewConfig, LoadedFontbrewConfig},
     error::{FontbrewError, Result},
     fetch::NetworkClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
@@ -34,7 +34,7 @@ use crate::{
         RemoveRequest,
     },
     platform::FontbrewPaths,
-    providers::{self, FontsourceProvider, ResolvedProviderPackage},
+    providers::{self, FontsourceProvider, ProviderFontAsset, ResolvedProviderPackage},
     sources::GitHubRepo,
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
@@ -232,6 +232,18 @@ pub(crate) fn local_archive_install_plan_candidate(
     });
     ensure_not_cancelled(cancellation)?;
     let family_boundary = InstallFamilyBoundary::from_selected_families(selected_families);
+    if family_boundary.is_none() {
+        if let Some(package_id) = &package_id_override {
+            let requested_source = ManifestSource::LocalArchive {
+                path: archive_path.clone(),
+            };
+            if let Some(plan) =
+                already_installed_plan(paths, package_id, reinstall, &requested_source, None)?
+            {
+                return Ok(InstallPlanCandidate::Plan(plan));
+            }
+        }
+    }
     let parsed_archive = prepare_local_archive_as_parsed_archive(
         paths,
         archive_path,
@@ -925,6 +937,18 @@ fn local_archive_install_plan(
 ) -> Result<InstallPlan> {
     let archive_path = resolve_local_archive_path(&archive_path)?;
     ensure_not_cancelled(cancellation)?;
+    if selected_families.is_empty() {
+        if let Some(package_id) = &package_id_override {
+            let requested_source = ManifestSource::LocalArchive {
+                path: archive_path.clone(),
+            };
+            if let Some(plan) =
+                already_installed_plan(paths, package_id, reinstall, &requested_source, None)?
+            {
+                return Ok(plan);
+            }
+        }
+    }
     let prepared = prepare_local_archive(
         paths,
         archive_path,
@@ -1273,6 +1297,10 @@ impl InstallFamilyBoundary {
     fn family_label(&self) -> &'static str {
         self.family_label
     }
+
+    fn selected_family_count(&self) -> usize {
+        self.expected_families.len()
+    }
 }
 
 fn package_id_override_unsupported_source_error() -> FontbrewError {
@@ -1395,6 +1423,7 @@ async fn prepare_provider_package(
     cancellation: Arc<dyn CancellationToken>,
 ) -> Result<PreparedInstallPackage> {
     ensure_not_cancelled(cancellation.as_ref())?;
+    let (resolved, loaded_config) = select_provider_assets_for_format(paths, resolved, &options)?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
     ensure_not_cancelled(cancellation.as_ref())?;
@@ -1402,6 +1431,7 @@ async fn prepare_provider_package(
         paths,
         resolved,
         options,
+        loaded_config,
         progress,
         network_client,
         staging_cleanup.path().to_path_buf(),
@@ -1414,6 +1444,105 @@ async fn prepare_provider_package(
     }
 
     result
+}
+
+fn select_provider_assets_for_format(
+    paths: &FontbrewPaths,
+    resolved: ResolvedProviderPackage,
+    options: &RemoteInstallOptions,
+) -> Result<(ResolvedProviderPackage, LoadedFontbrewConfig)> {
+    let ResolvedProviderPackage {
+        package_id,
+        provider,
+        provider_id,
+        version,
+        families,
+        assets,
+    } = resolved;
+    let loaded_config = FontbrewConfig::load_with_sources(&paths.config_path())?;
+    let archive_format_preference = ArchiveFormatPreference {
+        explicit_format_preference: options.explicit_format_preference.clone(),
+    };
+    let selected_assets = select_preferred_provider_assets(
+        &package_id,
+        assets,
+        &format_selection(
+            &archive_format_preference,
+            &loaded_config.config.format_preference,
+            loaded_config.has_format_preference,
+        ),
+    )?;
+
+    Ok((
+        ResolvedProviderPackage {
+            package_id,
+            provider,
+            provider_id,
+            version,
+            families,
+            assets: selected_assets,
+        },
+        loaded_config,
+    ))
+}
+
+fn select_preferred_provider_assets(
+    package_id: &PackageId,
+    assets: Vec<ProviderFontAsset>,
+    format_selection: &FormatSelection,
+) -> Result<Vec<ProviderFontAsset>> {
+    let available_formats = assets
+        .iter()
+        .map(|asset| asset.format)
+        .collect::<BTreeSet<_>>();
+    if format_selection.explicit {
+        let selected_format =
+            requested_available_provider_format(package_id, format_selection, &available_formats)?;
+        return Ok(assets
+            .into_iter()
+            .filter(|asset| asset.format == selected_format)
+            .collect());
+    }
+
+    if available_formats.len() <= 1 {
+        return Ok(assets);
+    }
+
+    let Some(selected_format) = format_selection
+        .preference
+        .iter()
+        .find(|format| available_formats.contains(format))
+        .copied()
+        .or_else(|| available_formats.iter().next().copied())
+    else {
+        return Ok(assets);
+    };
+
+    Ok(assets
+        .into_iter()
+        .filter(|asset| asset.format == selected_format)
+        .collect())
+}
+
+fn requested_available_provider_format(
+    package_id: &PackageId,
+    format_selection: &FormatSelection,
+    available_formats: &BTreeSet<FontFormat>,
+) -> Result<FontFormat> {
+    format_selection
+        .preference
+        .iter()
+        .find(|format| available_formats.contains(format))
+        .copied()
+        .ok_or_else(|| FontbrewError::Conflict {
+            package_id: package_id.clone(),
+            message: format!(
+                "requested font formats are not available for {}; requested: {}; available: {}",
+                package_id.as_str(),
+                format_list_label(&format_selection.preference),
+                format_list_label(available_formats)
+            ),
+        })
 }
 
 pub(crate) async fn prepare_resolved_provider_package(
@@ -1435,10 +1564,12 @@ pub(crate) async fn prepare_resolved_provider_package(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_and_parse_provider_fonts(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
+    loaded_config: LoadedFontbrewConfig,
     progress: &mut dyn ProgressSink,
     network_client: &NetworkClient,
     staging_dir: PathBuf,
@@ -1521,6 +1652,7 @@ async fn download_and_parse_provider_fonts(
             explicit_format_preference: options.explicit_format_preference,
         },
         family_boundary: options.family_boundary,
+        loaded_config,
         cancellation: cancellation.clone(),
     })
     .await?;
@@ -1864,6 +1996,7 @@ struct RemoteFontParseInput {
     reinstall: bool,
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<InstallFamilyBoundary>,
+    loaded_config: LoadedFontbrewConfig,
     cancellation: Arc<dyn CancellationToken>,
 }
 
@@ -1959,6 +2092,7 @@ async fn parse_staged_provider_fonts_blocking(
             input.archive_format_preference,
             input.family_boundary,
             input.package_families,
+            Some(&input.loaded_config),
             input.cancellation.as_ref(),
         );
         Ok((result, progress.events))
@@ -2017,6 +2151,7 @@ fn extract_and_parse_archive(
         reinstall,
         archive_format_preference,
         family_boundary,
+        None,
         None,
         cancellation,
     )
@@ -2079,6 +2214,7 @@ fn parse_staged_font_files(
     archive_format_preference: ArchiveFormatPreference,
     family_boundary: Option<InstallFamilyBoundary>,
     package_families: Option<Vec<FamilyName>>,
+    loaded_config: Option<&LoadedFontbrewConfig>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     let parsed_archive = parse_staged_font_archive(
@@ -2091,14 +2227,25 @@ fn parse_staged_font_files(
         cancellation,
     )?;
 
-    prepare_package_from_parsed_archive(
-        paths,
-        parsed_archive,
-        package_id_hint,
-        family_boundary.as_ref(),
-        package_families,
-        cancellation,
-    )
+    match loaded_config {
+        Some(loaded_config) => prepare_package_from_parsed_archive_with_config(
+            paths,
+            parsed_archive,
+            package_id_hint,
+            family_boundary.as_ref(),
+            package_families,
+            loaded_config,
+            cancellation,
+        ),
+        None => prepare_package_from_parsed_archive(
+            paths,
+            parsed_archive,
+            package_id_hint,
+            family_boundary.as_ref(),
+            package_families,
+            cancellation,
+        ),
+    }
 }
 
 fn parse_staged_font_archive(
@@ -2183,6 +2330,33 @@ fn prepare_package_from_parsed_archive(
     package_families: Option<Vec<FamilyName>>,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
+    let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
+        Ok(config) => config,
+        Err(error) => {
+            cleanup_staging(&parsed_archive.staging_dir);
+            return Err(error);
+        }
+    };
+    prepare_package_from_parsed_archive_with_config(
+        paths,
+        parsed_archive,
+        package_id_hint,
+        family_boundary,
+        package_families,
+        &loaded_config,
+        cancellation,
+    )
+}
+
+fn prepare_package_from_parsed_archive_with_config(
+    paths: &FontbrewPaths,
+    parsed_archive: ParsedFontArchive,
+    package_id_hint: Option<PackageId>,
+    family_boundary: Option<&InstallFamilyBoundary>,
+    package_families: Option<Vec<FamilyName>>,
+    loaded_config: &LoadedFontbrewConfig,
+    cancellation: &dyn CancellationToken,
+) -> Result<PreparedInstallPackage> {
     let ParsedFontArchive {
         staging_dir,
         version,
@@ -2231,13 +2405,6 @@ fn prepare_package_from_parsed_archive(
         },
     };
     ensure_not_cancelled(cancellation)?;
-    let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
-        Ok(config) => config,
-        Err(error) => {
-            cleanup_staging(&staging_dir);
-            return Err(error);
-        }
-    };
     let format_selection = format_selection(
         &archive_format_preference,
         &loaded_config.config.format_preference,
@@ -2341,11 +2508,19 @@ pub(crate) fn family_install_plans_from_parsed_archive(
     }
 
     let mut prepared_packages = Vec::new();
+    let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
+        Ok(config) => config,
+        Err(error) => {
+            cleanup_staging(&parsed_archive.staging_dir);
+            return Err(error);
+        }
+    };
     for family in selected_families {
         let prepared_result = prepare_family_package_from_parsed_archive(
             paths,
             &parsed_archive,
             family,
+            &loaded_config,
             cancellation,
         );
         match prepared_result {
@@ -2373,6 +2548,13 @@ fn install_plan_candidate_from_parsed_archive(
     progress: &mut dyn ProgressSink,
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallPlanCandidate> {
+    if family_boundary.is_some_and(|boundary| boundary.selected_family_count() > 1) {
+        return Ok(InstallPlanCandidate::FamilySelection {
+            parsed_archive,
+            package_id_override,
+        });
+    }
+
     if family_boundary.is_none() && parsed_archive_requires_family_selection(&parsed_archive) {
         return Ok(InstallPlanCandidate::FamilySelection {
             parsed_archive,
@@ -2401,29 +2583,32 @@ fn prepare_family_package_from_parsed_archive(
     paths: &FontbrewPaths,
     parsed_archive: &ParsedFontArchive,
     family: FamilyName,
+    loaded_config: &LoadedFontbrewConfig,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_not_cancelled(cancellation)?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
-    let copied_archive = copy_parsed_archive_to_staging(
-        paths,
-        parsed_archive,
-        staging_cleanup.path(),
-        cancellation,
-    )?;
     let boundary =
         InstallFamilyBoundary::from_selected_families(vec![family]).ok_or_else(|| {
             FontbrewError::ArchiveRejected {
                 reason: "selected family boundary matched no font files".to_string(),
             }
         })?;
-    let prepared = prepare_package_from_parsed_archive(
+    let copied_archive = copy_parsed_archive_to_staging(
+        paths,
+        parsed_archive,
+        staging_cleanup.path(),
+        &boundary,
+        cancellation,
+    )?;
+    let prepared = prepare_package_from_parsed_archive_with_config(
         paths,
         copied_archive,
         None,
         Some(&boundary),
         None,
+        loaded_config,
         cancellation,
     );
 
@@ -2438,31 +2623,34 @@ fn prepare_family_package_from_parsed_archive_target(
     paths: &FontbrewPaths,
     parsed_archive: &ParsedFontArchive,
     target: ParsedArchiveInstallTarget,
+    loaded_config: &LoadedFontbrewConfig,
     cancellation: &dyn CancellationToken,
 ) -> Result<PreparedInstallPackage> {
     ensure_not_cancelled(cancellation)?;
     let staging_dir = create_active_staging_dir(paths)?;
     let mut staging_cleanup = StagingCleanupGuard::new(staging_dir);
-    let mut copied_archive = copy_parsed_archive_to_staging(
-        paths,
-        parsed_archive,
-        staging_cleanup.path(),
-        cancellation,
-    )?;
-    copied_archive.reinstall = target.reinstall;
     let boundary =
         InstallFamilyBoundary::from_selected_families(vec![target.family]).ok_or_else(|| {
             FontbrewError::ArchiveRejected {
                 reason: "selected family boundary matched no font files".to_string(),
             }
         })?;
+    let mut copied_archive = copy_parsed_archive_to_staging(
+        paths,
+        parsed_archive,
+        staging_cleanup.path(),
+        &boundary,
+        cancellation,
+    )?;
+    copied_archive.reinstall = target.reinstall;
     let package_id_hint = target.package_id_override.or(target.package_id);
-    let prepared = prepare_package_from_parsed_archive(
+    let prepared = prepare_package_from_parsed_archive_with_config(
         paths,
         copied_archive,
         package_id_hint,
         Some(&boundary),
         None,
+        loaded_config,
         cancellation,
     );
 
@@ -2477,6 +2665,7 @@ fn copy_parsed_archive_to_staging(
     paths: &FontbrewPaths,
     parsed_archive: &ParsedFontArchive,
     staging_dir: &Path,
+    boundary: &InstallFamilyBoundary,
     cancellation: &dyn CancellationToken,
 ) -> Result<ParsedFontArchive> {
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), staging_dir)?;
@@ -2485,6 +2674,25 @@ fn copy_parsed_archive_to_staging(
     let mut parsed_files = Vec::with_capacity(parsed_archive.parsed_files.len());
     for parsed_file in &parsed_archive.parsed_files {
         ensure_not_cancelled(cancellation)?;
+        let included_face_count = parsed_file
+            .faces
+            .iter()
+            .filter(|face| boundary.includes_family(&face.family_name))
+            .count();
+        if included_face_count == 0 {
+            continue;
+        }
+        if included_face_count != parsed_file.faces.len() {
+            return Err(FontbrewError::ArchiveRejected {
+                reason: format!(
+                    "font file contains both included and excluded {} font families; cannot install a family subset from one font binary: {} (included: {}; excluded: {})",
+                    boundary.family_label(),
+                    parsed_file.staging_path.display(),
+                    face_family_list(&parsed_file.faces, boundary, true),
+                    face_family_list(&parsed_file.faces, boundary, false)
+                ),
+            });
+        }
         let relative_path = parsed_file
             .staging_path
             .strip_prefix(&parsed_archive.staging_dir)
@@ -2696,11 +2904,19 @@ pub(crate) fn install_plans_from_parsed_archive_targets(
     }
 
     let mut prepared_packages = Vec::new();
+    let loaded_config = match FontbrewConfig::load_with_sources(&paths.config_path()) {
+        Ok(config) => config,
+        Err(error) => {
+            cleanup_staging(&parsed_archive.staging_dir);
+            return Err(error);
+        }
+    };
     for target in targets {
         let prepared_result = prepare_family_package_from_parsed_archive_target(
             paths,
             &parsed_archive,
             target,
+            &loaded_config,
             cancellation,
         );
         match prepared_result {
@@ -3147,7 +3363,7 @@ fn apply_prepared_install(
     cancellation: &dyn CancellationToken,
 ) -> Result<InstallReport> {
     ensure_not_cancelled(cancellation)?;
-    reject_unmanaged_package_store(paths, prepared)?;
+    reject_unmanaged_package_store(paths, manifest, prepared)?;
     ensure_not_cancelled(cancellation)?;
 
     let previous_activation_artifacts = if prepared.reinstall {
@@ -3376,6 +3592,7 @@ pub(crate) fn copy_prepared_files(
 
 fn reject_unmanaged_package_store(
     paths: &FontbrewPaths,
+    manifest: &ManifestV1,
     prepared: &PreparedInstallPackage,
 ) -> Result<()> {
     ensure_existing_path_does_not_cross_symlink(
@@ -3383,7 +3600,6 @@ fn reject_unmanaged_package_store(
         &prepared.package_store_dir,
     )?;
 
-    let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let package_id = prepared_package_id(prepared);
     if prepared.package_store_dir.exists() && manifest.get_package(&package_id).is_none() {
         return Err(FontbrewError::Conflict {

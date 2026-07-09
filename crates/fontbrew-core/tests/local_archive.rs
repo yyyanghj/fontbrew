@@ -720,6 +720,46 @@ async fn local_archive_package_id_override_installs_non_normalizable_family_and_
 }
 
 #[tokio::test]
+async fn local_archive_known_package_id_checks_manifest_before_extracting_archive() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = fontbrew_with_paths(paths.clone());
+    let archive_path = temp.path().join("broken.zip");
+    fs::write(&archive_path, b"not a zip").expect("write malformed archive");
+    let package_id = package_id("custom-local");
+    let version = PackageVersion::new("local");
+    let mut manifest = ManifestV1::empty();
+    manifest
+        .insert_package(ManifestPackageRecord {
+            package_id: package_id.clone(),
+            version: version.clone(),
+            source: ManifestSource::LocalArchive {
+                path: archive_path.clone(),
+            },
+            update_source: None,
+            families: vec![FamilyName::new("Source Code Pro")],
+            font_files: Vec::new(),
+            activation_artifacts: Vec::new(),
+            installed_at: "unix:1".to_string(),
+            active_version: Some(version),
+        })
+        .expect("insert package record");
+    ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+
+    let plan = app
+        .install_plan(local_archive_request_with_package_id_override(
+            &archive_path,
+            package_id.clone(),
+        ))
+        .await
+        .expect("known local package id should check manifest before reading archive");
+
+    assert_eq!(plan.package_id, package_id);
+    assert!(plan.already_installed);
+    assert!(staging_entries(&paths).is_empty());
+}
+
+#[tokio::test]
 async fn direct_local_archive_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);

@@ -899,3 +899,87 @@ async fn github_asset_selection_flow_downloads_selected_asset_once() {
         "interactive asset selection should reuse resolved release metadata and download the selected asset only once"
     );
 }
+
+#[tokio::test]
+async fn github_asset_selection_with_multiple_families_reuses_release_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "source-code-pro-desktop.zip",
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
+        "name": "source-code-pro-nerd-font.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
+      }}
+    ]
+  }}
+]"#
+        ),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
+        ]),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let request = github_request_with_selected_families(
+        "adobe",
+        "source-code-pro",
+        None,
+        vec!["Source Code Pro", "Inter"],
+    );
+    let preparation = app
+        .prepare_install(request, &mut NoProgress, Arc::new(NeverCancelled))
+        .await
+        .expect("ambiguous GitHub assets should return pending selection");
+    let pending = match preparation {
+        InstallPreparation::AssetSelection(pending) => pending,
+        _ => panic!("ambiguous GitHub assets should ask the caller to choose"),
+    };
+
+    let preparation = app
+        .prepare_selected_asset(
+            pending,
+            "source-code-pro-desktop.zip".to_string(),
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("selected asset should prepare families");
+    let pending_families = match preparation {
+        InstallPreparation::FamilySelection(pending) => pending,
+        _ => panic!("multiple selected families should reuse parsed archive"),
+    };
+    let plans = app
+        .prepare_selected_families(
+            pending_families,
+            vec![FamilyName::new("Source Code Pro"), FamilyName::new("Inter")],
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("selected families should plan");
+
+    assert_eq!(plans.len(), 2);
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url, desktop_download],
+        "selected family planning should not re-request release metadata after asset selection"
+    );
+}
