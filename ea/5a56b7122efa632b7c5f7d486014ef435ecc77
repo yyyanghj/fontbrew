@@ -1,0 +1,25 @@
+CHANGELOG.md
+  s_7142253a29df41::t_f7b9b931d5aa65 5-13
+Cargo.lock
+  s_7142253a29df41::t_7ff41e9c109398 455,477
+Cargo.toml
+  s_7142253a29df41::t_d369d82f33634e 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea5a56b7122efa632b7c5f7d486014ef435ecc77",
+  "prompts": {},
+  "sessions": {
+    "s_7142253a29df41": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4637-103e-77e2-bf64-636fa22fa1d5",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
