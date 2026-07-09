@@ -87,6 +87,13 @@ fn package_id(id: &str) -> PackageId {
     PackageId::parse(id).expect("test package id should be valid")
 }
 
+fn assert_activation_copy_matches(activation_path: &Path, source_path: &Path) {
+    assert_eq!(
+        fs::read(activation_path).expect("read activation copy"),
+        fs::read(source_path).expect("read managed font source")
+    );
+}
+
 fn fixture_font_path(filename: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/fonts")
@@ -598,10 +605,7 @@ async fn local_archive_install_list_info_remove_round_trip() {
         .join("files/SourceCodePro-Regular.ttf");
     let activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     assert!(managed_font_path.exists());
-    assert_eq!(
-        fs::read_link(&activation_path).expect("activation symlink"),
-        managed_font_path
-    );
+    assert_activation_copy_matches(&activation_path, &managed_font_path);
 
     let list = app.list_packages().await.expect("list packages");
     assert_eq!(list.packages.len(), 1);
@@ -909,7 +913,7 @@ async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction()
 }
 
 #[tokio::test]
-async fn install_plan_rejects_reserved_copy_activation_config_and_cleans_staging() {
+async fn install_uses_copy_activation_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
@@ -931,23 +935,34 @@ activation_strategy = "copy"
     )
     .expect("write copy activation config");
 
-    let error = app
+    let plan = app
         .install_plan(local_archive_request(&archive_path, false))
         .await
-        .expect_err("copy activation config should be rejected");
+        .expect("copy activation config should be accepted");
 
-    assert!(matches!(error, FontbrewError::Config { .. }));
-    let message = error.to_string();
-    assert!(message.contains("copy activation"));
-    assert!(message.contains("reserved"));
-    assert!(message.contains("not supported"));
-    assert!(!paths
-        .package_store_dir(
-            &package_id("source-code-pro"),
-            &PackageVersion::new("local"),
+    let report = app
+        .apply_install(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
         )
-        .exists());
-    assert!(!paths.manifest_path().exists());
+        .await
+        .expect("apply copy activation install");
+
+    let managed_font_path = paths
+        .package_store_dir(&package_id("source-code-pro"), &report.installed_version)
+        .join("files/SourceCodePro-Regular.ttf");
+    let activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
+    assert_activation_copy_matches(&activation_path, &managed_font_path);
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("source-code-pro"))
+        .expect("manifest record");
+    assert!(record
+        .activation_artifacts
+        .iter()
+        .all(|artifact| artifact.strategy == ActivationStrategy::Copy));
     assert!(staging_entries(&paths).is_empty());
 }
 
@@ -1304,10 +1319,7 @@ async fn failed_reinstall_preserves_existing_activation_and_package_store() {
     fs::set_permissions(paths.managed_store_dir(), original_permissions)
         .expect("restore managed root permissions");
     assert!(matches!(error, FontbrewError::Io(_)));
-    assert_eq!(
-        fs::read_link(&activation_path).expect("existing activation symlink remains"),
-        managed_font_path
-    );
+    assert_activation_copy_matches(&activation_path, &managed_font_path);
     assert_eq!(
         fs::read(&managed_font_path).expect("existing managed font remains"),
         original_managed_bytes

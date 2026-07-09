@@ -2,6 +2,15 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.11 - 2026-07-09
+
+- 将默认字体激活方式从软链改为复制真实字体文件，激活产物仍保留在
+  `~/Library/Fonts/Fontbrew` 下，避免污染用户字体目录根路径。
+- 保留 `symlink` 激活策略兼容旧 manifest 和显式配置，同时允许
+  `install.activation_strategy = "copy"` 正常读写。
+- 改进重新安装、更新和回滚流程，确保 copy 激活失败时清理新产物并恢复旧的
+  Fontbrew 管理字体。
+
 ## 0.0.10 - 2026-07-08
 
 - 为安装、移除、搜索、检查更新、自更新等可能耗时的 CLI 阶段增加活动

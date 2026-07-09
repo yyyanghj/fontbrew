@@ -98,7 +98,7 @@ Fontbrew config lives at `~/.config/fontbrew/config.toml` and uses schema versio
 Supported CLI config keys:
 
 - `install.format_preference`: ordered list of `otf`, `ttf`, `ttc`, and `otc`.
-- `install.activation_strategy`: currently `symlink`; `copy` is reserved but rejected until implemented.
+- `install.activation_strategy`: `copy` by default; `symlink` remains available for compatibility and explicit user configuration.
 - `network.metadata_ttl_hours`: positive integer metadata snapshot TTL.
 - `network.update_concurrency`: positive integer default for `fontbrew update --jobs`.
 

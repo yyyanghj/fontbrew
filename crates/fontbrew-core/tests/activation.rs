@@ -52,6 +52,38 @@ fn symlink_activation_creates_tracked_artifacts_in_activation_dir() {
 }
 
 #[test]
+fn copy_activation_creates_tracked_files_in_activation_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_dir = temp.path().join("package-fonts");
+    let activation_dir = temp.path().join("activation");
+    fs::create_dir_all(&source_dir).expect("create source dir");
+    let font_path = source_dir.join("Inter-Regular.ttf");
+    write_font(&font_path);
+
+    let request = ActivationRequest {
+        package_id: package_id("inter"),
+        font_files: vec![font_path.clone()],
+        activation_dir: activation_dir.clone(),
+        strategy: ActivationStrategy::Copy,
+    };
+    let plan = ActivationPlanner::plan(request).expect("plan activation");
+    let artifacts = plan
+        .apply(ExecutionPolicy::SafeOnly)
+        .expect("apply safe activation");
+
+    let activation_path = activation_dir.join("Inter-Regular.ttf");
+    assert_eq!(artifacts, plan.artifacts);
+    assert_eq!(
+        fs::read(&activation_path).expect("activation copy"),
+        fs::read(&font_path).expect("source font")
+    );
+    assert!(!fs::symlink_metadata(&activation_path)
+        .expect("activation metadata")
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
 fn deactivation_removes_only_tracked_artifacts_in_activation_dir() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("package-fonts");
@@ -75,6 +107,55 @@ fn deactivation_removes_only_tracked_artifacts_in_activation_dir() {
 
     assert!(!artifact_path.exists());
     assert!(activation_dir.exists());
+}
+
+#[test]
+fn copy_deactivation_removes_matching_tracked_copy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let activation_dir = temp.path().join("activation");
+    let source_path = temp.path().join("source.ttf");
+    let artifact_path = activation_dir.join("Inter-Regular.ttf");
+    fs::create_dir_all(&activation_dir).expect("create activation dir");
+    fs::write(&source_path, b"source").expect("write source");
+    fs::write(&artifact_path, b"source").expect("write activation copy");
+
+    let artifacts = vec![ActivationArtifact {
+        package_id: package_id("inter"),
+        path: artifact_path.clone(),
+        source_path,
+        strategy: ActivationStrategy::Copy,
+    }];
+
+    deactivate(&activation_dir, &artifacts).expect("deactivate copy artifacts");
+
+    assert!(!artifact_path.exists());
+    assert!(activation_dir.exists());
+}
+
+#[test]
+fn copy_deactivation_rejects_and_preserves_changed_copy() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let activation_dir = temp.path().join("activation");
+    let source_path = temp.path().join("source.ttf");
+    let artifact_path = activation_dir.join("Inter-Regular.ttf");
+    fs::create_dir_all(&activation_dir).expect("create activation dir");
+    fs::write(&source_path, b"source").expect("write source");
+    fs::write(&artifact_path, b"changed").expect("write changed activation copy");
+
+    let artifacts = vec![ActivationArtifact {
+        package_id: package_id("inter"),
+        path: artifact_path.clone(),
+        source_path,
+        strategy: ActivationStrategy::Copy,
+    }];
+
+    let error = deactivate(&activation_dir, &artifacts).expect_err("changed copy should reject");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert_eq!(
+        fs::read(&artifact_path).expect("changed copy should remain"),
+        b"changed"
+    );
 }
 
 #[test]

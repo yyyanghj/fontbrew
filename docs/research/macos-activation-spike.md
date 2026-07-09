@@ -20,6 +20,8 @@ Can Fontbrew keep symlink activation as the default by placing package font syml
 
 This does not safely prove that every macOS application ignores symlinked fonts in `~/Library/Fonts/Fontbrew`; it only shows that this non-private, no-cache-reset check did not observe the symlinked fixture as loaded.
 
+A manual Font Book check on 2026-07-09 also did not show Fontbrew-managed symlink-only activations from `~/Library/Fonts/Fontbrew`.
+
 ## Constraints
 
 - Global font caches were not cleared.
@@ -29,6 +31,4 @@ This does not safely prove that every macOS application ignores symlinked fonts 
 
 ## Decision
 
-Keep `ActivationStrategy::Symlink` implemented and switchable for Task 8, but treat macOS loader support as unresolved. Do not rely on symlink activation as a permanent default until a manual app-level check proves fonts placed under `~/Library/Fonts/Fontbrew` are visible in target applications.
-
-If manual app-level verification also fails, promote `ActivationStrategy::Copy` from placeholder to the default activation strategy.
+Promote `ActivationStrategy::Copy` to the default activation strategy while keeping activation artifacts under `~/Library/Fonts/Fontbrew`. Keep `ActivationStrategy::Symlink` implemented for compatibility with older manifests and explicit user configuration, but do not rely on symlink activation as the default macOS behavior.

@@ -123,11 +123,7 @@ impl ActivationPlan {
 
             match artifact.strategy {
                 ActivationStrategy::Symlink => activate_symlink(artifact)?,
-                ActivationStrategy::Copy => {
-                    return Err(FontbrewError::NotImplemented {
-                        operation: "copy_activation",
-                    });
-                }
+                ActivationStrategy::Copy => activate_copy(artifact)?,
             }
         }
 
@@ -142,11 +138,7 @@ pub fn deactivate(activation_dir: &Path, artifacts: &[ActivationArtifact]) -> Re
 
         match artifact.strategy {
             ActivationStrategy::Symlink => deactivate_symlink(artifact)?,
-            ActivationStrategy::Copy => {
-                return Err(FontbrewError::NotImplemented {
-                    operation: "copy_deactivation",
-                });
-            }
+            ActivationStrategy::Copy => deactivate_copy(artifact)?,
         }
     }
 
@@ -178,6 +170,37 @@ fn deactivate_symlink(artifact: &ActivationArtifact) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
 
+    Ok(())
+}
+
+fn deactivate_copy(artifact: &ActivationArtifact) -> Result<()> {
+    let metadata = match fs::symlink_metadata(&artifact.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    if !metadata.file_type().is_file() {
+        return Err(FontbrewError::Conflict {
+            package_id: artifact.package_id.clone(),
+            message: format!(
+                "activation artifact already exists and is not a managed copy: {}",
+                artifact.path.display()
+            ),
+        });
+    }
+
+    if !copy_matches_source(artifact)? {
+        return Err(FontbrewError::Conflict {
+            package_id: artifact.package_id.clone(),
+            message: format!(
+                "activation copy no longer matches managed source: {}",
+                artifact.path.display()
+            ),
+        });
+    }
+
+    fs::remove_file(&artifact.path)?;
     Ok(())
 }
 
@@ -221,13 +244,56 @@ fn activate_symlink(artifact: &ActivationArtifact) -> Result<()> {
     }
 }
 
+fn activate_copy(artifact: &ActivationArtifact) -> Result<()> {
+    match fs::symlink_metadata(&artifact.path) {
+        Ok(_) => {
+            return Err(FontbrewError::Conflict {
+                package_id: artifact.package_id.clone(),
+                message: format!(
+                    "activation artifact already exists and is not managed by this plan: {}",
+                    artifact.path.display()
+                ),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if let Some(parent) = artifact.path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&artifact.source_path, &artifact.path)?;
+    Ok(())
+}
+
 fn has_unmanaged_conflict(artifact: &ActivationArtifact) -> Result<bool> {
+    match artifact.strategy {
+        ActivationStrategy::Symlink => has_unmanaged_symlink_conflict(artifact),
+        ActivationStrategy::Copy => has_unmanaged_copy_conflict(artifact),
+    }
+}
+
+fn has_unmanaged_symlink_conflict(artifact: &ActivationArtifact) -> Result<bool> {
     match fs::read_link(&artifact.path) {
         Ok(target) => Ok(target != artifact.source_path),
         Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+fn has_unmanaged_copy_conflict(artifact: &ActivationArtifact) -> Result<bool> {
+    match fs::symlink_metadata(&artifact.path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn copy_matches_source(artifact: &ActivationArtifact) -> Result<bool> {
+    let copy_bytes = fs::read(&artifact.path)?;
+    let source_bytes = fs::read(&artifact.source_path)?;
+    Ok(copy_bytes == source_bytes)
 }
 
 fn ensure_path_is_inside(parent: &Path, child: &Path) -> Result<()> {

@@ -647,20 +647,18 @@ fn config_set_and_get_report_human_and_json_values() {
 }
 
 #[test]
-fn config_set_rejects_reserved_copy_activation_strategy() {
+fn config_set_accepts_copy_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
 
     fontbrew(&home)
         .args(["config", "set", "install.activation_strategy", "copy"])
         .assert()
-        .failure()
-        .stdout(predicate::str::is_empty())
-        .stderr(
-            predicate::str::contains("copy activation")
-                .and(predicate::str::contains("reserved"))
-                .and(predicate::str::contains("not supported")),
-        );
+        .success()
+        .stdout(predicate::str::contains(
+            "install.activation_strategy = copy",
+        ))
+        .stderr(predicate::str::is_empty());
 
     let output = fontbrew(&home)
         .args([
@@ -671,20 +669,16 @@ fn config_set_rejects_reserved_copy_activation_strategy() {
             "copy",
         ])
         .assert()
-        .failure()
+        .success()
         .stderr(predicate::str::is_empty())
         .get_output()
         .clone();
     let json = stdout_json(&output);
-    let message = json["error"]["message"]
-        .as_str()
-        .expect("error message should be a string");
 
     assert_eq!(json["schemaVersion"], 1);
-    assert_eq!(json["error"]["kind"], "config");
-    assert!(message.contains("copy activation"));
-    assert!(message.contains("reserved"));
-    assert!(message.contains("not supported"));
+    assert_eq!(json["command"], "config_set");
+    assert_eq!(json["report"]["key"], "install.activation_strategy");
+    assert_eq!(json["report"]["value"], "copy");
 }
 
 #[test]

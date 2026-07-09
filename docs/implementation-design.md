@@ -106,7 +106,7 @@ Config is stored in `~/.config/fontbrew/config.toml` with schema version `1`.
 Supported keys:
 
 - `install.format_preference`: ordered list of desktop formats. The persisted values are lowercase `otf`, `ttf`, `ttc`, and `otc`.
-- `install.activation_strategy`: `symlink` is supported. `copy` is represented in the activation model but rejected by config until copy activation is implemented.
+- `install.activation_strategy`: `copy` is the default and writes tracked activation files into Fontbrew's user-font directory. `symlink` remains supported for compatibility with older manifests and explicit user configuration.
 - `network.metadata_ttl_hours`: positive integer TTL for Fontsource metadata snapshots.
 - `network.update_concurrency`: positive integer default for update prepare concurrency.
 

@@ -114,7 +114,7 @@ Supported config keys are:
 - `network.metadata_ttl_hours`
 - `network.update_concurrency`
 
-`install.activation_strategy` currently supports `symlink`; `copy` is reserved but not implemented.
+`install.activation_strategy` supports `copy` and `symlink`. `copy` is the default and writes real font files into Fontbrew's activation directory.
 
 ## Output
 

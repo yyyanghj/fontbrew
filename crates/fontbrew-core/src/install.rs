@@ -2708,18 +2708,48 @@ fn apply_prepared_install(
     reject_unmanaged_package_store(paths, prepared)?;
     ensure_not_cancelled(cancellation)?;
 
-    let backup_dir = if prepared.reinstall && prepared.package_store_dir.exists() {
-        Some(backup_existing_package_store(paths, prepared)?)
+    let previous_activation_artifacts = if prepared.reinstall {
+        manifest
+            .get_package(&prepared_package_id(prepared))
+            .map(activation_artifacts_from_record)
+            .unwrap_or_default()
     } else {
-        None
+        Vec::new()
+    };
+
+    deactivate(&paths.activation_dir(), &previous_activation_artifacts)?;
+
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        let _ = restore_activation_artifacts(paths, &previous_activation_artifacts);
+        return Err(error);
+    }
+
+    let backup_dir = match backup_existing_package_store_for_reinstall(paths, prepared) {
+        Ok(backup_dir) => backup_dir,
+        Err(error) => {
+            let _ = restore_activation_artifacts(paths, &previous_activation_artifacts);
+            return Err(error);
+        }
     };
 
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        rollback_package_store(&prepared.package_store_dir, backup_dir.as_deref());
+        rollback_install(
+            paths,
+            &[],
+            &prepared.package_store_dir,
+            backup_dir.as_deref(),
+            &previous_activation_artifacts,
+        );
         return Err(error);
     }
     if let Err(error) = copy_prepared_files(paths, prepared) {
-        rollback_package_store(&prepared.package_store_dir, backup_dir.as_deref());
+        rollback_install(
+            paths,
+            &[],
+            &prepared.package_store_dir,
+            backup_dir.as_deref(),
+            &previous_activation_artifacts,
+        );
         return Err(error);
     }
 
@@ -2734,7 +2764,13 @@ fn apply_prepared_install(
         match preexisting_activation_artifact_paths(&activation_plan.artifacts) {
             Ok(paths) => paths,
             Err(error) => {
-                rollback_package_store(&prepared.package_store_dir, backup_dir.as_deref());
+                rollback_install(
+                    paths,
+                    &[],
+                    &prepared.package_store_dir,
+                    backup_dir.as_deref(),
+                    &previous_activation_artifacts,
+                );
                 return Err(error);
             }
         };
@@ -2744,6 +2780,7 @@ fn apply_prepared_install(
             &[],
             &prepared.package_store_dir,
             backup_dir.as_deref(),
+            &previous_activation_artifacts,
         );
         return Err(error);
     }
@@ -2759,6 +2796,7 @@ fn apply_prepared_install(
                 &rollback_artifacts,
                 &prepared.package_store_dir,
                 backup_dir.as_deref(),
+                &previous_activation_artifacts,
             );
             return Err(error);
         }
@@ -2773,6 +2811,7 @@ fn apply_prepared_install(
             &rollback_artifacts,
             &prepared.package_store_dir,
             backup_dir.as_deref(),
+            &previous_activation_artifacts,
         );
         return Err(error);
     }
@@ -2785,6 +2824,7 @@ fn apply_prepared_install(
             &rollback_artifacts,
             &prepared.package_store_dir,
             backup_dir.as_deref(),
+            &previous_activation_artifacts,
         );
         return Err(error);
     }
@@ -2916,6 +2956,17 @@ fn reject_unmanaged_package_store(
     Ok(())
 }
 
+fn backup_existing_package_store_for_reinstall(
+    paths: &FontbrewPaths,
+    prepared: &PreparedInstallPackage,
+) -> Result<Option<PathBuf>> {
+    if prepared.reinstall && prepared.package_store_dir.exists() {
+        return backup_existing_package_store(paths, prepared).map(Some);
+    }
+
+    Ok(None)
+}
+
 fn backup_existing_package_store(
     paths: &FontbrewPaths,
     prepared: &PreparedInstallPackage,
@@ -2951,9 +3002,29 @@ fn rollback_install(
     activation_artifacts: &[ActivationArtifact],
     package_store_dir: &Path,
     backup_dir: Option<&Path>,
+    previous_activation_artifacts: &[ActivationArtifact],
 ) {
     let _ = deactivate(&paths.activation_dir(), activation_artifacts);
     rollback_package_store(package_store_dir, backup_dir);
+    let _ = restore_activation_artifacts(paths, previous_activation_artifacts);
+}
+
+fn restore_activation_artifacts(
+    paths: &FontbrewPaths,
+    artifacts: &[ActivationArtifact],
+) -> Result<()> {
+    for artifact in artifacts {
+        let plan = ActivationPlan {
+            package_id: artifact.package_id.clone(),
+            activation_dir: paths.activation_dir(),
+            strategy: artifact.strategy,
+            artifacts: vec![artifact.clone()],
+            risks: Vec::new(),
+        };
+        plan.apply(ExecutionPolicy::AssumeYes)?;
+    }
+
+    Ok(())
 }
 
 fn preexisting_activation_artifact_paths(artifacts: &[ActivationArtifact]) -> Result<Vec<PathBuf>> {
@@ -3262,7 +3333,7 @@ fn current_install_risks_with_unmanaged_overlap_risks(
 ) -> Result<Vec<PlanRisk>> {
     let package_id = prepared_package_id(prepared);
     let mut risks = managed_activation_path_conflict_risks(manifest, prepared);
-    risks.extend(current_activation_artifact_risks(prepared)?);
+    risks.extend(current_activation_artifact_risks(manifest, prepared)?);
     risks.extend(unmanaged_overlap_risks);
 
     if prepared.package_store_dir.exists() && manifest.get_package(&package_id).is_none() {
@@ -3278,12 +3349,19 @@ fn current_install_risks_with_unmanaged_overlap_risks(
     Ok(risks)
 }
 
-fn current_activation_artifact_risks(prepared: &PreparedInstallPackage) -> Result<Vec<PlanRisk>> {
+fn current_activation_artifact_risks(
+    manifest: &ManifestV1,
+    prepared: &PreparedInstallPackage,
+) -> Result<Vec<PlanRisk>> {
+    let package_id = prepared_package_id(prepared);
     let activation_plan = ActivationPlanner::plan(ActivationRequest {
-        package_id: prepared_package_id(prepared),
+        package_id: package_id.clone(),
         font_files: prepared
             .activation_artifacts
             .iter()
+            .filter(|artifact| {
+                !activation_path_is_managed_by_package(manifest, &package_id, &artifact.path)
+            })
             .map(|artifact| artifact.source_path.clone())
             .collect(),
         activation_dir: prepared.activation_dir.clone(),
@@ -3291,6 +3369,19 @@ fn current_activation_artifact_risks(prepared: &PreparedInstallPackage) -> Resul
     })?;
 
     Ok(activation_plan.risks)
+}
+
+fn activation_path_is_managed_by_package(
+    manifest: &ManifestV1,
+    package_id: &PackageId,
+    path: &Path,
+) -> bool {
+    manifest.get_package(package_id).is_some_and(|record| {
+        record
+            .activation_artifacts
+            .iter()
+            .any(|artifact| artifact.path == path)
+    })
 }
 
 fn managed_activation_path_conflict_risks(

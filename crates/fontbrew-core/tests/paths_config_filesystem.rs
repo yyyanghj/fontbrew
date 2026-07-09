@@ -81,7 +81,7 @@ fn missing_config_file_uses_deterministic_v1_defaults() {
             FontFormat::Otc
         ]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
+    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
 }
@@ -118,7 +118,7 @@ update_concurrency = 2
 }
 
 #[test]
-fn config_file_rejects_reserved_copy_activation_strategy() {
+fn config_file_accepts_copy_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -132,13 +132,9 @@ activation_strategy = "copy"
     )
     .expect("write config");
 
-    let error = FontbrewConfig::load(&config_path).expect_err("copy activation should be rejected");
+    let config = FontbrewConfig::load(&config_path).expect("copy activation should parse");
 
-    assert!(matches!(error, FontbrewError::Config { .. }));
-    let message = error.to_string();
-    assert!(message.contains("copy activation"));
-    assert!(message.contains("reserved"));
-    assert!(message.contains("not supported"));
+    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
 }
 
 #[test]
@@ -203,7 +199,7 @@ async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
         config.format_preference,
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
+    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
 
@@ -229,8 +225,8 @@ async fn config_set_and_get_support_all_known_scalar_keys() {
     for (key, raw_value, expected_value) in [
         (
             "install.activation_strategy",
-            "symlink",
-            ConfigValue::String("symlink".to_string()),
+            "copy",
+            ConfigValue::String("copy".to_string()),
         ),
         ("network.metadata_ttl_hours", "6", ConfigValue::Integer(6)),
         ("network.update_concurrency", "2", ConfigValue::Integer(2)),
@@ -257,25 +253,27 @@ async fn config_set_and_get_support_all_known_scalar_keys() {
 }
 
 #[tokio::test]
-async fn config_set_rejects_reserved_copy_activation_strategy() {
+async fn config_set_accepts_symlink_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
 
-    let error = app
+    let report = app
         .config_set(ConfigSetRequest {
             key: "install.activation_strategy".to_string(),
-            value: "copy".to_string(),
+            value: "symlink".to_string(),
         })
         .await
-        .expect_err("copy activation should be rejected");
+        .expect("symlink activation should still be configurable");
 
-    assert!(matches!(error, FontbrewError::Config { .. }));
-    let message = error.to_string();
-    assert!(message.contains("copy activation"));
-    assert!(message.contains("reserved"));
-    assert!(message.contains("not supported"));
-    assert!(!paths.config_path().exists());
+    assert_eq!(report.key, "install.activation_strategy");
+    assert_eq!(report.value, ConfigValue::String("symlink".to_string()));
+    assert_eq!(
+        FontbrewConfig::load(&paths.config_path())
+            .expect("load persisted config")
+            .activation_strategy,
+        ActivationStrategy::Symlink
+    );
 }
 
 #[tokio::test]

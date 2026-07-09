@@ -102,6 +102,13 @@ fn fixture_font_path(filename: &str) -> PathBuf {
         .join(filename)
 }
 
+fn assert_activation_copy_matches(activation_path: &Path, source_path: &Path) {
+    assert_eq!(
+        fs::read(activation_path).expect("read activation copy"),
+        fs::read(source_path).expect("read managed font source")
+    );
+}
+
 fn test_paths(temp: &tempfile::TempDir) -> FontbrewPaths {
     FontbrewPaths::for_tests(
         temp.path().join("data"),
@@ -822,10 +829,7 @@ async fn update_apply_failure_preserves_old_version_activation_and_manifest() {
         )
         .join("files/SourceCodePro-Regular.ttf");
     let old_activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
-    assert_eq!(
-        fs::read_link(&old_activation_path).expect("old activation symlink"),
-        old_store_path
-    );
+    assert_activation_copy_matches(&old_activation_path, &old_store_path);
 
     let app = source_code_pro_update_app(
         &paths,
@@ -874,10 +878,7 @@ async fn update_apply_failure_preserves_old_version_activation_and_manifest() {
             &PackageVersion::new("v2.0.0")
         )
         .exists());
-    assert_eq!(
-        fs::read_link(&old_activation_path).expect("old activation restored"),
-        old_store_path
-    );
+    assert_activation_copy_matches(&old_activation_path, &old_store_path);
 }
 
 #[tokio::test]
@@ -949,14 +950,8 @@ async fn update_apply_new_activation_mid_failure_removes_partial_new_activation_
             .as_str(),
         "v1.0.0"
     );
-    assert_eq!(
-        fs::read_link(&old_regular_activation_path).expect("regular activation restored"),
-        old_regular_store_path
-    );
-    assert_eq!(
-        fs::read_link(&old_bold_activation_path).expect("bold activation restored"),
-        old_bold_store_path
-    );
+    assert_activation_copy_matches(&old_regular_activation_path, &old_regular_store_path);
+    assert_activation_copy_matches(&old_bold_activation_path, &old_bold_store_path);
     assert!(
         fs::symlink_metadata(&partial_new_activation).is_err(),
         "partial new activation should be removed after failure"
@@ -1037,10 +1032,7 @@ async fn update_apply_old_activation_deactivation_mid_failure_restores_removed_o
             .as_str(),
         "v1.0.0"
     );
-    assert_eq!(
-        fs::read_link(&old_regular_activation_path).expect("regular activation restored"),
-        old_regular_store_path
-    );
+    assert_activation_copy_matches(&old_regular_activation_path, &old_regular_store_path);
     assert_eq!(
         fs::read(&old_bold_activation_path).expect("bold activation conflict remains"),
         b"unmanaged"
@@ -1159,10 +1151,9 @@ async fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manife
             )
             .join("files/SourceCodePro-Regular.ttf");
         assert!(new_store_path.exists());
-        assert_eq!(
-            fs::read_link(paths.activation_dir().join("SourceCodePro-Regular.ttf"))
-                .expect("new activation symlink"),
-            new_store_path
+        assert_activation_copy_matches(
+            &paths.activation_dir().join("SourceCodePro-Regular.ttf"),
+            &new_store_path,
         );
     }
 }
@@ -1224,10 +1215,7 @@ async fn update_apply_manifest_write_not_committed_failure_restores_old_state_an
         "v1.0.0"
     );
     assert!(old_store_path.exists());
-    assert_eq!(
-        fs::read_link(&old_activation_path).expect("old activation restored"),
-        old_store_path
-    );
+    assert_activation_copy_matches(&old_activation_path, &old_store_path);
     assert!(!paths
         .package_store_dir(
             &package_id("source-code-pro"),
@@ -1283,10 +1271,9 @@ async fn update_apply_success_points_manifest_and_activation_to_new_version_and_
             &PackageVersion::new("v2.0.0"),
         )
         .join("files/SourceCodePro-Regular.ttf");
-    assert_eq!(
-        fs::read_link(paths.activation_dir().join("SourceCodePro-Regular.ttf"))
-            .expect("new activation symlink"),
-        new_store_path
+    assert_activation_copy_matches(
+        &paths.activation_dir().join("SourceCodePro-Regular.ttf"),
+        &new_store_path,
     );
     assert!(!old_store_dir.exists());
 }
@@ -1346,10 +1333,7 @@ async fn update_dry_run_does_not_mutate_manifest_activation_or_package_store() {
             &PackageVersion::new("v2.0.0")
         )
         .exists());
-    assert_eq!(
-        fs::read_link(&old_activation_path).expect("old activation symlink"),
-        old_store_path
-    );
+    assert_activation_copy_matches(&old_activation_path, &old_store_path);
 }
 
 fn first_staged_font_file(staging_dir: &Path) -> PathBuf {
