@@ -22,10 +22,11 @@ pub mod version;
 
 pub use error::{FontbrewError, Result};
 pub use fontbrew::{
-    ExtractArchiveRequest, ExtractedArchive, FontFileInput, Fontbrew, FontbrewOptions,
-    InstallPlanSet, InstallPreparation, InstallSourcePreparation, InstallTarget, ParseFontsRequest,
-    ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts, PendingAssetSelection,
-    PendingFamilySelection, PlanInstallRequest, PrepareInstallSourceRequest,
+    ExtractArchiveRequest, ExtractedArchive, FetchInstallMetadataRequest, FontFileInput, Fontbrew,
+    FontbrewOptions, InstallMetadata, InstallPlanSet, InstallPreparation, InstallSourcePreparation,
+    InstallTarget, ParseFontsRequest, ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts,
+    PendingAssetSelection, PendingFamilySelection, PlanInstallRequest, PrepareInstallAssetRequest,
+    PrepareInstallSourceRequest,
 };
 pub use model::*;
 pub use version::*;

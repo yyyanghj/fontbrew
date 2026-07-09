@@ -84,34 +84,57 @@ let reports = fontbrew.apply_install(plans, ApplyOptions { policy }).await?;
 
 ## Install Flow
 
-The public install workflow has three stages:
+The public install workflow has four stages:
 
-1. `prepare_install_source`
-2. `plan_install`
-3. `apply_install`
+1. `fetch_install_metadata`
+2. `prepare_install_asset`
+3. `plan_install`
+4. `apply_install`
 
-This replaces the current `prepare_install -> Plan | FamilySelection` shape. Preparation always stops after source preparation and candidate discovery. It does not implicitly continue to planning, even if only one family was found.
+This replaces the current `prepare_install -> Plan | FamilySelection` shape. Metadata fetching stops before archive download. Asset preparation stops after candidate discovery. It does not implicitly continue to planning, even if only one family was found.
 
-### Prepare Install Source
+### Fetch Install Metadata
 
-`prepare_install_source` performs source-level work:
+`fetch_install_metadata` performs source-level metadata work:
 
 1. Resolve the install source.
 2. For GitHub, resolve the latest stable release and filter installable zip assets.
-3. Apply `asset_selector` when provided.
-4. Fail with ambiguous assets when more than one installable asset remains.
-5. Download the chosen remote asset when needed.
-6. Extract the archive.
-7. Parse desktop font metadata.
-8. Return install candidates.
-
-The higher-level `prepare_install` command-flow API may return `PendingAssetSelection` for ambiguous GitHub release assets. Callers choose one asset and pass the pending value to `prepare_selected_asset`, which reuses the already-resolved release metadata instead of fetching the release again.
+3. For Fontsource, resolve provider package metadata.
+4. Return selectable release assets when a source has them.
 
 ```rust
-pub struct PrepareInstallSourceRequest {
+pub struct FetchInstallMetadataRequest {
     pub source: InstallSource,
+}
+
+pub struct InstallMetadata {
+    // private resolved source metadata
+}
+
+impl InstallMetadata {
+    pub fn source(&self) -> &InstallSource;
+    pub fn package_id(&self) -> Option<&PackageId>;
+    pub fn assets(&self) -> &[String];
+}
+```
+
+The returned `InstallMetadata` owns resolved release or provider metadata so the next stage can reuse it without repeating network requests.
+
+### Prepare Install Asset
+
+`prepare_install_asset` performs asset-level work:
+
+1. Apply `asset_selector` when the metadata exposes multiple assets.
+2. Download the chosen remote asset when needed.
+3. Extract the archive.
+4. Parse desktop font metadata.
+5. Return install candidates.
+
+```rust
+pub struct PrepareInstallAssetRequest {
+    pub metadata: InstallMetadata,
     pub asset_selector: Option<String>,
-    pub format_preference: Option<Vec<FontFormat>>,
+    pub format_preference: Vec<FontFormat>,
 }
 
 pub struct InstallSourcePreparation {
@@ -124,6 +147,8 @@ impl InstallSourcePreparation {
 ```
 
 The returned `InstallSourcePreparation` owns staging and removes it on drop. It exposes candidates as ordinary data for caller selection.
+
+`prepare_install_source` remains as a convenience helper for callers that do not need a separate metadata/asset selection boundary. The CLI uses the finer `fetch_install_metadata -> prepare_install_asset` flow because it may prompt between those stages.
 
 ### Install Candidates
 
@@ -211,21 +236,23 @@ Behavior stays consistent with the current install flow:
 
 `InstallReportSet` is returned only when all package plans apply successfully.
 
-## Atomic Operations
+## Lower-Level Operations
 
-`Fontbrew` should also expose lower-level operations. These methods are useful for tests, custom frontends, and callers that want only part of the install pipeline.
+`Fontbrew` also exposes lower-level operations for tests, custom frontends, and callers that want only part of the install pipeline.
 
 ```rust
 impl Fontbrew {
-    pub async fn resolve_install_source(
+    pub async fn fetch_install_metadata(
         &self,
-        request: ResolveInstallSourceRequest,
-    ) -> Result<ResolvedInstallSource>;
+        request: FetchInstallMetadataRequest,
+    ) -> Result<InstallMetadata>;
 
-    pub async fn download_install_source(
+    pub async fn prepare_install_asset(
         &self,
-        request: DownloadInstallSourceRequest,
-    ) -> Result<DownloadedArchive>;
+        request: PrepareInstallAssetRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<InstallSourcePreparation>;
 
     pub fn extract_archive(
         &self,
@@ -236,15 +263,10 @@ impl Fontbrew {
         &self,
         request: ParseFontsRequest,
     ) -> Result<ParsedFonts>;
-
-    pub fn discover_install_candidates(
-        &self,
-        request: DiscoverInstallCandidatesRequest,
-    ) -> Result<Vec<InstallCandidate>>;
 }
 ```
 
-Atomic requests should not require the exact return type from the previous step. For example, parsing accepts ordinary font file inputs:
+Lower-level requests should not require the exact return type from the previous step unless ownership matters. For example, parsing accepts ordinary font file inputs:
 
 ```rust
 pub struct ParseFontsRequest {
@@ -312,8 +334,8 @@ CLI-specific report envelopes such as `ListReport`, `SearchReport`, and JSON com
 1. `Fontbrew` is the single core entry type.
 2. `FontbrewOptions` provides flat path options for `store_dir`, `config_path`, and `activation_dir`.
 3. User preferences are read from config on each operation and are not duplicated in `FontbrewOptions`.
-4. Install exposes the three-stage core flow through `prepare_install_source`, caller selection, `plan_install`, caller confirmation, and `apply_install`.
-5. Atomic resolve/download/extract/parse operations are public operations backed by existing internals.
+4. Install exposes the staged core flow through `fetch_install_metadata`, caller asset selection, `prepare_install_asset`, caller family selection, `plan_install`, caller confirmation, and `apply_install`.
+5. Install-specific metadata fetch and asset preparation are public operations; archive extraction and font parsing are public lower-level operations backed by existing internals.
 6. The CLI uses `Fontbrew` directly for command flows.
 7. `FontbrewApp` has been removed instead of kept as a compatibility adapter.
 

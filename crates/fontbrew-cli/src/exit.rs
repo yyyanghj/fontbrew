@@ -181,7 +181,7 @@ fn family_selection_message(families: &[FamilyName]) -> String {
         .join(", ");
 
     format!(
-        "source contains multiple font families; select one or more with --family, or install all with --all: {family_list}"
+        "font family selection is required; select one or more with --family, or install all discovered families with --all: {family_list}"
     )
 }
 

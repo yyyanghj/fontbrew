@@ -29,6 +29,9 @@ Install and activate it:
 fontbrew install inter
 ```
 
+Install asks you to confirm the discovered font family. For scripts or JSON mode,
+pass `--family <name>` or `--all`.
+
 Prefer a format for this install:
 
 ```bash
@@ -69,7 +72,7 @@ Unprefixed names are exact Fontsource IDs. Use `fontsource:<id>` when you want t
 Install from a GitHub Release:
 
 ```bash
-fontbrew install rsms/inter --format ttf
+fontbrew install rsms/inter --format ttf --all
 ```
 
 If a release has more than one installable zip asset, select one by name or glob:
@@ -84,7 +87,7 @@ Install from a local archive:
 fontbrew install ./SomeFont.zip
 ```
 
-For archives that contain multiple independent families, choose one or install all:
+Choose one family or install every discovered family without prompting:
 
 ```bash
 fontbrew install ./SomeFont.zip --family "Some Font"
@@ -94,7 +97,7 @@ fontbrew install ./SomeFont.zip --all
 Local archives can use an explicit package ID:
 
 ```bash
-fontbrew install ./SomeFont.zip --id some-font
+fontbrew install ./SomeFont.zip --id some-font --all
 ```
 
 ## Configuration

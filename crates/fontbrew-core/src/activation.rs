@@ -145,6 +145,111 @@ pub fn deactivate(activation_dir: &Path, artifacts: &[ActivationArtifact]) -> Re
     Ok(())
 }
 
+pub(crate) fn replace_activation(
+    old_artifacts: &[ActivationArtifact],
+    new_plan: &ActivationPlan,
+    policy: ExecutionPolicy,
+) -> Result<Vec<ActivationArtifact>> {
+    let mut removed_old_artifacts = Vec::new();
+    for old_artifact in old_artifacts {
+        if let Err(error) = deactivate(&new_plan.activation_dir, std::slice::from_ref(old_artifact))
+        {
+            let restore_error = restore_activation(
+                &new_plan.activation_dir,
+                &new_plan.package_id,
+                &removed_old_artifacts,
+            )
+            .err();
+            return Err(activation_transaction_error(
+                &new_plan.package_id,
+                "deactivate old activation",
+                error,
+                None,
+                restore_error,
+            ));
+        }
+
+        removed_old_artifacts.push(old_artifact.clone());
+    }
+
+    let mut created_new_artifacts = Vec::new();
+    for new_artifact in &new_plan.artifacts {
+        let single_plan = ActivationPlan {
+            package_id: new_plan.package_id.clone(),
+            activation_dir: new_plan.activation_dir.clone(),
+            strategy: new_plan.strategy,
+            artifacts: vec![new_artifact.clone()],
+            risks: Vec::new(),
+        };
+
+        match single_plan.apply(policy.clone()) {
+            Ok(mut artifacts) => created_new_artifacts.append(&mut artifacts),
+            Err(error) => {
+                let cleanup_error =
+                    deactivate(&new_plan.activation_dir, &created_new_artifacts).err();
+                let restore_error = restore_activation(
+                    &new_plan.activation_dir,
+                    &new_plan.package_id,
+                    old_artifacts,
+                )
+                .err();
+                return Err(activation_transaction_error(
+                    &new_plan.package_id,
+                    "activate new activation",
+                    error,
+                    cleanup_error,
+                    restore_error,
+                ));
+            }
+        }
+    }
+
+    Ok(created_new_artifacts)
+}
+
+pub(crate) fn restore_activation(
+    activation_dir: &Path,
+    package_id: &PackageId,
+    artifacts: &[ActivationArtifact],
+) -> Result<()> {
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+
+    let plan = ActivationPlan {
+        package_id: package_id.clone(),
+        activation_dir: activation_dir.to_path_buf(),
+        strategy: artifacts[0].strategy,
+        artifacts: artifacts.to_vec(),
+        risks: Vec::new(),
+    };
+    plan.apply(ExecutionPolicy::AssumeYes)?;
+    Ok(())
+}
+
+fn activation_transaction_error(
+    package_id: &PackageId,
+    phase: &str,
+    primary_error: FontbrewError,
+    cleanup_error: Option<FontbrewError>,
+    restore_error: Option<FontbrewError>,
+) -> FontbrewError {
+    let mut message = format!("{phase} failed: {primary_error}");
+
+    if let Some(error) = cleanup_error {
+        message.push_str(&format!("; cleanup new activation failed: {error}"));
+    }
+
+    if let Some(error) = restore_error {
+        message.push_str(&format!("; restore old activation failed: {error}"));
+    }
+
+    FontbrewError::Conflict {
+        package_id: package_id.clone(),
+        message,
+    }
+}
+
 fn deactivate_symlink(artifact: &ActivationArtifact) -> Result<()> {
     match fs::read_link(&artifact.path) {
         Ok(target) if target == artifact.source_path => fs::remove_file(&artifact.path)?,

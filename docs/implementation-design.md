@@ -25,7 +25,7 @@ Install source parsing should stay conservative:
 
 ## Core Modules
 
-- `app.rs`: orchestrates high-level use cases and keeps request/response models stable for CLI and tests.
+- `fontbrew.rs`: exposes the flat `Fontbrew` API, request types, staged install handles, and command-flow helpers used by CLI and tests.
 - `providers.rs`: Fontsource list/detail metadata, metadata snapshots, search, and provider asset download requests.
 - `github.rs`: GitHub release lookup, release asset filtering, asset selector matching, and release metadata.
 - `archives.rs`: zip extraction, archive safety checks, and format filtering.
@@ -48,17 +48,17 @@ Metadata refresh is an implementation detail. Search and install may use fresh s
 
 GitHub package versions use the selected release tag. The resolver chooses the latest stable release by default. A GitHub font package asset is installable when it is a `.zip` archive containing supported desktop font files.
 
-If multiple installable assets are possible, interactive CLI planning asks the user to select one and retries with that asset name. Non-interactive and JSON planning fail unless the user provides an explicit asset selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
+GitHub install is staged so callers can fetch release metadata before downloading an asset. If multiple installable assets are possible, interactive CLI mode asks the user to select one after metadata resolution. Non-interactive and JSON mode require an explicit `--asset` selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
 
 ## Local Archives
 
 Local archives are copied or read through staging and parsed with the same archive and font pipeline as remote archives. Local archives have no update source.
 
-Package ID override is allowed for local archives and direct GitHub installs, and cannot be combined with an explicit family selection. Provider identities come from their source model and parsed package metadata.
+Package ID override is allowed for local archives and direct GitHub installs. It can only be applied when the final selected install target count is one. Provider identities come from their source model and parsed package metadata.
 
 ## Package Boundary
 
-Fontbrew groups parsed font files by font family. A single-family source can plan directly. A multi-family GitHub or local archive requires explicit family selection when non-interactive; interactive human mode may prompt for one or more families.
+Fontbrew groups parsed font files by font family. Core preparation returns install candidates and does not choose a family boundary for the caller. The CLI asks interactive users to confirm the family selection and requires non-interactive callers to pass `--family` or `--all`, even when preparation finds one family.
 
 Selected families become the package boundary recorded in the manifest. Update validation reuses the manifest family boundary to avoid silently replacing a package with unrelated font files.
 

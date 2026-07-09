@@ -30,6 +30,16 @@ struct ResolvedGitHubReleaseAsset {
     download_url: String,
 }
 
+impl ResolvedGitHubRelease {
+    pub(crate) fn installable_asset_names(&self) -> Vec<String> {
+        self.assets
+            .iter()
+            .filter(|asset| is_installable_archive_asset(&asset.name))
+            .map(|asset| asset.name.clone())
+            .collect()
+    }
+}
+
 pub(crate) async fn resolve_release_asset(
     network_client: &NetworkClient,
     repo: &GitHubRepo,

@@ -11,18 +11,19 @@ use crate::{
     fetch::NetworkClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
     fs::GlobalFileLock,
+    github,
     install::{self, ParsedArchiveInstallTarget},
     model::{
         ensure_not_cancelled, ApplyOptions, CancellationToken, ConfigGetRequest, ConfigReport,
         ConfigSetRequest, ExecutionPolicy, InfoReport, InfoRequest, InstallCandidate,
         InstallCandidateId, InstallPlan, InstallPlanSummary, InstallReport, InstallReportSet,
         InstallRequest, InstallSource, ListReport, NoCancellation, NoProgress, OutdatedReport,
-        OutdatedRequest, PackageId, PlanRisk, PlannedChange, PreparedInstallPackage, ProgressEvent,
-        ProgressSink, RemovePlan, RemoveReport, RemoveRequest, SearchReport, SearchRequest,
-        UpdatePlan, UpdateReport, UpdateRequest,
+        OutdatedRequest, PackageId, PlanRisk, PlannedChange, PreparedInstallPackage,
+        PreparedInstallSource, ProgressEvent, ProgressSink, RemovePlan, RemoveReport,
+        RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport, UpdateRequest,
     },
     platform::{DefaultFontbrewLocations, FontbrewPaths},
-    providers::{FontsourceProvider, ProviderSearchRequest},
+    providers::{FontsourceProvider, ProviderSearchRequest, ResolvedProviderPackage},
     sources::{GitHubRepo, ProviderSource},
     update, FamilyName, FontFormat, ProviderKind,
 };
@@ -44,6 +45,41 @@ pub enum InstallPreparation {
     Plan(InstallPlan),
     AssetSelection(PendingAssetSelection),
     FamilySelection(PendingFamilySelection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchInstallMetadataRequest {
+    pub source: InstallSource,
+}
+
+#[derive(Debug)]
+pub struct InstallMetadata {
+    source: InstallSource,
+    package_id: Option<PackageId>,
+    assets: Vec<String>,
+    inner: InstallMetadataInner,
+}
+
+#[derive(Debug)]
+enum InstallMetadataInner {
+    LocalArchive {
+        path: PathBuf,
+    },
+    GitHub {
+        release: github::ResolvedGitHubRelease,
+        package_id: PackageId,
+        source: PreparedInstallSource,
+    },
+    Provider {
+        resolved: ResolvedProviderPackage,
+    },
+}
+
+#[derive(Debug)]
+pub struct PrepareInstallAssetRequest {
+    pub metadata: InstallMetadata,
+    pub asset_selector: Option<String>,
+    pub format_preference: Vec<FontFormat>,
 }
 
 pub struct PendingAssetSelection {
@@ -142,6 +178,20 @@ pub struct ParsedFontFaceInfo {
     pub style: String,
     pub weight: u16,
     pub format: FontFormat,
+}
+
+impl InstallMetadata {
+    pub fn source(&self) -> &InstallSource {
+        &self.source
+    }
+
+    pub fn package_id(&self) -> Option<&PackageId> {
+        self.package_id.as_ref()
+    }
+
+    pub fn assets(&self) -> &[String] {
+        &self.assets
+    }
 }
 
 impl PendingFamilySelection {
@@ -259,6 +309,175 @@ impl Fontbrew {
     pub fn with_network_client(mut self, network_client: Arc<NetworkClient>) -> Self {
         self.network_client = Some(network_client);
         self
+    }
+
+    pub async fn fetch_install_metadata(
+        &self,
+        request: FetchInstallMetadataRequest,
+    ) -> Result<InstallMetadata> {
+        match request.source {
+            InstallSource::LocalPath(path) => Ok(InstallMetadata {
+                source: InstallSource::LocalPath(path.clone()),
+                package_id: None,
+                assets: Vec::new(),
+                inner: InstallMetadataInner::LocalArchive { path },
+            }),
+            InstallSource::GitHubRepo { owner, repo } => {
+                let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
+                let package_id = install::package_id_from_repo_name(&github_repo.repo)?;
+                let release = github::resolve_latest_stable_release(
+                    self.network_client()?.as_ref(),
+                    &github_repo,
+                )
+                .await?;
+                let assets = release.installable_asset_names();
+
+                Ok(InstallMetadata {
+                    source: InstallSource::GitHubRepo {
+                        owner: owner.clone(),
+                        repo: repo.clone(),
+                    },
+                    package_id: Some(package_id.clone()),
+                    assets,
+                    inner: InstallMetadataInner::GitHub {
+                        release,
+                        package_id,
+                        source: PreparedInstallSource::GitHub { owner, repo },
+                    },
+                })
+            }
+            InstallSource::Provider {
+                provider: ProviderKind::Fontsource,
+                id,
+            } => {
+                let resolved =
+                    FontsourceProvider::new(&self.paths, self.network_client()?.as_ref())
+                        .resolve_install_package(&id)
+                        .await?;
+                let package_id = resolved.package_id.clone();
+
+                Ok(InstallMetadata {
+                    source: InstallSource::Provider {
+                        provider: ProviderKind::Fontsource,
+                        id,
+                    },
+                    package_id: Some(package_id),
+                    assets: Vec::new(),
+                    inner: InstallMetadataInner::Provider { resolved },
+                })
+            }
+        }
+    }
+
+    pub async fn prepare_install_asset(
+        &self,
+        request: PrepareInstallAssetRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<InstallSourcePreparation> {
+        ensure_not_cancelled(cancellation.as_ref())?;
+        match request.metadata.inner {
+            InstallMetadataInner::LocalArchive { path } => {
+                let paths = self.paths.clone();
+                let format_preference = request.format_preference;
+                let (result, events) = spawn_blocking_result(move || {
+                    let mut recording = RecordingProgressSink::default();
+                    let result = install::prepare_local_archive_install_source(
+                        &paths,
+                        path,
+                        format_preference,
+                        &mut recording,
+                        cancellation.as_ref(),
+                    );
+                    Ok((result, recording.events))
+                })
+                .await?;
+                replay_progress(progress, events);
+                let parsed_archive = result?;
+                let candidates =
+                    install::install_candidates_from_parsed_archive(&parsed_archive, None)?;
+
+                Ok(InstallSourcePreparation {
+                    candidates,
+                    inner: Some(InstallSourcePreparationInner::ParsedArchive { parsed_archive }),
+                })
+            }
+            InstallMetadataInner::GitHub {
+                release,
+                package_id,
+                source,
+            } => {
+                let asset = github::select_resolved_release_asset(
+                    &release,
+                    request.asset_selector.as_deref(),
+                    &package_id,
+                )?;
+                let options = install::RemoteInstallOptions {
+                    asset_selector: None,
+                    package_id: None,
+                    progress_package_id: Some(package_id.clone()),
+                    reinstall: false,
+                    explicit_format_preference: crate::config::dedupe_formats(
+                        request.format_preference,
+                    ),
+                    family_boundary: None,
+                };
+                let parsed_archive = install::prepare_resolved_github_release_parsed_archive(
+                    &self.paths,
+                    asset,
+                    source,
+                    options,
+                    progress,
+                    self.network_client()?.as_ref(),
+                    cancellation,
+                )
+                .await?;
+                let candidates = install::install_candidates_from_parsed_archive(
+                    &parsed_archive,
+                    Some(package_id),
+                )?;
+
+                Ok(InstallSourcePreparation {
+                    candidates,
+                    inner: Some(InstallSourcePreparationInner::ParsedArchive { parsed_archive }),
+                })
+            }
+            InstallMetadataInner::Provider { resolved } => {
+                if request.asset_selector.is_some() {
+                    return Err(FontbrewError::Config {
+                        message: "--asset is not supported for Fontsource provider sources"
+                            .to_string(),
+                    });
+                }
+
+                let package_id = resolved.package_id.clone();
+                let options = install::RemoteInstallOptions {
+                    asset_selector: None,
+                    package_id: Some(package_id.clone()),
+                    progress_package_id: Some(package_id),
+                    reinstall: false,
+                    explicit_format_preference: crate::config::dedupe_formats(
+                        request.format_preference,
+                    ),
+                    family_boundary: None,
+                };
+                let prepared = install::prepare_provider_package(
+                    &self.paths,
+                    resolved,
+                    options,
+                    progress,
+                    self.network_client()?.as_ref(),
+                    cancellation,
+                )
+                .await?;
+                let candidates = vec![install::install_candidate_from_prepared(&prepared)];
+
+                Ok(InstallSourcePreparation {
+                    candidates,
+                    inner: Some(InstallSourcePreparationInner::PreparedPackage { prepared }),
+                })
+            }
+        }
     }
 
     pub async fn prepare_install_source(
@@ -923,6 +1142,10 @@ impl InstallPlanSet {
 
     pub fn changes(&self) -> &[PlannedChange] {
         &self.changes
+    }
+
+    pub fn into_install_plans(mut self) -> Vec<InstallPlan> {
+        self.plans.take().unwrap_or_default()
     }
 
     fn into_plans(mut self) -> Vec<InstallPlan> {

@@ -11,8 +11,10 @@ use std::{
 use fontbrew_core::{
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
-    CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewError, FontbrewOptions,
-    InstallPreparation, InstallRequest, InstallSource, PackageId, ProgressEvent, ProgressSink,
+    CancellationToken, ExecutionPolicy, FamilyName, FetchInstallMetadataRequest, Fontbrew,
+    FontbrewError, FontbrewOptions, InstallPreparation, InstallRequest, InstallSource,
+    InstallTarget, PackageId, PlanInstallRequest, PrepareInstallAssetRequest, ProgressEvent,
+    ProgressSink,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -793,6 +795,108 @@ async fn github_asset_selector_resolves_asset_ambiguity() {
             desktop_download,
         ]
     );
+}
+
+#[tokio::test]
+async fn staged_github_install_fetches_metadata_before_downloading_selected_asset() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
+    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        format!(
+            r#"[
+  {{
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "assets": [
+      {{
+        "name": "source-code-pro-desktop.zip",
+        "browser_download_url": "{desktop_download}"
+      }},
+      {{
+        "name": "source-code-pro-nerd-font.zip",
+        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
+      }}
+    ]
+  }}
+]"#
+        ),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-desktop.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let metadata = app
+        .fetch_install_metadata(FetchInstallMetadataRequest {
+            source: InstallSource::GitHubRepo {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+        })
+        .await
+        .expect("fetch install metadata");
+
+    assert_eq!(metadata.package_id(), Some(&package_id("source-code-pro")));
+    assert_eq!(
+        metadata.assets(),
+        &[
+            "source-code-pro-desktop.zip".to_string(),
+            "source-code-pro-nerd-font.zip".to_string()
+        ]
+    );
+    assert_eq!(
+        server.request_urls(),
+        vec![releases_url.clone()],
+        "metadata fetch should not download any release asset"
+    );
+
+    let mut progress = RecordingProgress::default();
+    let preparation = app
+        .prepare_install_asset(
+            PrepareInstallAssetRequest {
+                metadata,
+                asset_selector: Some("source-code-pro-desktop.zip".to_string()),
+                format_preference: Vec::new(),
+            },
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("prepare selected asset");
+    assert_eq!(
+        progress
+            .events
+            .iter()
+            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(preparation.candidates().len(), 1);
+    assert_eq!(
+        preparation.candidates()[0].families,
+        vec![FamilyName::new("Source Code Pro")]
+    );
+    assert_eq!(server.request_urls(), vec![releases_url, desktop_download]);
+
+    let candidate_id = preparation.candidates()[0].id.clone();
+    let plans = app
+        .plan_install(PlanInstallRequest {
+            preparation,
+            targets: vec![InstallTarget {
+                candidate_id,
+                package_id_override: None,
+                reinstall: false,
+            }],
+        })
+        .expect("plan prepared asset");
+    assert_eq!(plans.plans().len(), 1);
+    assert!(plans.risks().is_empty());
 }
 
 #[tokio::test]

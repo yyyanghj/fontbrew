@@ -10,10 +10,11 @@ use std::{
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
-    CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FontFormat, Fontbrew,
-    FontbrewOptions, InfoRequest, InstallBatchReport, InstallPlan, InstallPreparation,
-    InstallReport, InstallRequest, InstallSource, OutdatedRequest, PackageId,
-    PendingAssetSelection, PendingFamilySelection, RemoveRequest, SearchRequest, UpdateRequest,
+    CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FetchInstallMetadataRequest,
+    FontFormat, Fontbrew, FontbrewError, FontbrewOptions, InfoRequest, InstallBatchReport,
+    InstallCandidate, InstallMetadata, InstallPlan, InstallReport, InstallSource, InstallTarget,
+    OutdatedRequest, PackageId, PlanInstallRequest, PrepareInstallAssetRequest, RemoveRequest,
+    SearchRequest, UpdateRequest,
 };
 
 use crate::{
@@ -105,7 +106,6 @@ struct InstallArgs {
 
     #[arg(
         long = "id",
-        conflicts_with_all = ["families", "all_families"],
         help = "Package ID override for local archive and direct GitHub sources"
     )]
     package_id: Option<String>,
@@ -120,7 +120,7 @@ struct InstallArgs {
         long = "family",
         value_name = "NAME",
         conflicts_with = "all_families",
-        help = "Select a font family from a multi-family source; may be repeated"
+        help = "Select a font family to install; may be repeated"
     )]
     families: Vec<String>,
 
@@ -128,7 +128,7 @@ struct InstallArgs {
         short = 'a',
         long = "all",
         conflicts_with = "families",
-        help = "Install every font family discovered in a multi-family source"
+        help = "Install every discovered font family without prompting"
     )]
     all_families: bool,
 }
@@ -325,85 +325,74 @@ async fn install(
     confirmer: &mut dyn Confirmer,
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<()> {
+    let source = install_source_from_arg(&args.source);
+    let package_id_override = args
+        .package_id
+        .as_deref()
+        .map(PackageId::parse)
+        .transpose()?;
     let explicit_families = selected_family_args(&args.families);
-    if !explicit_families.is_empty() {
-        let plans = build_family_install_plans(
-            &args,
-            explicit_families,
-            fontbrew,
-            reporter,
-            confirmer,
-            cancellation.clone(),
-        )
-        .await?;
-        let reports =
-            apply_install_plans(&args, plans, fontbrew, reporter, confirmer, cancellation).await?;
-        return render_install_reports(reporter, reports);
-    }
+    validate_install_args_for_source(&args, &source, package_id_override.as_ref())?;
 
-    let request = install_request_from_args(&args, Vec::new())?;
-    let preparation = prepare_install_with_asset_selection(
-        request,
-        fontbrew,
-        reporter,
-        confirmer,
-        cancellation.clone(),
-    )
-    .await?;
-    let plan = match preparation {
-        InstallPreparation::Plan(plan) => plan,
-        InstallPreparation::FamilySelection(pending) => {
-            let selected_families = if args.all_families {
-                pending.families().to_vec()
-            } else {
-                confirmer.select_families(pending.families())?
-            };
-            let plans = prepare_selected_families(
-                pending,
-                selected_families,
-                fontbrew,
-                reporter,
+    let metadata = {
+        reporter.start_activity(&format!("Resolving {}", install_source_label(&source)))?;
+        let metadata = fontbrew
+            .fetch_install_metadata(FetchInstallMetadataRequest {
+                source: source.clone(),
+            })
+            .await?;
+        reporter.finish_activity()?;
+        metadata
+    };
+    let asset_selector = install_asset_selector(&args, &metadata, confirmer)?;
+    let preparation = {
+        reporter.start_activity(&format!(
+            "Preparing install source {}",
+            install_source_label(&source)
+        ))?;
+        let mut progress = ProgressAdapter::new(reporter);
+        let preparation = fontbrew
+            .prepare_install_asset(
+                PrepareInstallAssetRequest {
+                    metadata,
+                    asset_selector,
+                    format_preference: font_format_preference(&args),
+                },
+                &mut progress,
                 cancellation.clone(),
             )
             .await?;
-            let reports =
-                apply_install_plans(&args, plans, fontbrew, reporter, confirmer, cancellation)
-                    .await?;
-            return render_install_reports(reporter, reports);
-        }
-        InstallPreparation::AssetSelection(_) => {
-            unreachable!("asset selection should be resolved before install preparation returns")
-        }
+        progress.finish()?;
+        preparation
     };
-
-    let reports = apply_install_plans(
+    let selected_families = selected_install_families(
         &args,
-        vec![plan],
-        fontbrew,
-        reporter,
+        preparation.candidates(),
+        &explicit_families,
         confirmer,
-        cancellation,
-    )
-    .await?;
-    render_install_reports(reporter, reports)
-}
+    )?;
+    let targets = install_targets_for_families(
+        preparation.candidates(),
+        &selected_families,
+        package_id_override,
+        args.reinstall,
+    )?;
+    let plans = {
+        reporter.start_activity(&format!(
+            "Preparing install plan for {}",
+            family_activity_label(&selected_families)
+        ))?;
+        let plans = fontbrew.plan_install(PlanInstallRequest {
+            preparation,
+            targets,
+        })?;
+        reporter.finish_activity()?;
+        plans.into_install_plans()
+    };
+    let reports =
+        apply_install_plans(&args, plans, fontbrew, reporter, confirmer, cancellation).await?;
 
-fn install_request_from_args(
-    args: &InstallArgs,
-    selected_families: Vec<FamilyName>,
-) -> CliResult<InstallRequest> {
-    Ok(InstallRequest {
-        source: install_source_from_arg(&args.source),
-        package_id_override: args
-            .package_id
-            .as_deref()
-            .map(PackageId::parse)
-            .transpose()?,
-        format_preference: font_format_preference(args),
-        asset_selector: args.asset_selector.clone(),
-        selected_families,
-        reinstall: args.reinstall,
-    })
+    render_install_reports(reporter, reports)
 }
 
 fn selected_family_args(families: &[String]) -> Vec<FamilyName> {
@@ -429,129 +418,150 @@ fn selected_family_args(families: &[String]) -> Vec<FamilyName> {
     selected_families
 }
 
-async fn build_family_install_plans(
+fn validate_install_args_for_source(
     args: &InstallArgs,
-    selected_families: Vec<FamilyName>,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    confirmer: &mut dyn Confirmer,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<Vec<InstallPlan>> {
-    let request = install_request_from_args(args, selected_families.clone())?;
-    let preparation = prepare_install_with_asset_selection(
-        request,
-        fontbrew,
-        reporter,
-        confirmer,
-        cancellation.clone(),
-    )
-    .await?;
-
-    match preparation {
-        InstallPreparation::Plan(plan) => Ok(vec![plan]),
-        InstallPreparation::FamilySelection(pending) => {
-            prepare_selected_families(pending, selected_families, fontbrew, reporter, cancellation)
-                .await
+    source: &InstallSource,
+    package_id_override: Option<&PackageId>,
+) -> CliResult<()> {
+    if package_id_override.is_some() && matches!(source, InstallSource::Provider { .. }) {
+        return Err(FontbrewError::Config {
+            message: "--id is only supported for local archive and direct GitHub sources"
+                .to_string(),
         }
-        InstallPreparation::AssetSelection(_) => {
-            unreachable!("asset selection should be resolved before install preparation returns")
-        }
+        .into());
     }
-}
 
-async fn prepare_install_with_asset_selection(
-    request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    confirmer: &mut dyn Confirmer,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<InstallPreparation> {
-    let mut preparation =
-        prepare_install(request, fontbrew, reporter, cancellation.clone()).await?;
-    loop {
-        match preparation {
-            InstallPreparation::AssetSelection(pending) => {
-                let asset_selector =
-                    confirmer.select_asset(pending.package_id(), pending.assets())?;
-                preparation = prepare_selected_asset(
-                    pending,
-                    asset_selector,
-                    fontbrew,
-                    reporter,
-                    cancellation.clone(),
-                )
-                .await?;
-            }
-            preparation => return Ok(preparation),
+    if args.asset_selector.is_some() && matches!(source, InstallSource::Provider { .. }) {
+        return Err(FontbrewError::Config {
+            message: "--asset is not supported for Fontsource provider sources".to_string(),
         }
+        .into());
     }
+
+    Ok(())
 }
 
-async fn prepare_install(
-    request: InstallRequest,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<InstallPreparation> {
-    reporter.start_activity(&install_plan_activity_message(&request))?;
-    let mut progress = ProgressAdapter::new(reporter);
-    let preparation = fontbrew
-        .prepare_install(request, &mut progress, cancellation)
-        .await?;
-    progress.finish()?;
+fn install_asset_selector(
+    args: &InstallArgs,
+    metadata: &InstallMetadata,
+    confirmer: &mut dyn Confirmer,
+) -> CliResult<Option<String>> {
+    if args.asset_selector.is_some() {
+        return Ok(args.asset_selector.clone());
+    }
 
-    Ok(preparation)
-}
+    if metadata.assets().len() <= 1 {
+        return Ok(None);
+    }
 
-async fn prepare_selected_families(
-    pending: PendingFamilySelection,
-    selected_families: Vec<FamilyName>,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<Vec<InstallPlan>> {
-    reporter.start_activity(&format!(
-        "Preparing install plan for {}",
-        family_activity_label(&selected_families)
-    ))?;
-    let mut progress = ProgressAdapter::new(reporter);
-    let plans = fontbrew
-        .prepare_selected_families(pending, selected_families, &mut progress, cancellation)
-        .await?;
-    progress.finish()?;
-
-    Ok(plans)
-}
-
-async fn prepare_selected_asset(
-    pending: PendingAssetSelection,
-    asset_selector: String,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<InstallPreparation> {
-    let package_id = pending.package_id().clone();
-    reporter.start_activity(&format!(
-        "Preparing install plan for {}",
-        package_id.as_str()
-    ))?;
-    let mut progress = ProgressAdapter::new(reporter);
-    let preparation = fontbrew
-        .prepare_selected_asset(pending, asset_selector, &mut progress, cancellation)
-        .await?;
-    progress.finish()?;
-
-    Ok(preparation)
-}
-
-fn install_plan_activity_message(request: &InstallRequest) -> String {
-    let target = if request.selected_families.is_empty() {
-        install_source_label(&request.source)
-    } else {
-        family_activity_label(&request.selected_families)
+    let Some(package_id) = metadata.package_id() else {
+        return Err(FontbrewError::Config {
+            message: "install source has selectable assets but no package id".to_string(),
+        }
+        .into());
     };
 
-    format!("Preparing install plan for {target}")
+    confirmer
+        .select_asset(package_id, metadata.assets())
+        .map(Some)
+}
+
+fn selected_install_families(
+    args: &InstallArgs,
+    candidates: &[InstallCandidate],
+    explicit_families: &[FamilyName],
+    confirmer: &mut dyn Confirmer,
+) -> CliResult<Vec<FamilyName>> {
+    if args.all_families {
+        return Ok(candidate_families(candidates));
+    }
+
+    if !explicit_families.is_empty() {
+        return Ok(explicit_families.to_vec());
+    }
+
+    confirmer.select_families(&candidate_families(candidates))
+}
+
+fn install_targets_for_families(
+    candidates: &[InstallCandidate],
+    selected_families: &[FamilyName],
+    package_id_override: Option<PackageId>,
+    reinstall: bool,
+) -> CliResult<Vec<InstallTarget>> {
+    let mut targets = Vec::new();
+
+    for family in selected_families {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate_matches_family(candidate, family))
+            .ok_or_else(|| FontbrewError::ArchiveRejected {
+                reason: format!("selected font family was not found: {}", family.as_str()),
+            })?;
+        if targets
+            .iter()
+            .any(|target: &InstallTarget| target.candidate_id == candidate.id)
+        {
+            continue;
+        }
+        targets.push(InstallTarget {
+            candidate_id: candidate.id.clone(),
+            package_id_override: None,
+            reinstall,
+        });
+    }
+
+    if targets.is_empty() {
+        return Err(FontbrewError::ArchiveRejected {
+            reason: "selected family boundary matched no font files".to_string(),
+        }
+        .into());
+    }
+
+    if let Some(package_id) = package_id_override {
+        if targets.len() != 1 {
+            return Err(FontbrewError::Config {
+                message: "--id can only be used when exactly one font family is selected"
+                    .to_string(),
+            }
+            .into());
+        }
+        targets[0].package_id_override = Some(package_id);
+    }
+
+    Ok(targets)
+}
+
+fn candidate_families(candidates: &[InstallCandidate]) -> Vec<FamilyName> {
+    let mut seen = BTreeSet::new();
+    let mut families = Vec::new();
+
+    for candidate in candidates {
+        for family in &candidate.families {
+            let normalized = normalize_family_name(family.as_str());
+            if seen.insert(normalized) {
+                families.push(family.clone());
+            }
+        }
+    }
+
+    families
+}
+
+fn candidate_matches_family(candidate: &InstallCandidate, selected: &FamilyName) -> bool {
+    let selected = normalize_family_name(selected.as_str());
+
+    candidate
+        .families
+        .iter()
+        .any(|family| normalize_family_name(family.as_str()) == selected)
+}
+
+fn normalize_family_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn family_activity_label(families: &[FamilyName]) -> String {

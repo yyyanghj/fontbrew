@@ -1414,7 +1414,7 @@ async fn prepare_github_release_parsed_archive(
     result
 }
 
-async fn prepare_provider_package(
+pub(crate) async fn prepare_provider_package(
     paths: &FontbrewPaths,
     resolved: ResolvedProviderPackage,
     options: RemoteInstallOptions,
@@ -3322,7 +3322,7 @@ fn github_install_package_id(
     }
 }
 
-fn package_id_from_repo_name(repo: &str) -> Result<PackageId> {
+pub(crate) fn package_id_from_repo_name(repo: &str) -> Result<PackageId> {
     let mut slug = String::new();
     let mut previous_was_separator = false;
 

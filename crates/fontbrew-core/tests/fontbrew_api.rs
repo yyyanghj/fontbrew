@@ -2,12 +2,14 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use fontbrew_core::{
-    ApplyOptions, ExecutionPolicy, ExtractArchiveRequest, FontFileInput, FontFormat, Fontbrew,
-    FontbrewError, FontbrewOptions, InstallCandidateId, InstallSource, InstallTarget, PackageId,
-    ParseFontsRequest, PlanInstallRequest, PrepareInstallSourceRequest,
+    ApplyOptions, ExecutionPolicy, ExtractArchiveRequest, FetchInstallMetadataRequest,
+    FontFileInput, FontFormat, Fontbrew, FontbrewError, FontbrewOptions, InstallCandidateId,
+    InstallSource, InstallTarget, NoCancellation, NoProgress, PackageId, ParseFontsRequest,
+    PlanInstallRequest, PrepareInstallAssetRequest, PrepareInstallSourceRequest,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -212,6 +214,51 @@ async fn prepare_install_source_returns_candidates_without_installing_single_fam
     );
     assert!(!temp.path().join("store/manifest.json").exists());
     assert!(!temp.path().join("Fonts/Fontbrew").exists());
+}
+
+#[tokio::test]
+async fn staged_local_archive_fetch_metadata_then_prepare_asset_returns_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(
+        &archive_path,
+        &[("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf")],
+    );
+    let fontbrew = fontbrew_for_temp(&temp);
+
+    let metadata = fontbrew
+        .fetch_install_metadata(FetchInstallMetadataRequest {
+            source: InstallSource::LocalPath(archive_path),
+        })
+        .await
+        .expect("fetch local metadata");
+
+    assert_eq!(metadata.package_id(), None);
+    assert!(metadata.assets().is_empty());
+    assert!(staging_entries(&temp).is_empty());
+
+    let mut progress = NoProgress;
+    let preparation = fontbrew
+        .prepare_install_asset(
+            PrepareInstallAssetRequest {
+                metadata,
+                asset_selector: None,
+                format_preference: Vec::new(),
+            },
+            &mut progress,
+            Arc::new(NoCancellation),
+        )
+        .await
+        .expect("prepare local archive");
+
+    assert_eq!(preparation.candidates().len(), 1);
+    assert_eq!(
+        preparation.candidates()[0].package_id,
+        Some(package_id("source-code-pro"))
+    );
+    assert!(!staging_entries(&temp).is_empty());
+    drop(preparation);
+    assert!(staging_entries(&temp).is_empty());
 }
 
 #[tokio::test]

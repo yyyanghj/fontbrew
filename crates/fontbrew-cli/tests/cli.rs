@@ -161,6 +161,7 @@ fn install_list_info_and_remove_local_archive_in_test_home() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stdout(predicate::str::contains("Installed source-code-pro"))
@@ -273,6 +274,7 @@ fn verbose_install_reports_planning_and_apply_progress_on_stderr() {
     fontbrew(&home)
         .args(["-v", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stdout(predicate::str::contains("Installed source-code-pro"))
@@ -292,7 +294,7 @@ fn install_local_archive_with_package_id_override() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
-        .args(["--id", "custom-local"])
+        .args(["--id", "custom-local", "--all"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Installed custom-local"))
@@ -446,6 +448,29 @@ fn json_install_reports_family_selection_required_for_multi_family_source() {
 }
 
 #[test]
+fn json_install_reports_family_selection_required_for_single_family_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let archive_path = temp.path().join("source-code-pro.zip");
+    write_fixture_archive(&archive_path);
+
+    let output = fontbrew(&home)
+        .args(["--json", "install"])
+        .arg(&archive_path)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("family_selection_required"))
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .clone();
+    let json = stdout_json(&output);
+
+    assert_eq!(json["error"]["kind"], "family_selection_required");
+    assert_eq!(json["error"]["families"][0], "Source Code Pro");
+    assert!(staging_is_empty_or_absent(&home));
+}
+
+#[test]
 fn human_install_family_selection_error_points_to_all_flag() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
@@ -524,6 +549,7 @@ fn uninstall_alias_removes_local_archive_package() {
     fontbrew(&home)
         .arg("install")
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
@@ -545,6 +571,7 @@ fn json_install_and_list_write_parseable_stdout_only() {
     let install_output = fontbrew(&home)
         .args(["--json", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -700,6 +727,7 @@ fn install_format_flag_overrides_global_ttf_format_preference() {
     fontbrew(&home)
         .args(["install", "--format", "otf"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stdout(predicate::str::contains("Installed source-code-pro"))
@@ -728,6 +756,7 @@ fn json_install_with_unmanaged_activation_conflict_fails_without_prompting() {
     let output = fontbrew(&home)
         .args(["--json", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .failure()
         .stderr(predicate::str::is_empty())
@@ -768,6 +797,7 @@ fn json_install_with_same_family_overlap_requires_yes_and_reports_structured_ris
     let output = fontbrew(&home)
         .args(["--json", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .failure()
         .stderr(predicate::str::is_empty())
@@ -811,6 +841,7 @@ fn json_install_with_same_family_overlap_and_yes_installs_without_overwriting_un
     let output = fontbrew(&home)
         .args(["--json", "install", "--yes"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -845,6 +876,7 @@ fn json_install_dry_run_with_unmanaged_activation_conflict_succeeds_without_prom
     let output = fontbrew(&home)
         .args(["--json", "install", "--dry-run"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -869,6 +901,7 @@ fn remove_dry_run_reports_planned_removal_without_mutating_package() {
     fontbrew(&home)
         .arg("install")
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
@@ -1076,6 +1109,7 @@ fn json_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
@@ -1112,6 +1146,7 @@ fn human_outdated_reports_local_archive_as_not_updatable_on_stdout_only() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
@@ -1139,6 +1174,7 @@ fn json_update_dry_run_reports_local_package_as_failed_without_prompting() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
@@ -1183,6 +1219,7 @@ fn human_update_dry_run_reports_skipped_package_on_stdout_only() {
     fontbrew(&home)
         .args(["--quiet", "install"])
         .arg(&archive_path)
+        .arg("--all")
         .assert()
         .success();
 
