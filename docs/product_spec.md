@@ -45,7 +45,7 @@ GitHub sources use `owner/repo` syntax:
 fontbrew install rsms/inter
 ```
 
-Fontbrew resolves the latest stable release, selects an installable archive asset, downloads it, parses contained desktop font files, and records the GitHub repo as the update source. If multiple assets match, the user must select one with an asset selector.
+Fontbrew resolves the latest stable release, selects an installable archive asset, downloads it, parses contained desktop font files, and records the GitHub repo as the update source. If multiple assets match, interactive human mode asks the user to select one. Non-interactive and JSON mode require an explicit `--asset` selector.
 
 ### Local Archives
 
@@ -68,7 +68,7 @@ For multi-family GitHub and local archives:
 - Interactive human mode may ask the user to select one or more families.
 - Non-interactive and JSON mode require explicit `--family` or `--all`.
 - `--yes` approves risk prompts but does not silently choose a family boundary.
-- `--id` is allowed for local archives only and cannot be combined with `--family` or `--all`.
+- `--id` is allowed for local archive and direct GitHub sources, and cannot be combined with `--family` or `--all`.
 
 ## Supported Formats
 

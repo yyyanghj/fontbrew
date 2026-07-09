@@ -494,22 +494,20 @@ fn install_rejects_invalid_package_id_override() {
 }
 
 #[test]
-fn install_rejects_package_id_override_for_non_local_sources() {
+fn install_rejects_package_id_override_for_provider_sources() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
 
-    for source in [
-        "source-code-pro",
-        "adobe/source-code-pro",
-        "fontsource:source-code-pro",
-    ] {
+    for source in ["source-code-pro", "fontsource:source-code-pro"] {
         fontbrew(&home)
             .args(["install", source, "--id", "custom-local"])
             .assert()
             .failure()
             .stdout(predicate::str::is_empty())
             .stderr(
-                predicate::str::contains("--id").and(predicate::str::contains("local archive")),
+                predicate::str::contains("--id")
+                    .and(predicate::str::contains("local archive"))
+                    .and(predicate::str::contains("direct GitHub")),
             );
     }
 

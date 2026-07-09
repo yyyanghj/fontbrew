@@ -1936,6 +1936,14 @@ mod tests {
         ) -> CliResult<Vec<fontbrew_core::FamilyName>> {
             unreachable!("self-update does not select font families")
         }
+
+        fn select_asset(
+            &mut self,
+            _package_id: &fontbrew_core::PackageId,
+            _assets: &[String],
+        ) -> CliResult<String> {
+            unreachable!("self-update does not select release assets")
+        }
     }
 
     fn write_script(temp: &TempDir, name: &str, version: &str) -> PathBuf {

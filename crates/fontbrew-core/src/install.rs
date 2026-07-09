@@ -142,7 +142,10 @@ pub(crate) fn ensure_package_id_override_allowed_for_source(
     request: &InstallRequest,
 ) -> Result<()> {
     if request.package_id_override.is_some()
-        && !matches!(request.source, InstallSource::LocalPath(_))
+        && !matches!(
+            request.source,
+            InstallSource::LocalPath(_) | InstallSource::GitHubRepo { .. }
+        )
     {
         return Err(package_id_override_unsupported_source_error());
     }
@@ -221,7 +224,7 @@ pub async fn github_repo_install_plan(
 
     let has_selected_families = !request.selected_families.is_empty();
     let options = RemoteInstallOptions::from_request(request)?;
-    let package_id = package_id_from_repo_name(&repo.repo)?;
+    let package_id = github_install_package_id(&repo, &options)?;
     let requested_source = ManifestSource::GitHub {
         owner: repo.owner.clone(),
         repo: repo.repo.clone(),
@@ -280,7 +283,8 @@ pub async fn github_repo_install_plan_candidate(
 
     let has_selected_families = !request.selected_families.is_empty();
     let options = RemoteInstallOptions::from_request(request)?;
-    let package_id = package_id_from_repo_name(&repo.repo)?;
+    let package_id_override = options.package_id.clone();
+    let package_id = github_install_package_id(&repo, &options)?;
     let requested_source = ManifestSource::GitHub {
         owner: repo.owner.clone(),
         repo: repo.repo.clone(),
@@ -327,7 +331,7 @@ pub async fn github_repo_install_plan_candidate(
         paths,
         parsed_archive,
         package_id_hint,
-        None,
+        package_id_override,
         family_boundary.as_ref(),
         None,
         progress,
@@ -349,7 +353,7 @@ pub async fn github_repo_install_plans(
 
     let selected_families = request.selected_families.clone();
     let options = RemoteInstallOptions::from_request(request)?;
-    let package_id = package_id_from_repo_name(&repo.repo)?;
+    let package_id = github_install_package_id(&repo, &options)?;
     progress.emit(ProgressEvent::ResolvingSource {
         source: repo.label(),
     });
@@ -1034,13 +1038,15 @@ pub(crate) struct RemoteInstallOptions {
 
 impl RemoteInstallOptions {
     fn from_request(request: InstallRequest) -> Result<Self> {
-        if request.package_id_override.is_some() {
+        if request.package_id_override.is_some()
+            && !matches!(request.source, InstallSource::GitHubRepo { .. })
+        {
             return Err(package_id_override_unsupported_source_error());
         }
 
         Ok(Self {
             asset_selector: request.asset_selector,
-            package_id: None,
+            package_id: request.package_id_override,
             progress_package_id: None,
             reinstall: request.reinstall,
             explicit_format_preference: dedupe_formats(request.format_preference),
@@ -1123,7 +1129,7 @@ impl InstallFamilyBoundary {
 
 fn package_id_override_unsupported_source_error() -> FontbrewError {
     FontbrewError::Config {
-        message: "--id is only supported for local archive sources".to_string(),
+        message: "--id is only supported for local archive and direct GitHub sources".to_string(),
     }
 }
 
@@ -2662,6 +2668,16 @@ fn selected_family_names(parsed_files: &[ParsedFontFile]) -> Vec<FamilyName> {
     }
 
     families.into_iter().map(FamilyName::new).collect()
+}
+
+fn github_install_package_id(
+    repo: &GitHubRepo,
+    options: &RemoteInstallOptions,
+) -> Result<PackageId> {
+    match &options.package_id {
+        Some(package_id) => Ok(package_id.clone()),
+        None => package_id_from_repo_name(&repo.repo),
+    }
 }
 
 fn package_id_from_repo_name(repo: &str) -> Result<PackageId> {

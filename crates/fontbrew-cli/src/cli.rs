@@ -11,7 +11,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
     CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FontFormat, FontbrewApp,
-    InfoRequest, InstallBatchReport, InstallPlan, InstallPreparation, InstallReport,
+    FontbrewError, InfoRequest, InstallBatchReport, InstallPlan, InstallPreparation, InstallReport,
     InstallRequest, InstallSource, OutdatedRequest, PackageId, PendingFamilySelection,
     RemoveRequest, SearchRequest, UpdateRequest,
 };
@@ -106,7 +106,7 @@ struct InstallArgs {
     #[arg(
         long = "id",
         conflicts_with_all = ["families", "all_families"],
-        help = "Package ID override for local archive sources"
+        help = "Package ID override for local archive and direct GitHub sources"
     )]
     package_id: Option<String>,
 
@@ -315,6 +315,7 @@ async fn install(
             explicit_families,
             app,
             reporter,
+            confirmer,
             cancellation.clone(),
         )
         .await?;
@@ -324,7 +325,14 @@ async fn install(
     }
 
     let request = install_request_from_args(&args, Vec::new())?;
-    let preparation = prepare_install(request, app, reporter, cancellation.clone()).await?;
+    let preparation = prepare_install_with_asset_selection(
+        request,
+        app,
+        reporter,
+        confirmer,
+        cancellation.clone(),
+    )
+    .await?;
     let plan = match preparation {
         InstallPreparation::Plan(plan) => plan,
         InstallPreparation::FamilySelection(pending) => {
@@ -398,18 +406,34 @@ async fn build_family_install_plans(
     selected_families: Vec<FamilyName>,
     app: &FontbrewApp,
     reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
     cancellation: Arc<dyn CancellationToken>,
 ) -> CliResult<Vec<InstallPlan>> {
     if selected_families.len() > 1 {
         let request = install_request_from_args(args, selected_families)?;
-        return build_install_plans(request, app, reporter, cancellation).await;
+        return build_install_plans_with_asset_selection(
+            request,
+            app,
+            reporter,
+            confirmer,
+            cancellation,
+        )
+        .await;
     }
 
     let mut plans = Vec::new();
 
     for family in selected_families {
         let request = install_request_from_args(args, vec![family])?;
-        match build_install_plan(request, app, reporter, cancellation.clone()).await {
+        match build_install_plan_with_asset_selection(
+            request,
+            app,
+            reporter,
+            confirmer,
+            cancellation.clone(),
+        )
+        .await
+        {
             Ok(plan) => plans.push(plan),
             Err(error) => {
                 for plan in plans {
@@ -421,6 +445,25 @@ async fn build_family_install_plans(
     }
 
     Ok(plans)
+}
+
+async fn prepare_install_with_asset_selection(
+    mut request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<InstallPreparation> {
+    loop {
+        match prepare_install(request.clone(), app, reporter, cancellation.clone()).await {
+            Ok(preparation) => return Ok(preparation),
+            Err(error) => {
+                let asset_selector =
+                    asset_selector_from_ambiguous_assets(error, &request, confirmer)?;
+                request.asset_selector = Some(asset_selector);
+            }
+        }
+    }
 }
 
 async fn prepare_install(
@@ -459,6 +502,25 @@ async fn prepare_selected_families(
     Ok(plans)
 }
 
+async fn build_install_plans_with_asset_selection(
+    mut request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<Vec<InstallPlan>> {
+    loop {
+        match build_install_plans(request.clone(), app, reporter, cancellation.clone()).await {
+            Ok(plans) => return Ok(plans),
+            Err(error) => {
+                let asset_selector =
+                    asset_selector_from_ambiguous_assets(error, &request, confirmer)?;
+                request.asset_selector = Some(asset_selector);
+            }
+        }
+    }
+}
+
 async fn build_install_plans(
     request: InstallRequest,
     app: &FontbrewApp,
@@ -475,6 +537,25 @@ async fn build_install_plans(
     Ok(plans)
 }
 
+async fn build_install_plan_with_asset_selection(
+    mut request: InstallRequest,
+    app: &FontbrewApp,
+    reporter: &mut dyn Reporter,
+    confirmer: &mut dyn Confirmer,
+    cancellation: Arc<dyn CancellationToken>,
+) -> CliResult<InstallPlan> {
+    loop {
+        match build_install_plan(request.clone(), app, reporter, cancellation.clone()).await {
+            Ok(plan) => return Ok(plan),
+            Err(error) => {
+                let asset_selector =
+                    asset_selector_from_ambiguous_assets(error, &request, confirmer)?;
+                request.asset_selector = Some(asset_selector);
+            }
+        }
+    }
+}
+
 async fn build_install_plan(
     request: InstallRequest,
     app: &FontbrewApp,
@@ -489,6 +570,23 @@ async fn build_install_plan(
     progress.finish()?;
 
     Ok(plan)
+}
+
+fn asset_selector_from_ambiguous_assets(
+    error: crate::exit::CliError,
+    request: &InstallRequest,
+    confirmer: &mut dyn Confirmer,
+) -> CliResult<String> {
+    if request.asset_selector.is_some() {
+        return Err(error);
+    }
+
+    match error {
+        crate::exit::CliError::Core(FontbrewError::AmbiguousAssets { package_id, assets }) => {
+            confirmer.select_asset(&package_id, &assets)
+        }
+        error => Err(error),
+    }
 }
 
 fn install_plan_activity_message(request: &InstallRequest) -> String {
@@ -877,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn install_help_documents_local_archive_package_id_override() {
+    fn install_help_documents_package_id_override_sources() {
         let mut command = Cli::command();
         let help = command
             .find_subcommand_mut("install")
@@ -887,6 +985,7 @@ mod tests {
 
         assert!(help.contains("--id"));
         assert!(help.contains("local archive"));
+        assert!(help.contains("direct GitHub"));
     }
 
     #[test]

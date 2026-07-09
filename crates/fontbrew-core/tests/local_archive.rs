@@ -823,24 +823,13 @@ async fn direct_local_archive_selected_family_installs_one_package() {
 }
 
 #[tokio::test]
-async fn package_id_override_is_rejected_for_non_local_sources() {
+async fn package_id_override_is_rejected_for_provider_sources() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = FontbrewApp::with_paths(paths.clone());
 
-    for request in [
-        InstallRequest {
-            source: InstallSource::GitHubRepo {
-                owner: "adobe".to_string(),
-                repo: "source-code-pro".to_string(),
-            },
-            package_id_override: Some(package_id("custom-local")),
-            format_preference: Vec::new(),
-            asset_selector: None,
-            selected_families: Vec::new(),
-            reinstall: false,
-        },
-        InstallRequest {
+    let error = app
+        .install_plan(InstallRequest {
             source: InstallSource::Provider {
                 provider: ProviderKind::Fontsource,
                 id: "source-code-pro".to_string(),
@@ -850,17 +839,14 @@ async fn package_id_override_is_rejected_for_non_local_sources() {
             asset_selector: None,
             selected_families: Vec::new(),
             reinstall: false,
-        },
-    ] {
-        let error = app
-            .install_plan(request)
-            .await
-            .expect_err("override should be local-only");
+        })
+        .await
+        .expect_err("override should be rejected for provider sources");
 
-        assert!(matches!(error, FontbrewError::Config { .. }));
-        assert!(error.to_string().contains("--id"));
-        assert!(error.to_string().contains("local archive"));
-    }
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    assert!(error.to_string().contains("--id"));
+    assert!(error.to_string().contains("local archive"));
+    assert!(error.to_string().contains("direct GitHub"));
 
     assert!(!paths.manifest_path().exists());
     assert!(staging_entries(&paths).is_empty());

@@ -6,9 +6,9 @@ use std::{
 use dialoguer::{
     console::{style, Style, Term},
     theme::ColorfulTheme,
-    MultiSelect,
+    MultiSelect, Select,
 };
-use fontbrew_core::{ExecutionPolicy, FamilyName, PlanRisk};
+use fontbrew_core::{ExecutionPolicy, FamilyName, PackageId, PlanRisk};
 
 use crate::exit::{CliError, CliResult};
 
@@ -31,6 +31,8 @@ pub trait Confirmer {
         target_version: &str,
         assume_yes: bool,
     ) -> CliResult<()>;
+
+    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String>;
 
     fn select_families(&mut self, families: &[FamilyName]) -> CliResult<Vec<FamilyName>>;
 }
@@ -137,9 +139,35 @@ impl Confirmer for HumanConfirmer {
             .map(|index| families[index].clone())
             .collect())
     }
+
+    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String> {
+        if !self.stdin.is_terminal() {
+            return Err(CliError::AssetSelectionRequired {
+                package_id: package_id.clone(),
+                assets: assets.to_vec(),
+            });
+        }
+
+        let theme = selection_theme();
+        let selection = Select::with_theme(&theme)
+            .with_prompt(format!("Select release asset for {}", package_id.as_str()))
+            .items(assets)
+            .interact_on_opt(&Term::stderr())
+            .map_err(io::Error::other)?;
+
+        let Some(selection) = selection else {
+            return Err(CliError::Cancelled);
+        };
+
+        Ok(assets[selection].clone())
+    }
 }
 
 fn family_selection_theme() -> ColorfulTheme {
+    selection_theme()
+}
+
+fn selection_theme() -> ColorfulTheme {
     ColorfulTheme {
         checked_item_prefix: style("[x]".to_string()).for_stderr().green().bold(),
         unchecked_item_prefix: style("[ ]".to_string()).for_stderr().black().bright(),
@@ -237,6 +265,13 @@ impl Confirmer for JsonConfirmer {
                 "approval is required before replacing {} with fontbrew {target_version}; rerun with --yes or --dry-run",
                 executable_path.display()
             ),
+        })
+    }
+
+    fn select_asset(&mut self, package_id: &PackageId, assets: &[String]) -> CliResult<String> {
+        Err(CliError::AssetSelectionRequired {
+            package_id: package_id.clone(),
+            assets: assets.to_vec(),
         })
     }
 

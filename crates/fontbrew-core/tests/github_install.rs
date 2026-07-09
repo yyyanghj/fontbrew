@@ -322,6 +322,49 @@ async fn direct_github_install_selects_latest_stable_release_and_records_github_
 }
 
 #[tokio::test]
+async fn direct_github_install_uses_package_id_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.2.3", "source-code-pro.zip", &source_code_pro_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = app_with_server(paths.clone(), &server);
+    let mut request = github_request("adobe", "source-code-pro", None);
+    request.package_id_override = Some(package_id("custom-remote"));
+
+    let plan = app
+        .install_plan(request)
+        .await
+        .expect("plan GitHub install with package id override");
+    assert_eq!(plan.package_id, package_id("custom-remote"));
+
+    let report = apply_plan(&app, plan).await;
+    assert_eq!(report.package_id, package_id("custom-remote"));
+
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    let record = manifest
+        .get_package(&package_id("custom-remote"))
+        .expect("manifest record");
+    assert_eq!(
+        record.source,
+        ManifestSource::GitHub {
+            owner: "adobe".to_string(),
+            repo: "source-code-pro".to_string(),
+        }
+    );
+    assert!(manifest
+        .get_package(&package_id("source-code-pro"))
+        .is_none());
+}
+
+#[tokio::test]
 async fn direct_github_install_requires_family_selection_for_multiple_families() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);

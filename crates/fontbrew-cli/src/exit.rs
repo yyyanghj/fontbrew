@@ -12,17 +12,41 @@ pub enum CliError {
     Core(FontbrewError),
     Io(io::Error),
     Json(serde_json::Error),
-    ApprovalRequired { risks: Vec<PlanRisk> },
-    PromptUnavailable { risks: Vec<PlanRisk> },
-    FamilySelectionRequired { families: Vec<FamilyName> },
-    SelfUpdateApprovalRequired { message: String },
-    SelfUpdatePromptUnavailable { message: String },
-    SelfUpdateUnavailable { message: String },
-    SelfUpdateInvalidRelease { message: String },
-    SelfUpdateChecksumMismatch { message: String },
-    SelfUpdateFailed { message: String },
+    ApprovalRequired {
+        risks: Vec<PlanRisk>,
+    },
+    PromptUnavailable {
+        risks: Vec<PlanRisk>,
+    },
+    AssetSelectionRequired {
+        package_id: PackageId,
+        assets: Vec<String>,
+    },
+    FamilySelectionRequired {
+        families: Vec<FamilyName>,
+    },
+    SelfUpdateApprovalRequired {
+        message: String,
+    },
+    SelfUpdatePromptUnavailable {
+        message: String,
+    },
+    SelfUpdateUnavailable {
+        message: String,
+    },
+    SelfUpdateInvalidRelease {
+        message: String,
+    },
+    SelfUpdateChecksumMismatch {
+        message: String,
+    },
+    SelfUpdateFailed {
+        message: String,
+    },
     Cancelled,
-    Usage { message: String },
+    Usage {
+        message: String,
+    },
 }
 
 impl CliError {
@@ -33,6 +57,7 @@ impl CliError {
             Self::Json(_) => "json",
             Self::ApprovalRequired { .. } => "approval_required",
             Self::PromptUnavailable { .. } => "prompt_unavailable",
+            Self::AssetSelectionRequired { .. } => "ambiguous_assets",
             Self::FamilySelectionRequired { .. } => "family_selection_required",
             Self::SelfUpdateApprovalRequired { .. } => "approval_required",
             Self::SelfUpdatePromptUnavailable { .. } => "prompt_unavailable",
@@ -61,6 +86,9 @@ impl CliError {
                 "{}; rerun with --yes or --dry-run, or use an interactive terminal",
                 approval_message(risks)
             ),
+            Self::AssetSelectionRequired { package_id, assets } => {
+                ambiguous_assets_message(package_id, assets)
+            }
             Self::FamilySelectionRequired { families } => family_selection_message(families),
             Self::SelfUpdateApprovalRequired { message }
             | Self::SelfUpdatePromptUnavailable { message }

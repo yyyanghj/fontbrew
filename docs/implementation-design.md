@@ -48,13 +48,13 @@ Metadata refresh is an implementation detail. Search and install may use fresh s
 
 GitHub package versions use the selected release tag. The resolver chooses the latest stable release by default. A GitHub font package asset is installable when it is a `.zip` archive containing supported desktop font files.
 
-If multiple installable assets are possible, planning fails unless the user provides an explicit asset selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
+If multiple installable assets are possible, interactive CLI planning asks the user to select one and retries with that asset name. Non-interactive and JSON planning fail unless the user provides an explicit asset selector. The selector is a user-facing disambiguation tool for direct GitHub installs and must not be persisted as a secret or credential.
 
 ## Local Archives
 
 Local archives are copied or read through staging and parsed with the same archive and font pipeline as remote archives. Local archives have no update source.
 
-Package ID override is allowed for local archives only, and cannot be combined with an explicit family selection. Provider and GitHub identities come from their source model and parsed package metadata.
+Package ID override is allowed for local archives and direct GitHub installs, and cannot be combined with an explicit family selection. Provider identities come from their source model and parsed package metadata.
 
 ## Package Boundary
 
