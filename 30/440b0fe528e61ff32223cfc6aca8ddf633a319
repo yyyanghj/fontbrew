@@ -1,0 +1,75 @@
+CONTEXT.md
+  s_a2b70f654edd98::t_e3758f29e7588c 56,60,72
+README.md
+  s_a2b70f654edd98::t_276d820f4f8691 26-27,123-125,148
+crates/fontbrew-cli/src/cli.rs
+  s_a2b70f654edd98::t_373ba22fea6ecd 3,14-17,24-27,163-167,396,398-415,417,609,613-615,622-624,638-639,671,675-677,758-761,765-769
+crates/fontbrew-cli/src/exit.rs
+  s_a2b70f654edd98::t_a459a480e1b545 145-146,187,209-232
+crates/fontbrew-cli/src/reporter.rs
+  s_a2b70f654edd98::t_c718fb5c8b81d4 5-6,8,13-33,36
+crates/fontbrew-cli/src/reporter/human.rs
+  s_a2b70f654edd98::t_36bd05b31a5c0d 13-14,19,777,779
+crates/fontbrew-cli/src/reporter/json.rs
+  s_a2b70f654edd98::t_6e4c568cc7596c 4,10,57
+crates/fontbrew-cli/src/self_update.rs
+  s_a2b70f654edd98::t_0c02a8137db816 1152-1155,1860,1863,1869,1881,1884
+crates/fontbrew-cli/tests/cli.rs
+  s_a2b70f654edd98::t_06c3edd680f110 629-635,678,685-689,1085-1097
+crates/fontbrew-core/src/activation.rs
+  s_a2b70f654edd98::t_37a714662bddfc 2-3,5,12,29,41-59,82,133,135-155,157-158,161,166-168,170-178,181-188,191-218,220-222,224,228-231,234-244,246-271,276-286,288-295,298-310,313,320-323,327,340-345,348-350,354-364,366-396,399,402-417,420,422-427,430-431,434-441,451,453-466,468,569-630
+crates/fontbrew-core/src/config.rs
+  s_a2b70f654edd98::t_481c837138924c 9,62-63,66,69-70,73,78,119-120,435-441
+crates/fontbrew-core/src/error.rs
+  s_a2b70f654edd98::t_5ad54cafe827c5 65-78
+crates/fontbrew-core/src/fontbrew.rs
+  s_a2b70f654edd98::t_99e8dae7e84c04 16-22,40,215,221,241,266-268,344,380,430,459,560-576,585-595,597-598,661,675,706,710-711,714-715,718,720,723,746,758,788-794,796,799,804,807-808,811,815,827
+crates/fontbrew-core/src/install/apply.rs
+  s_a2b70f654edd98::t_f2f15d89414b41 7-8,10-16,35,38,40,42-54,56-60,63-67,70-87,90-94,99,104,106,109,114,116-120,130,135,137,142,144,147,149-153,159,161,164,166,169-195,198-202,204-209,271,273-275,277,279,284,289-290,294,299,304,306-315,318-324,327-331,334,337-347,350-368,370-385
+crates/fontbrew-core/src/install/mod.rs
+  s_a2b70f654edd98::t_d7857d1a63d4ae 18-21,24-25,28-29,46-47,54,60-64,527,540,543,546-547,549-559,580-581,586,593,598,602,609,620,667-692,695-729,1377-1383,1454-1529
+crates/fontbrew-core/src/install/plan.rs
+  s_a2b70f654edd98::t_21d773fb0d491e 21,24,26
+crates/fontbrew-core/src/lib.rs
+  s_a2b70f654edd98::t_73b8724bb3a3e3 24-26,37-38,108-119,122,124-130,133-134,147,149
+crates/fontbrew-core/src/manifest.rs
+  s_a2b70f654edd98::t_4502d05271d7bb 83-89
+crates/fontbrew-core/src/model.rs
+  s_a2b70f654edd98::t_27d2cefc4af315 3,5,584
+crates/fontbrew-core/src/providers/fontsource.rs
+  s_a2b70f654edd98::t_255cc362652c24 8,25,66-82,84-85,89-91
+crates/fontbrew-core/src/update.rs
+  s_a2b70f654edd98::t_6e9470fabdc757 2-4,43-45,49-57,496-497,520-549,566-574,632-639,650-657,659-689,692-702,717-727,737-739,741,748,752-767,781-787,789-791,800-803,809,822-823,825-829
+crates/fontbrew-core/tests/activation.rs
+  s_a2b70f654edd98::t_3a37b256a91e01 7,20,40,52,68,91,101,104-107,109-112,114-127,133-137,142,144,151,156-157,160-161,165-166,188,202,247,271,284-330,353,386
+crates/fontbrew-core/tests/fontsource_provider.rs
+  s_a2b70f654edd98::t_bd809ec2cf8bd6 16-17,310-314,386,388,400-401,403,482-483,485,604,606,766,769-770,845,848,887,890-891,941,944
+crates/fontbrew-core/tests/local_archive.rs
+  s_a2b70f654edd98::t_25f2b0fb400881 12-15,18-19,285-307,646-650,653,655-661,664,681,939,961,986,996,1364-1448,1523,1721,1729-1736,1845,1847-1848,1999
+crates/fontbrew-core/tests/manifest_persistence.rs
+  s_a2b70f654edd98::t_ded90bedc3cb1d 5-6,38
+crates/fontbrew-core/tests/paths_config_filesystem.rs
+  s_a2b70f654edd98::t_d1a5d987729e7e 5,8,65-66,70,72,97,116,127,141,185-191,193-197,202,214-216,218-219,223,237-238,241,243-244,249,251,253-257,259,261,274,288,291,295
+crates/fontbrew-core/tests/search_outdated.rs
+  s_a2b70f654edd98::t_8d1cb03ddcb7b0 6-7,133-135,145-164
+docs/adr/0002-activation-strategy-is-switchable.md
+  s_a2b70f654edd98::t_beac589c5c8615 1,3-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "30440b0fe528e61ff32223cfc6aca8ddf633a319",
+  "prompts": {},
+  "sessions": {
+    "s_a2b70f654edd98": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f4d15-9a68-7412-8529-85342e72a6bf",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
