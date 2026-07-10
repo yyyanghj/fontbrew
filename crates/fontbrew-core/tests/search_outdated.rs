@@ -3,8 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use fontbrew_core::{
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    FamilyName, Fontbrew, FontbrewOptions, OutdatedRequest, PackageId, PackageVersion,
-    SearchRequest,
+    FamilyName, Fontbrew, FontbrewError, FontbrewOptions, OutdatedRequest, PackageId,
+    PackageVersion, SearchRequest,
 };
 
 mod support;
@@ -130,9 +130,9 @@ async fn unprefixed_search_fetches_fontsource_results() {
         .await
         .expect("search should fetch Fontsource metadata");
 
-    assert_eq!(report.results.len(), 1);
-    assert_eq!(report.results[0].package_id, package_id("inter"));
-    assert_eq!(report.results[0].source, "fontsource:inter");
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].package_id, package_id("inter"));
+    assert_eq!(report[0].source, "fontsource:inter");
     assert_eq!(
         server.request_urls(),
         vec![
@@ -140,6 +140,26 @@ async fn unprefixed_search_fetches_fontsource_results() {
             server.url(&fontsource_detail_path("inter"))
         ]
     );
+}
+
+#[tokio::test]
+async fn search_rejects_zero_limit_without_network_requests() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let app = fontbrew_with_paths(paths).with_network_client(Arc::new(server.network_client()));
+
+    let error = app
+        .search(SearchRequest {
+            query: "inter".to_string(),
+            limit: Some(0),
+        })
+        .await
+        .expect_err("zero search limit should be rejected");
+
+    assert!(matches!(error, FontbrewError::Config { .. }));
+    assert!(error.to_string().contains("greater than 0"));
+    assert!(server.request_urls().is_empty());
 }
 
 #[tokio::test]

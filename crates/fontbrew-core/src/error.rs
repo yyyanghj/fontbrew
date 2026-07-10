@@ -62,6 +62,20 @@ pub enum FontbrewError {
     #[error("manifest error: {message}")]
     Manifest { message: String },
 
+    #[error("{operation} committed for {package_ids:?}, but cleanup failed: {message}")]
+    CommittedCleanup {
+        operation: &'static str,
+        package_ids: Vec<PackageId>,
+        message: String,
+    },
+
+    #[error("{operation} commit state is uncertain for {package_ids:?}: {message}")]
+    CommitUncertain {
+        operation: &'static str,
+        package_ids: Vec<PackageId>,
+        message: String,
+    },
+
     #[error("unsupported manifest schema version: found {found:?}, supported {supported}")]
     ManifestSchema { found: Option<u64>, supported: u64 },
 

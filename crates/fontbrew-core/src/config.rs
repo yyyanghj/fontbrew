@@ -4,10 +4,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::activation::ActivationStrategy;
 use crate::error::{FontbrewError, Result};
 use crate::fs::write_atomically;
-use crate::model::{ConfigGetRequest, ConfigReport, ConfigSetRequest, ConfigValue, FontFormat};
+use crate::model::{ConfigValue, FontFormat};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_METADATA_TTL_HOURS: u64 = 24;
@@ -17,7 +16,6 @@ const DEFAULT_UPDATE_CONCURRENCY: usize = 4;
 pub struct FontbrewConfig {
     pub schema_version: u32,
     pub format_preference: Vec<FontFormat>,
-    pub activation_strategy: ActivationStrategy,
     pub metadata_ttl: Duration,
     pub update_concurrency: usize,
 }
@@ -61,30 +59,23 @@ impl FontbrewConfig {
         })
     }
 
-    pub(crate) fn get(path: &Path, request: ConfigGetRequest) -> Result<ConfigReport> {
-        let key = ConfigKey::parse(&request.key)?;
+    pub(crate) fn get(path: &Path, key: &str) -> Result<ConfigValue> {
+        let key = ConfigKey::parse(key)?;
         let config = Self::load(path)?;
 
-        Ok(config.report(key))
+        Ok(key.value(&config))
     }
 
-    pub(crate) fn set(path: &Path, request: ConfigSetRequest) -> Result<ConfigReport> {
-        let key = ConfigKey::parse(&request.key)?;
+    pub(crate) fn set(path: &Path, key: &str, value: &str) -> Result<ConfigValue> {
+        let key = ConfigKey::parse(key)?;
         let mut config = Self::load(path)?;
 
-        key.set_value(&mut config, &request.value)?;
+        key.set_value(&mut config, value)?;
         config.schema_version = CURRENT_SCHEMA_VERSION;
         let content = config.to_toml_string()?;
         write_atomically(path, content.as_bytes())?;
 
-        Ok(config.report(key))
-    }
-
-    fn report(&self, key: ConfigKey) -> ConfigReport {
-        ConfigReport {
-            key: key.as_str().to_string(),
-            value: key.value(self),
-        }
+        Ok(key.value(&config))
     }
 
     fn to_toml_string(&self) -> Result<String> {
@@ -107,7 +98,6 @@ impl Default for FontbrewConfig {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             format_preference: default_format_preference(),
-            activation_strategy: ActivationStrategy::Copy,
             metadata_ttl: Duration::from_secs(DEFAULT_METADATA_TTL_HOURS * 60 * 60),
             update_concurrency: DEFAULT_UPDATE_CONCURRENCY,
         }
@@ -126,7 +116,8 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawInstallConfig {
     format_preference: Option<Vec<RawFontFormat>>,
-    activation_strategy: Option<RawActivationStrategy>,
+    #[serde(rename = "activation_strategy")]
+    _legacy_activation_strategy: Option<RawLegacyActivationStrategy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,11 +172,6 @@ impl RawConfig {
         Ok(FontbrewConfig {
             schema_version,
             format_preference,
-            activation_strategy: install
-                .and_then(|install| install.activation_strategy)
-                .map(RawActivationStrategy::into_activation_strategy)
-                .transpose()?
-                .unwrap_or(ActivationStrategy::Copy),
             metadata_ttl: metadata_ttl_from_hours(metadata_ttl_hours)?,
             update_concurrency: validate_update_concurrency(update_concurrency)?,
         })
@@ -195,7 +181,6 @@ impl RawConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigKey {
     InstallFormatPreference,
-    InstallActivationStrategy,
     NetworkMetadataTtlHours,
     NetworkUpdateConcurrency,
 }
@@ -204,7 +189,6 @@ impl ConfigKey {
     fn parse(key: &str) -> Result<Self> {
         match key {
             "install.format_preference" => Ok(Self::InstallFormatPreference),
-            "install.activation_strategy" => Ok(Self::InstallActivationStrategy),
             "network.metadata_ttl_hours" => Ok(Self::NetworkMetadataTtlHours),
             "network.update_concurrency" => Ok(Self::NetworkUpdateConcurrency),
             _ => Err(FontbrewError::Config {
@@ -216,7 +200,6 @@ impl ConfigKey {
     fn as_str(self) -> &'static str {
         match self {
             Self::InstallFormatPreference => "install.format_preference",
-            Self::InstallActivationStrategy => "install.activation_strategy",
             Self::NetworkMetadataTtlHours => "network.metadata_ttl_hours",
             Self::NetworkUpdateConcurrency => "network.update_concurrency",
         }
@@ -232,9 +215,6 @@ impl ConfigKey {
                     .map(str::to_string)
                     .collect(),
             ),
-            Self::InstallActivationStrategy => ConfigValue::String(
-                activation_strategy_label(config.activation_strategy).to_string(),
-            ),
             Self::NetworkMetadataTtlHours => {
                 ConfigValue::Integer(config.metadata_ttl.as_secs() / 60 / 60)
             }
@@ -248,9 +228,6 @@ impl ConfigKey {
         match self {
             Self::InstallFormatPreference => {
                 config.format_preference = parse_format_preference(raw_value)?;
-            }
-            Self::InstallActivationStrategy => {
-                config.activation_strategy = parse_activation_strategy(raw_value)?;
             }
             Self::NetworkMetadataTtlHours => {
                 let hours = parse_positive_u64(raw_value, self)?;
@@ -312,14 +289,6 @@ fn parse_font_format(value: &str) -> Result<FontFormat> {
         "ttc" => Ok(FontFormat::Ttc),
         "otc" => Ok(FontFormat::Otc),
         _ => invalid_value("install.format_preference"),
-    }
-}
-
-fn parse_activation_strategy(value: &str) -> Result<ActivationStrategy> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "symlink" => Ok(ActivationStrategy::Symlink),
-        "copy" => Ok(ActivationStrategy::Copy),
-        _ => invalid_value("install.activation_strategy"),
     }
 }
 
@@ -397,13 +366,6 @@ pub(crate) fn font_format_label(format: &FontFormat) -> &'static str {
     }
 }
 
-fn activation_strategy_label(strategy: ActivationStrategy) -> &'static str {
-    match strategy {
-        ActivationStrategy::Symlink => "symlink",
-        ActivationStrategy::Copy => "copy",
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct PersistedConfig {
     schema_version: u32,
@@ -421,9 +383,6 @@ impl PersistedConfig {
                     .iter()
                     .map(PersistedFontFormat::from_font_format)
                     .collect(),
-                activation_strategy: PersistedActivationStrategy::from_activation_strategy(
-                    config.activation_strategy,
-                ),
             },
             network: PersistedNetworkConfig {
                 metadata_ttl_hours: config.metadata_ttl.as_secs() / 60 / 60,
@@ -436,7 +395,6 @@ impl PersistedConfig {
 #[derive(Debug, Serialize)]
 struct PersistedInstallConfig {
     format_preference: Vec<PersistedFontFormat>,
-    activation_strategy: PersistedActivationStrategy,
 }
 
 #[derive(Debug, Serialize)]
@@ -465,22 +423,6 @@ impl PersistedFontFormat {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum PersistedActivationStrategy {
-    Symlink,
-    Copy,
-}
-
-impl PersistedActivationStrategy {
-    fn from_activation_strategy(strategy: ActivationStrategy) -> Self {
-        match strategy {
-            ActivationStrategy::Symlink => Self::Symlink,
-            ActivationStrategy::Copy => Self::Copy,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum RawFontFormat {
@@ -490,6 +432,13 @@ enum RawFontFormat {
     Otc,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RawLegacyActivationStrategy {
+    Symlink,
+    Copy,
+}
+
 impl RawFontFormat {
     fn into_font_format(self) -> FontFormat {
         match self {
@@ -497,22 +446,6 @@ impl RawFontFormat {
             Self::Ttf => FontFormat::Ttf,
             Self::Ttc => FontFormat::Ttc,
             Self::Otc => FontFormat::Otc,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RawActivationStrategy {
-    Symlink,
-    Copy,
-}
-
-impl RawActivationStrategy {
-    fn into_activation_strategy(self) -> Result<ActivationStrategy> {
-        match self {
-            Self::Symlink => Ok(ActivationStrategy::Symlink),
-            Self::Copy => Ok(ActivationStrategy::Copy),
         }
     }
 }

@@ -53,11 +53,11 @@ A package whose font files and metadata have been placed in Fontbrew's managed s
 _Avoid_: Activated package
 
 **Activated Package**:
-An installed package whose font files have been exposed to the operating system font loader, typically through the user's font directory.
+An installed package whose font files have been copied into Fontbrew's activation directory so the operating system font loader can discover them.
 _Avoid_: Installed package
 
 **Activation Directory**:
-The Fontbrew-owned location inside the user's operating-system font directory where managed packages are exposed for use. Fontbrew only manages activation artifacts inside this boundary.
+The Fontbrew-owned location inside the user's operating-system font directory where managed font-file copies are exposed for use. Fontbrew only manages activation artifacts inside this boundary.
 _Avoid_: Font directory, managed store
 
 **Managed Store**:
@@ -69,7 +69,7 @@ The local record of managed packages that are actually installed on this machine
 _Avoid_: Lockfile, desired state, project manifest
 
 **Config**:
-The local user preference file that controls Fontbrew behavior such as format preference, metadata TTL, and update concurrency. Config stores the activation strategy key too; `copy` is the current default and `symlink` remains available for compatibility and explicit configuration. Config is the persisted source of default user preferences; command-specific options may override loaded preferences for one operation without changing Config. Config is separate from the manifest because it records preferences rather than installed package facts.
+The local user preference file that controls Fontbrew behavior such as format preference, metadata TTL, and update concurrency. Config is the persisted source of default user preferences; command-specific options may override loaded preferences for one operation without changing Config. Config is separate from the manifest because it records preferences rather than installed package facts.
 _Avoid_: Manifest, lockfile
 
 **Update Source**:

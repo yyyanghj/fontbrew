@@ -7,7 +7,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    activation::ActivationStrategy,
     error::{FontbrewError, Result},
     fs::{write_atomically_with_commit_status, AtomicWriteCommitStatus},
     FamilyName, PackageId, PackageVersion, ProviderKind,
@@ -81,7 +80,13 @@ pub struct ManifestFontFileRecord {
 pub struct ManifestActivationArtifactRecord {
     pub path: PathBuf,
     pub source_path: PathBuf,
-    pub strategy: ActivationStrategy,
+    pub strategy: ManifestActivationStrategy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManifestActivationStrategy {
+    Symlink,
+    Copy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

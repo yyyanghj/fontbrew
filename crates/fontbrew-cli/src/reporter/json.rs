@@ -1,14 +1,13 @@
 use std::io::{self, Write};
 
 use fontbrew_core::{
-    ConfigReport, InfoReport, InstallBatchReport, InstallReport, ListReport, OutdatedReport,
-    ProgressEvent, RemoveReport, SearchReport, UpdateReport,
+    InstallReport, InstallReportSet, OutdatedReport, ProgressEvent, RemoveReport, UpdateReport,
 };
 use serde::Serialize;
 
 use crate::{
     exit::{CliError, CliResult},
-    reporter::Reporter,
+    reporter::{ConfigReport, InfoReport, ListReport, Reporter, SearchReport},
     self_update::SelfUpdateReport,
 };
 
@@ -55,7 +54,7 @@ impl Reporter for JsonReporter {
         self.render_report("install", &report)
     }
 
-    fn render_install_batch_report(&mut self, report: InstallBatchReport) -> CliResult<()> {
+    fn render_install_batch_report(&mut self, report: InstallReportSet) -> CliResult<()> {
         self.render_report("install", &report)
     }
 

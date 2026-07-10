@@ -2,17 +2,14 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
-    },
+    sync::Arc,
 };
 
 use fontbrew_core::{
     fs::{debug_fail_next_atomic_write, DebugAtomicWriteFailure},
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
-    tasks, CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewOptions,
+    CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewError, FontbrewOptions,
     InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
     ProgressSink, UpdatePlan, UpdateRequest,
 };
@@ -47,48 +44,6 @@ impl CancellationToken for CancelWhenInstallStagingExists {
         staging_entries(&self.paths)
             .iter()
             .any(|entry| entry.starts_with("install-"))
-    }
-}
-
-struct ConcurrencyProbe {
-    active: AtomicUsize,
-    max_active: AtomicUsize,
-    release_entries: Mutex<usize>,
-    release_gate: Condvar,
-    wait_for_first_entries: usize,
-}
-
-impl ConcurrencyProbe {
-    fn new(wait_for_first_entries: usize) -> Self {
-        Self {
-            active: AtomicUsize::new(0),
-            max_active: AtomicUsize::new(0),
-            release_entries: Mutex::new(0),
-            release_gate: Condvar::new(),
-            wait_for_first_entries,
-        }
-    }
-
-    fn enter_release_request(&self) {
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_active.fetch_max(active, Ordering::SeqCst);
-
-        if self.wait_for_first_entries > 1 {
-            let mut entries = self.release_entries.lock().expect("release entries lock");
-            if *entries < self.wait_for_first_entries {
-                *entries += 1;
-                self.release_gate.notify_all();
-                while *entries < self.wait_for_first_entries {
-                    entries = self.release_gate.wait(entries).expect("release gate wait");
-                }
-            }
-        }
-
-        self.active.fetch_sub(1, Ordering::SeqCst);
-    }
-
-    fn max_active(&self) -> usize {
-        self.max_active.load(Ordering::SeqCst)
     }
 }
 
@@ -355,23 +310,6 @@ fn zip_with_fixture_fonts(entries: &[(&str, &str)]) -> Vec<u8> {
     }
 
     zip.finish().expect("finish zip").into_inner()
-}
-
-#[test]
-fn task_runner_respects_bounded_limit_without_tokio() {
-    let serial_probe = Arc::new(ConcurrencyProbe::new(1));
-    tasks::map_bounded(vec![0, 1, 2], 1, {
-        let probe = serial_probe.clone();
-        move |_| probe.enter_release_request()
-    });
-    assert_eq!(serial_probe.max_active(), 1);
-
-    let parallel_probe = Arc::new(ConcurrencyProbe::new(2));
-    tasks::map_bounded(vec![0, 1, 2], 2, {
-        let probe = parallel_probe.clone();
-        move |_| probe.enter_release_request()
-    });
-    assert_eq!(parallel_probe.max_active(), 2);
 }
 
 #[tokio::test]
@@ -804,6 +742,94 @@ async fn update_plan_preserves_input_order_when_second_package_finishes_first() 
     );
 }
 
+#[tokio::test]
+async fn update_committed_cleanup_failure_does_not_stop_later_packages() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_manifest(
+        &paths,
+        vec![
+            manifest_record(
+                "source-code-pro",
+                "v1.0.0",
+                "Source Code Pro",
+                ManifestSource::GitHub {
+                    owner: "adobe".to_string(),
+                    repo: "source-code-pro".to_string(),
+                },
+                None,
+            ),
+            manifest_record(
+                "inter",
+                "v1.0.0",
+                "Inter",
+                ManifestSource::GitHub {
+                    owner: "rsms".to_string(),
+                    repo: "inter".to_string(),
+                },
+                None,
+            ),
+        ],
+    );
+
+    let server = LocalHttpServer::start();
+    seed_two_successful_updates(&server, Arc::new(ServerConcurrencyProbe::new(1)));
+    let app = fontbrew_with_server(paths.clone(), &server);
+    let mut progress = NoProgress;
+    let plan = app
+        .update_plan(
+            update_request(
+                vec![package_id("source-code-pro"), package_id("inter")],
+                Some(1),
+            ),
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("plan updates");
+
+    let first_old_store = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("v1.0.0"),
+    );
+    fs::create_dir_all(first_old_store.parent().expect("old store parent"))
+        .expect("create old store parent");
+    fs::write(&first_old_store, b"not a directory").expect("create cleanup failure");
+
+    let error = app
+        .apply_update(
+            plan,
+            ExecutionPolicy::SafeOnly,
+            &mut progress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("committed cleanup failure should be returned after the batch");
+
+    assert!(matches!(
+        error,
+        FontbrewError::CommittedCleanup { package_ids, .. }
+            if package_ids == vec![package_id("source-code-pro")]
+    ));
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
+    assert_eq!(
+        manifest
+            .get_package(&package_id("source-code-pro"))
+            .expect("source code pro record")
+            .version
+            .as_str(),
+        "v2.0.0"
+    );
+    assert_eq!(
+        manifest
+            .get_package(&package_id("inter"))
+            .expect("inter record")
+            .version
+            .as_str(),
+        "v2.0.0"
+    );
+}
+
 fn seed_two_successful_updates(server: &LocalHttpServer, probe: Arc<ServerConcurrencyProbe>) {
     let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
     server.respond_with_probe(
@@ -1132,7 +1158,7 @@ async fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manife
         DebugAtomicWriteFailure::AfterPersist,
     );
 
-    let report = app
+    let error = app
         .apply_update(
             plan,
             ExecutionPolicy::SafeOnly,
@@ -1140,31 +1166,30 @@ async fn update_apply_manifest_write_uncertain_failure_keeps_new_files_if_manife
             Arc::new(NeverCancelled),
         )
         .await
-        .expect("apply reports manifest write failure");
+        .expect_err("uncertain manifest commit should be a top-level error");
 
-    assert!(report.updated.is_empty());
-    assert_eq!(report.skipped.len(), 1);
-    assert!(report.skipped[0]
-        .reason
-        .contains("commit state is uncertain"));
+    assert!(matches!(
+        error,
+        FontbrewError::CommitUncertain { package_ids, .. }
+            if package_ids == vec![package_id("source-code-pro")]
+    ));
 
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
     let record = manifest
         .get_package(&package_id("source-code-pro"))
         .expect("manifest record");
-    if record.version.as_str() == "v2.0.0" {
-        let new_store_path = paths
-            .package_store_dir(
-                &package_id("source-code-pro"),
-                &PackageVersion::new("v2.0.0"),
-            )
-            .join("files/SourceCodePro-Regular.ttf");
-        assert!(new_store_path.exists());
-        assert_activation_copy_matches(
-            &paths.activation_dir().join("SourceCodePro-Regular.ttf"),
-            &new_store_path,
-        );
-    }
+    assert_eq!(record.version.as_str(), "v2.0.0");
+    let new_store_path = paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("v2.0.0"),
+        )
+        .join("files/SourceCodePro-Regular.ttf");
+    assert!(new_store_path.exists());
+    assert_activation_copy_matches(
+        &paths.activation_dir().join("SourceCodePro-Regular.ttf"),
+        &new_store_path,
+    );
 }
 
 #[tokio::test]
@@ -1213,7 +1238,7 @@ async fn update_apply_manifest_write_not_committed_failure_restores_old_state_an
     assert_eq!(report.skipped.len(), 1);
     assert!(report.skipped[0]
         .reason
-        .contains("manifest write did not commit"));
+        .contains("forced atomic write failure at BeforePersist"));
     assert_eq!(
         ManifestStore::read_or_empty(&paths.manifest_path())
             .expect("read manifest")

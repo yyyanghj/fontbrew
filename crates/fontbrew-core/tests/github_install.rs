@@ -12,9 +12,9 @@ use fontbrew_core::{
     manifest::{ManifestSource, ManifestStore},
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, FetchInstallMetadataRequest, Fontbrew,
-    FontbrewError, FontbrewOptions, InstallPreparation, InstallRequest, InstallSource,
-    InstallTarget, PackageId, PlanInstallRequest, PrepareInstallAssetRequest,
-    PrepareInstallSourceRequest, ProgressEvent, ProgressSink,
+    FontbrewError, FontbrewOptions, InstallRequest, InstallSource, InstallTarget, PackageId,
+    PackageVersion, PlanInstallRequest, PrepareInstallAssetRequest, PrepareInstallSourceRequest,
+    ProgressEvent, ProgressSink,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -329,6 +329,147 @@ async fn direct_github_install_selects_latest_stable_release_and_records_github_
             owner: "adobe".to_string(),
             repo: "source-code-pro".to_string(),
         })
+    );
+}
+
+#[tokio::test]
+async fn cross_version_reinstall_removes_previous_package_store_after_commit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let v1_download = server.url(&download_path("source-code-pro-v1.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.0.0", "source-code-pro.zip", &v1_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-v1.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths.clone(), &server);
+    let initial_plan = app
+        .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
+        .expect("plan initial install");
+    apply_plan(&app, initial_plan).await;
+
+    let previous_store = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("v1.0.0"),
+    );
+    assert!(previous_store.exists());
+
+    let v2_download = server.url(&download_path("source-code-pro-v2.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v2.0.0", "source-code-pro.zip", &v2_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-v2.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let mut request = github_request("adobe", "source-code-pro", None);
+    request.reinstall = true;
+    let reinstall_plan = app
+        .install_plan(request)
+        .await
+        .expect("plan cross-version reinstall");
+    let report = apply_plan(&app, reinstall_plan).await;
+
+    let current_store = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("v2.0.0"),
+    );
+    assert_eq!(report.installed_version.as_str(), "v2.0.0");
+    assert!(!previous_store.exists());
+    assert!(current_store.exists());
+    assert_eq!(
+        ManifestStore::read_or_empty(&paths.manifest_path())
+            .expect("read manifest")
+            .get_package(&package_id("source-code-pro"))
+            .expect("manifest record")
+            .version
+            .as_str(),
+        "v2.0.0"
+    );
+}
+
+#[tokio::test]
+async fn failed_cross_version_reinstall_preserves_previous_package_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let server = LocalHttpServer::start();
+    let v1_download = server.url(&download_path("source-code-pro-v1.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v1.0.0", "source-code-pro.zip", &v1_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-v1.zip"),
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths.clone(), &server);
+    let initial_plan = app
+        .install_plan(github_request("adobe", "source-code-pro", None))
+        .await
+        .expect("plan initial install");
+    apply_plan(&app, initial_plan).await;
+
+    let previous_store = paths.package_store_dir(
+        &package_id("source-code-pro"),
+        &PackageVersion::new("v1.0.0"),
+    );
+    let v2_download = server.url(&download_path("source-code-pro-v2.zip"));
+    server.respond_text(
+        &github_releases_path("adobe", "source-code-pro"),
+        github_release_response("v2.0.0", "source-code-pro.zip", &v2_download),
+    );
+    server.respond_bytes(
+        &download_path("source-code-pro-v2.zip"),
+        zip_with_fixture_fonts(&[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
+        ]),
+    );
+    let mut request = github_request("adobe", "source-code-pro", None);
+    request.reinstall = true;
+    let reinstall_plan = app
+        .install_plan(request)
+        .await
+        .expect("plan cross-version reinstall");
+    let conflicting_activation = paths.activation_dir().join("SourceCodePro-Bold.ttf");
+    fs::write(&conflicting_activation, b"unmanaged").expect("write stale activation conflict");
+
+    let error = app
+        .apply_install_plan(
+            reinstall_plan,
+            ExecutionPolicy::AssumeYes,
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("stale activation conflict should fail reinstall");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert!(previous_store.exists());
+    assert!(!paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("v2.0.0")
+        )
+        .exists());
+    assert_eq!(
+        ManifestStore::read_or_empty(&paths.manifest_path())
+            .expect("read manifest")
+            .get_package(&package_id("source-code-pro"))
+            .expect("manifest record")
+            .version
+            .as_str(),
+        "v1.0.0"
+    );
+    assert_eq!(
+        fs::read(&conflicting_activation).expect("read activation conflict"),
+        b"unmanaged"
     );
 }
 
@@ -1010,194 +1151,5 @@ async fn prepare_github_source_discovers_package_id_from_font_family() {
     assert_eq!(
         preparation.candidates()[0].package_id,
         Some(package_id("source-code-pro"))
-    );
-}
-
-#[tokio::test]
-async fn github_asset_selection_flow_downloads_selected_asset_once() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let server = LocalHttpServer::start();
-    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
-    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
-    server.respond_text(
-        &github_releases_path("adobe", "source-code-pro"),
-        format!(
-            r#"[
-  {{
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {{
-        "name": "source-code-pro-desktop.zip",
-        "browser_download_url": "{desktop_download}"
-      }},
-      {{
-        "name": "source-code-pro-nerd-font.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
-      }}
-    ]
-  }}
-]"#
-        ),
-    );
-    server.respond_bytes(
-        &download_path("source-code-pro-desktop.zip"),
-        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
-    );
-    let app = fontbrew_with_server(paths, &server);
-
-    let mut ambiguous_progress = RecordingProgress::default();
-    let preparation = app
-        .prepare_install(
-            github_request("adobe", "source-code-pro", None),
-            &mut ambiguous_progress,
-            Arc::new(NeverCancelled),
-        )
-        .await
-        .expect("ambiguous GitHub assets should return pending selection");
-    let pending = match preparation {
-        InstallPreparation::AssetSelection(pending) => pending,
-        _ => panic!("ambiguous GitHub assets should ask the caller to choose"),
-    };
-    assert_eq!(pending.source_label(), "adobe/source-code-pro");
-    assert_eq!(
-        pending.assets(),
-        &[
-            "source-code-pro-desktop.zip".to_string(),
-            "source-code-pro-nerd-font.zip".to_string()
-        ]
-    );
-    assert_eq!(
-        ambiguous_progress
-            .events
-            .iter()
-            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
-            .count(),
-        0,
-        "ambiguous asset selection should not report archive download progress"
-    );
-    assert_eq!(
-        server.request_urls(),
-        vec![releases_url.clone()],
-        "ambiguous asset selection should resolve release metadata once without downloading"
-    );
-
-    let mut selected_progress = RecordingProgress::default();
-    let preparation = app
-        .prepare_selected_asset(
-            pending,
-            "source-code-pro-desktop.zip".to_string(),
-            &mut selected_progress,
-            Arc::new(NeverCancelled),
-        )
-        .await
-        .expect("selected asset should prepare install");
-    assert_eq!(
-        selected_progress
-            .events
-            .iter()
-            .filter(|event| matches!(event, ProgressEvent::DownloadStarted { .. }))
-            .count(),
-        1,
-        "selected asset prepare should report one archive download"
-    );
-    let plan = match preparation {
-        InstallPreparation::Plan(plan) => plan,
-        InstallPreparation::AssetSelection(_) => panic!("selected asset should not ask again"),
-        InstallPreparation::FamilySelection(_) => panic!("single-family archive should plan"),
-    };
-    let report = apply_plan(&app, plan).await;
-
-    assert_eq!(report.package_id, package_id("source-code-pro"));
-    assert_eq!(
-        server.request_urls(),
-        vec![releases_url, desktop_download],
-        "interactive asset selection should reuse resolved release metadata and download the selected asset only once"
-    );
-}
-
-#[tokio::test]
-async fn github_asset_selection_with_multiple_families_reuses_release_metadata() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let server = LocalHttpServer::start();
-    let releases_url = server.url(&github_releases_path("adobe", "source-code-pro"));
-    let desktop_download = server.url(&download_path("source-code-pro-desktop.zip"));
-    server.respond_text(
-        &github_releases_path("adobe", "source-code-pro"),
-        format!(
-            r#"[
-  {{
-    "tag_name": "v1.2.3",
-    "draft": false,
-    "prerelease": false,
-    "assets": [
-      {{
-        "name": "source-code-pro-desktop.zip",
-        "browser_download_url": "{desktop_download}"
-      }},
-      {{
-        "name": "source-code-pro-nerd-font.zip",
-        "browser_download_url": "https://downloads.example/source-code-pro-nerd-font.zip"
-      }}
-    ]
-  }}
-]"#
-        ),
-    );
-    server.respond_bytes(
-        &download_path("source-code-pro-desktop.zip"),
-        zip_with_fixture_fonts(&[
-            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
-            ("Inter-Variable.ttf", "Inter-Variable.ttf"),
-        ]),
-    );
-    let app = fontbrew_with_server(paths, &server);
-
-    let request = github_request_with_selected_families(
-        "adobe",
-        "source-code-pro",
-        None,
-        vec!["Source Code Pro", "Inter"],
-    );
-    let preparation = app
-        .prepare_install(request, &mut NoProgress, Arc::new(NeverCancelled))
-        .await
-        .expect("ambiguous GitHub assets should return pending selection");
-    let pending = match preparation {
-        InstallPreparation::AssetSelection(pending) => pending,
-        _ => panic!("ambiguous GitHub assets should ask the caller to choose"),
-    };
-
-    let preparation = app
-        .prepare_selected_asset(
-            pending,
-            "source-code-pro-desktop.zip".to_string(),
-            &mut NoProgress,
-            Arc::new(NeverCancelled),
-        )
-        .await
-        .expect("selected asset should prepare families");
-    let pending_families = match preparation {
-        InstallPreparation::FamilySelection(pending) => pending,
-        _ => panic!("multiple selected families should reuse parsed archive"),
-    };
-    let plans = app
-        .prepare_selected_families(
-            pending_families,
-            vec![FamilyName::new("Source Code Pro"), FamilyName::new("Inter")],
-            &mut NoProgress,
-            Arc::new(NeverCancelled),
-        )
-        .await
-        .expect("selected families should plan");
-
-    assert_eq!(plans.len(), 2);
-    assert_eq!(
-        server.request_urls(),
-        vec![releases_url, desktop_download],
-        "selected family planning should not re-request release metadata after asset selection"
     );
 }

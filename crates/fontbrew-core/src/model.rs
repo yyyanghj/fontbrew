@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use crate::activation::{ActivationArtifact, ActivationStrategy};
+use crate::activation::ActivationArtifact;
 use crate::error::{FontbrewError, Result};
+use crate::manifest::ManifestActivationStrategy;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -328,16 +329,6 @@ pub struct InstallRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoveRequest {
-    pub package_id: PackageId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InfoRequest {
-    pub package_id: PackageId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutdatedRequest {
     pub package_ids: Vec<PackageId>,
 }
@@ -352,23 +343,6 @@ pub struct UpdateRequest {
 pub struct SearchRequest {
     pub query: String,
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigGetRequest {
-    pub key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigSetRequest {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConfigReport {
-    pub key: String,
-    pub value: ConfigValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,7 +488,6 @@ pub(crate) struct PreparedInstallPackage {
     pub families: Vec<FamilyName>,
     pub font_files: Vec<PreparedFontFile>,
     pub activation_dir: PathBuf,
-    pub activation_strategy: ActivationStrategy,
     pub activation_artifacts: Vec<ActivationArtifact>,
     pub activation_risks: Vec<PlanRisk>,
     pub staging_dir: PathBuf,
@@ -556,11 +529,6 @@ pub struct InstallReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallBatchReport {
-    pub packages: Vec<InstallReport>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemovePlan {
     pub package_id: PackageId,
     pub changes: Vec<PlannedChange>,
@@ -576,11 +544,6 @@ pub struct RemoveReport {
     pub planned: bool,
     pub font_files: Vec<ManagedFontFile>,
     pub activation_artifacts: Vec<ManagedActivationArtifact>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListReport {
-    pub packages: Vec<ListPackage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -606,11 +569,6 @@ pub struct PackageInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InfoReport {
-    pub package: PackageInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedFontFile {
     pub path: PathBuf,
     pub family: FamilyName,
@@ -623,7 +581,7 @@ pub struct ManagedFontFile {
 pub struct ManagedActivationArtifact {
     pub path: PathBuf,
     pub source_path: PathBuf,
-    pub strategy: ActivationStrategy,
+    pub strategy: ManifestActivationStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,11 +646,6 @@ pub struct UpdatedPackage {
     pub package_id: PackageId,
     pub previous_version: PackageVersion,
     pub installed_version: PackageVersion,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchReport {
-    pub results: Vec<SearchResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

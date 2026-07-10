@@ -1,6 +1,6 @@
 # Fontbrew Product Spec
 
-Fontbrew is a macOS terminal font manager. It installs desktop font files into a Fontbrew-owned managed store, activates them in a Fontbrew-owned user-font directory, tracks local state in a manifest, and updates or removes only packages it installed.
+Fontbrew is a macOS terminal font manager. It installs desktop font files into a Fontbrew-owned managed store, activates tracked copies in a Fontbrew-owned user-font directory, tracks local state in a manifest, and updates or removes only packages it installed.
 
 ## Goals
 
@@ -35,7 +35,7 @@ Users may write the same source explicitly:
 fontbrew install fontsource:inter
 ```
 
-Search queries go to Fontsource and return only candidates that Fontbrew can install as desktop fonts. Fontsource metadata may be cached locally as provider metadata, but downloaded font files are package state, not reusable cache entries.
+Search queries go to Fontsource and return only candidates that Fontbrew can install as desktop fonts. `fontbrew search --limit <n>` accepts only positive limits. Fontsource metadata may be cached locally as provider metadata, but downloaded font files are package state, not reusable cache entries.
 
 ### GitHub Repositories
 
@@ -98,13 +98,24 @@ Fontbrew config lives at `~/.config/fontbrew/config.toml` and uses schema versio
 Supported CLI config keys:
 
 - `install.format_preference`: ordered list of `otf`, `ttf`, `ttc`, and `otc`.
-- `install.activation_strategy`: `copy` by default; `symlink` remains available for compatibility and explicit user configuration.
 - `network.metadata_ttl_hours`: positive integer metadata snapshot TTL.
 - `network.update_concurrency`: positive integer default for `fontbrew update --jobs`.
+
+Fontbrew always activates real font-file copies under `~/Library/Fonts/Fontbrew`.
+Symlink activation is not configurable because macOS does not reliably discover those fonts.
+Schema v1 config files containing the former activation-strategy key remain readable, but the
+value is ignored and removed the next time Fontbrew writes the config.
+Legacy symlink records remain readable only so Fontbrew can safely deactivate and remove them.
 
 ## Safety
 
 - Fontbrew writes only under Fontbrew-owned data, staging, package-store, manifest, provider-metadata, and activation paths.
+- Activation writes tracked font-file copies under `~/Library/Fonts/Fontbrew`; it does not create new font symlinks.
+- Reinstall, update, and remove deactivate each package transactionally; rollback renames staged artifacts back into place so existing copies and legacy symlinks retain their original type.
+- Install, reinstall, remove, update, and public deactivation return the same `CommittedCleanup` core error; CLI JSON projects it as `committed_cleanup`.
+- A committed-cleanup failure during batch update is recorded while later prepared packages continue; the command returns the combined committed-cleanup error after the batch finishes.
+- An uncertain manifest commit returns the top-level `CommitUncertain` core error; CLI JSON projects it as `commit_uncertain`, and update never reports the package as skipped with a successful exit.
+- Cross-version reinstall keeps the previous package store until the new manifest commits, removes it after success, and preserves it when replacement fails.
 - Activation conflicts with non-managed fonts require explicit consent.
 - Remove deletes managed package files and Fontbrew-owned activation artifacts only.
 - Credentials such as `GITHUB_TOKEN` are read from environment variables and are never persisted.
@@ -114,6 +125,7 @@ Supported CLI config keys:
 Human command results go to stdout. Progress, prompts, warnings, diagnostics, and errors go to stderr.
 
 JSON mode emits only structured JSON on stdout. It must not mix progress text, prompts, or diagnostics into stdout.
+Schema version `1` keeps the recorded `strategy` field on managed activation artifacts for compatibility and legacy symlink diagnostics; this field does not make activation strategy configurable.
 
 ## Commands
 

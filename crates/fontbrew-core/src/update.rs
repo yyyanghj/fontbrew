@@ -1,5 +1,7 @@
 use crate::{
-    activation::{deactivate, replace_activation, restore_activation, ActivationPlan},
+    activation::{
+        activation_transaction_error, deactivate, deactivate_transactionally, ActivationPlan,
+    },
     config::FontbrewConfig,
     error::{FontbrewError, Result},
     fetch::NetworkClient,
@@ -38,12 +40,21 @@ pub async fn outdated(
 ) -> Result<OutdatedReport> {
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let records = selected_records(&manifest, &request.package_ids)?;
+    let jobs = FontbrewConfig::load(&paths.config_path())?
+        .update_concurrency
+        .max(1);
     let mut packages = Vec::new();
     let mut not_updatable = Vec::new();
 
-    for record in records {
-        let Some(latest_version) = latest_update_version(paths, &record, network_client).await?
-        else {
+    let checks = records.into_iter().map(|record| async move {
+        let latest_version = latest_update_version(paths, &record, network_client).await?;
+        Ok::<_, FontbrewError>((record, latest_version))
+    });
+    let mut checks = stream::iter(checks).buffered(jobs);
+
+    while let Some(check) = checks.next().await {
+        let (record, latest_version) = check?;
+        let Some(latest_version) = latest_version else {
             not_updatable.push(not_updatable_package(&record, "no update source"));
             continue;
         };
@@ -482,6 +493,8 @@ pub fn apply_update(
     }
     let mut updated = Vec::new();
     let mut skipped = plan.failed.clone();
+    let mut committed_cleanup_package_ids = Vec::new();
+    let mut committed_cleanup_messages = Vec::new();
 
     for prepared_update in &plan.prepared_packages {
         if let Err(error) = ensure_not_cancelled(cancellation) {
@@ -504,11 +517,37 @@ pub fn apply_update(
 
         match result {
             Ok(package) => updated.push(package),
+            Err(FontbrewError::Cancelled) => {
+                cleanup_update_plan(&plan);
+                return Err(FontbrewError::Cancelled);
+            }
+            Err(error @ FontbrewError::CommitUncertain { .. }) => {
+                cleanup_update_plan(&plan);
+                return Err(error);
+            }
+            Err(FontbrewError::CommittedCleanup {
+                package_ids,
+                message,
+                ..
+            }) => {
+                committed_cleanup_package_ids.extend(package_ids);
+                committed_cleanup_messages.push(message);
+                manifest = match ManifestStore::read_or_empty(&paths.manifest_path()) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        cleanup_update_plan(&plan);
+                        committed_cleanup_messages.push(format!(
+                            "could not reload manifest before continuing update batch: {error}"
+                        ));
+                        return Err(FontbrewError::CommittedCleanup {
+                            operation: "update",
+                            package_ids: committed_cleanup_package_ids,
+                            message: committed_cleanup_messages.join("; "),
+                        });
+                    }
+                };
+            }
             Err(error) => {
-                if matches!(error, FontbrewError::Cancelled) {
-                    cleanup_update_plan(&plan);
-                    return Err(error);
-                }
                 skipped.push(UpdatePlanFailure {
                     package_id: prepared_update.summary.package_id.clone(),
                     reason: error.to_string(),
@@ -522,6 +561,15 @@ pub fn apply_update(
                 };
             }
         }
+    }
+
+    if !committed_cleanup_messages.is_empty() {
+        cleanup_update_plan(&plan);
+        return Err(FontbrewError::CommittedCleanup {
+            operation: "update",
+            package_ids: committed_cleanup_package_ids,
+            message: committed_cleanup_messages.join("; "),
+        });
     }
 
     Ok(UpdateReport {
@@ -581,43 +629,77 @@ fn apply_prepared_update(
 
     ensure_not_cancelled(cancellation)?;
     if let Err(error) = install::copy_prepared_files(paths, prepared) {
-        remove_package_store(paths, &prepared.package_store_dir);
-        return Err(error);
+        let cleanup_error = remove_package_store(paths, &prepared.package_store_dir).err();
+        return Err(activation_transaction_error(
+            package_id,
+            "copy prepared package files",
+            error,
+            cleanup_error,
+            None,
+        ));
     }
 
     let old_activation_artifacts = install::activation_artifacts_from_record(&current_record);
     let new_activation_plan = ActivationPlan {
         package_id: package_id.clone(),
         activation_dir: prepared.activation_dir.clone(),
-        strategy: prepared.activation_strategy,
         artifacts: prepared.activation_artifacts.clone(),
         risks: Vec::new(),
     };
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        remove_package_store(paths, &prepared.package_store_dir);
-        return Err(error);
+        let cleanup_error = remove_package_store(paths, &prepared.package_store_dir).err();
+        return Err(activation_transaction_error(
+            package_id,
+            "cancel before deactivating old activation",
+            error,
+            cleanup_error,
+            None,
+        ));
     }
-    let new_activation_artifacts =
-        match replace_activation(&old_activation_artifacts, &new_activation_plan, policy) {
-            Ok(artifacts) => artifacts,
-            Err(error) => {
-                remove_package_store(paths, &prepared.package_store_dir);
-                return Err(error);
-            }
-        };
+    let deactivation_transaction = match deactivate_transactionally(
+        &paths.activation_dir(),
+        package_id,
+        &old_activation_artifacts,
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            let cleanup_error = remove_package_store(paths, &prepared.package_store_dir).err();
+            return Err(activation_transaction_error(
+                package_id,
+                "deactivate old activation",
+                error,
+                cleanup_error,
+                None,
+            ));
+        }
+    };
+    let new_activation_artifacts = match new_activation_plan.apply(policy) {
+        Ok(artifacts) => artifacts,
+        Err(error) => {
+            let cleanup_error = remove_package_store(paths, &prepared.package_store_dir).err();
+            let restore_error = deactivation_transaction.rollback().err();
+            return Err(activation_transaction_error(
+                package_id,
+                "activate new activation",
+                error,
+                cleanup_error,
+                restore_error,
+            ));
+        }
+    };
 
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        let cleanup_error = deactivate(&paths.activation_dir(), &new_activation_artifacts).err();
-        let restore_error = restore_activation(
-            &paths.activation_dir(),
-            package_id,
-            &old_activation_artifacts,
-        )
-        .err();
-        remove_package_store(paths, &prepared.package_store_dir);
-        if cleanup_error.is_none() && restore_error.is_none() {
-            return Err(error);
-        }
+        let cleanup_error = combined_cleanup_error([
+            (
+                "cleanup new activation",
+                deactivate(&paths.activation_dir(), &new_activation_artifacts).err(),
+            ),
+            (
+                "remove new package store",
+                remove_package_store(paths, &prepared.package_store_dir).err(),
+            ),
+        ]);
+        let restore_error = deactivation_transaction.rollback().err();
         return Err(activation_transaction_error(
             package_id,
             "cancel after activate new activation",
@@ -632,12 +714,17 @@ fn apply_prepared_update(
     if let Err(error) = ManifestStore::write_with_commit_status(&paths.manifest_path(), manifest) {
         return match error.commit_status {
             AtomicWriteCommitStatus::NotCommitted => {
-                let cleanup_error = deactivate(&paths.activation_dir(), &new_activation_artifacts)
-                    .err();
-                let restore_error =
-                    restore_activation(&paths.activation_dir(), package_id, &old_activation_artifacts)
-                        .err();
-                remove_package_store(paths, &prepared.package_store_dir);
+                let cleanup_error = combined_cleanup_error([
+                    (
+                        "cleanup new activation",
+                        deactivate(&paths.activation_dir(), &new_activation_artifacts).err(),
+                    ),
+                    (
+                        "remove new package store",
+                        remove_package_store(paths, &prepared.package_store_dir).err(),
+                    ),
+                ]);
+                let restore_error = deactivation_transaction.rollback().err();
                 manifest.insert_package(current_record.clone())?;
 
                 Err(manifest_write_not_committed_error(
@@ -647,19 +734,37 @@ fn apply_prepared_update(
                     restore_error,
                 ))
             }
-            AtomicWriteCommitStatus::Uncertain => Err(FontbrewError::Manifest {
+            AtomicWriteCommitStatus::Uncertain => Err(FontbrewError::CommitUncertain {
+                operation: "update",
+                package_ids: vec![package_id.clone()],
                 message: format!(
-                    "manifest write failed after installing new files and activation; kept new files and activation because commit state is uncertain: {}",
+                    "manifest write failed after installing new files and activation; kept new files and activation: {}",
                     error.error
                 ),
             }),
         };
     }
 
+    let mut cleanup_failures = Vec::new();
     let old_package_store_dir =
         paths.package_store_dir(&current_record.package_id, &current_record.version);
     if old_package_store_dir != prepared.package_store_dir {
-        remove_package_store(paths, &old_package_store_dir);
+        if let Err(error) = remove_package_store(paths, &old_package_store_dir) {
+            cleanup_failures.push(format!(
+                "could not remove old package store at {}: {error}",
+                old_package_store_dir.display()
+            ));
+        }
+    }
+    if let Err(error) = deactivation_transaction.commit() {
+        cleanup_failures.push(format!("could not remove activation backup: {error}"));
+    }
+    if !cleanup_failures.is_empty() {
+        return Err(FontbrewError::CommittedCleanup {
+            operation: "update",
+            package_ids: vec![package_id.clone()],
+            message: cleanup_failures.join("; "),
+        });
     }
 
     progress.emit(ProgressEvent::FinishedPackage {
@@ -673,27 +778,17 @@ fn apply_prepared_update(
     })
 }
 
-fn activation_transaction_error(
-    package_id: &PackageId,
-    phase: &str,
-    primary_error: FontbrewError,
-    cleanup_error: Option<FontbrewError>,
-    restore_error: Option<FontbrewError>,
-) -> FontbrewError {
-    let mut message = format!("{phase} failed: {primary_error}");
+fn combined_cleanup_error(
+    failures: impl IntoIterator<Item = (&'static str, Option<FontbrewError>)>,
+) -> Option<FontbrewError> {
+    let messages = failures
+        .into_iter()
+        .filter_map(|(label, error)| error.map(|error| format!("{label} failed: {error}")))
+        .collect::<Vec<_>>();
 
-    if let Some(error) = cleanup_error {
-        message.push_str(&format!("; cleanup new activation failed: {error}"));
-    }
-
-    if let Some(error) = restore_error {
-        message.push_str(&format!("; restore old activation failed: {error}"));
-    }
-
-    FontbrewError::Conflict {
-        package_id: package_id.clone(),
-        message,
-    }
+    (!messages.is_empty()).then(|| FontbrewError::Manifest {
+        message: messages.join("; "),
+    })
 }
 
 fn manifest_write_not_committed_error(
@@ -702,12 +797,16 @@ fn manifest_write_not_committed_error(
     cleanup_error: Option<FontbrewError>,
     restore_error: Option<FontbrewError>,
 ) -> FontbrewError {
+    if cleanup_error.is_none() && restore_error.is_none() {
+        return primary_error;
+    }
+
     let mut message = format!(
         "manifest write did not commit; restored old activation and removed new package files: {primary_error}"
     );
 
     if let Some(error) = cleanup_error {
-        message.push_str(&format!("; cleanup new activation failed: {error}"));
+        message.push_str(&format!("; cleanup failed: {error}"));
     }
 
     if let Some(error) = restore_error {
@@ -720,14 +819,14 @@ fn manifest_write_not_committed_error(
     }
 }
 
-fn remove_package_store(paths: &FontbrewPaths, package_store_dir: &std::path::Path) {
-    if ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), package_store_dir)
-        .is_err()
-    {
-        return;
-    }
+fn remove_package_store(paths: &FontbrewPaths, package_store_dir: &std::path::Path) -> Result<()> {
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), package_store_dir)?;
 
-    let _ = fs::remove_dir_all(package_store_dir);
+    match fs::remove_dir_all(package_store_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn prepare_failure_reason(error: &FontbrewError) -> String {

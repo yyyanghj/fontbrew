@@ -10,14 +10,13 @@ use std::{
 };
 
 use fontbrew_core::{
-    config::ActivationStrategy, ConfigReport, ConfigValue, FamilyName, FontFormat, InfoReport,
-    InstallReport, ListReport, ManagedActivationArtifact, ManagedFontFile, OutdatedReport,
-    ProgressEvent, RemoveReport, SearchReport, UpdateReport,
+    ConfigValue, FamilyName, FontFormat, InstallReport, ManagedActivationArtifact, ManagedFontFile,
+    OutdatedReport, ProgressEvent, RemoveReport, UpdateReport,
 };
 
 use crate::{
     exit::{CliError, CliResult},
-    reporter::Reporter,
+    reporter::{ConfigReport, InfoReport, ListReport, Reporter, SearchReport},
     self_update::{SelfUpdateReport, SelfUpdateStatus},
 };
 
@@ -775,10 +774,9 @@ fn write_activation_artifacts(
     for artifact in artifacts {
         writeln!(
             stdout,
-            "- {} -> {} ({})",
+            "- {} -> {}",
             artifact.path.display(),
-            artifact.source_path.display(),
-            activation_strategy_label(artifact.strategy)
+            artifact.source_path.display()
         )?;
     }
 
@@ -791,13 +789,6 @@ fn font_format_label(format: FontFormat) -> &'static str {
         FontFormat::Ttf => "ttf",
         FontFormat::Ttc => "ttc",
         FontFormat::Otc => "otc",
-    }
-}
-
-fn activation_strategy_label(strategy: ActivationStrategy) -> &'static str {
-    match strategy {
-        ActivationStrategy::Symlink => "symlink",
-        ActivationStrategy::Copy => "copy",
     }
 }
 

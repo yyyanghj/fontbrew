@@ -15,17 +15,15 @@ pub mod platform;
 mod providers;
 mod search;
 pub mod sources;
-pub mod tasks;
 mod update;
 pub mod version;
 
 pub use error::{FontbrewError, Result};
 pub use fontbrew::{
     ExtractArchiveRequest, ExtractedArchive, FetchInstallMetadataRequest, FontFileInput, Fontbrew,
-    FontbrewOptions, InstallMetadata, InstallPlanSet, InstallPreparation, InstallSourcePreparation,
-    InstallTarget, ParseFontsRequest, ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts,
-    PendingAssetSelection, PendingFamilySelection, PlanInstallRequest, PrepareInstallAssetRequest,
-    PrepareInstallSourceRequest,
+    FontbrewOptions, InstallMetadata, InstallPlanSet, InstallSourcePreparation, InstallTarget,
+    ParseFontsRequest, ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts, PlanInstallRequest,
+    PrepareInstallAssetRequest, PrepareInstallSourceRequest,
 };
 pub use model::*;
 pub use version::*;
@@ -36,8 +34,8 @@ mod tests {
 
     use crate::{
         platform::FontbrewPaths, FamilyName, FontFormat, Fontbrew, FontbrewError, FontbrewOptions,
-        InfoReport, InfoRequest, InstallPlan, InstallRequest, InstallSource, PackageId,
-        PackageInfo, PackageVersion, PlannedChange, ProviderKind,
+        InstallPlan, InstallRequest, InstallSource, PackageId, PackageInfo, PackageVersion,
+        PlannedChange, ProviderKind,
     };
 
     fn package_id(id: &str) -> PackageId {
@@ -107,35 +105,33 @@ mod tests {
     }
 
     #[test]
-    fn info_report_serializes_as_a_frontend_report_shell() {
-        let report = InfoReport {
-            package: PackageInfo {
-                package_id: package_id("jetbrains-mono"),
-                version: PackageVersion::new("2.304"),
-                families: vec![FamilyName::new("JetBrains Mono")],
-                source: "fontsource:jetbrains-mono".to_string(),
-                activated: true,
-                update_source: Some("github:JetBrains/JetBrainsMono".to_string()),
-                managed: true,
-                update_available: None,
-                font_files: Vec::new(),
-                activation_artifacts: Vec::new(),
-            },
+    fn package_info_serializes_as_domain_data() {
+        let package = PackageInfo {
+            package_id: package_id("jetbrains-mono"),
+            version: PackageVersion::new("2.304"),
+            families: vec![FamilyName::new("JetBrains Mono")],
+            source: "fontsource:jetbrains-mono".to_string(),
+            activated: true,
+            update_source: Some("github:JetBrains/JetBrainsMono".to_string()),
+            managed: true,
+            update_available: None,
+            font_files: Vec::new(),
+            activation_artifacts: Vec::new(),
         };
 
-        let json = serde_json::to_value(&report).expect("info report should serialize");
+        let json = serde_json::to_value(&package).expect("package info should serialize");
 
-        assert_eq!(json["package"]["package_id"], "jetbrains-mono");
-        assert_eq!(json["package"]["families"][0], "JetBrains Mono");
-        assert_eq!(json["package"]["activated"], true);
-        assert_eq!(json["package"]["managed"], true);
-        assert_eq!(json["package"]["update_available"], serde_json::Value::Null);
-        assert!(json["package"]["font_files"].is_array());
-        assert!(json["package"]["activation_artifacts"].is_array());
+        assert_eq!(json["package_id"], "jetbrains-mono");
+        assert_eq!(json["families"][0], "JetBrains Mono");
+        assert_eq!(json["activated"], true);
+        assert_eq!(json["managed"], true);
+        assert_eq!(json["update_available"], serde_json::Value::Null);
+        assert!(json["font_files"].is_array());
+        assert!(json["activation_artifacts"].is_array());
     }
 
-    #[tokio::test]
-    async fn package_info_returns_an_info_report_shell() {
+    #[test]
+    fn package_info_returns_domain_data() {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = FontbrewPaths::for_tests(
             temp.path().join("data"),
@@ -148,11 +144,9 @@ mod tests {
             activation_dir: Some(paths.activation_dir()),
         })
         .expect("create Fontbrew");
-        let request = InfoRequest {
-            package_id: package_id("jetbrains-mono"),
-        };
+        let package_id = package_id("jetbrains-mono");
 
-        let result: crate::Result<InfoReport> = fontbrew.package_info(request).await;
+        let result: crate::Result<PackageInfo> = fontbrew.package_info(&package_id);
         let error = result.expect_err("missing package should fail");
 
         assert!(matches!(error, FontbrewError::Manifest { .. }));

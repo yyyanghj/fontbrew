@@ -1,27 +1,23 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io,
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{FontbrewError, Result},
+    manifest::ManifestActivationStrategy,
     ExecutionPolicy, PackageId, PlanRisk,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ActivationStrategy {
-    Symlink,
-    Copy,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationRequest {
     pub package_id: PackageId,
     pub font_files: Vec<PathBuf>,
     pub activation_dir: PathBuf,
-    pub strategy: ActivationStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +26,7 @@ pub struct ActivationArtifact {
     pub package_id: PackageId,
     pub path: PathBuf,
     pub source_path: PathBuf,
-    pub strategy: ActivationStrategy,
+    pub strategy: ManifestActivationStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,9 +34,27 @@ pub struct ActivationArtifact {
 pub struct ActivationPlan {
     pub package_id: PackageId,
     pub activation_dir: PathBuf,
-    pub strategy: ActivationStrategy,
     pub artifacts: Vec<ActivationArtifact>,
     pub risks: Vec<PlanRisk>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactPresence {
+    Present,
+    Missing,
+}
+
+#[derive(Debug)]
+struct StagedActivationArtifact {
+    original_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct DeactivationTransaction {
+    package_id: PackageId,
+    backup_dir: Option<PathBuf>,
+    staged_artifacts: Vec<StagedActivationArtifact>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -65,7 +79,7 @@ impl ActivationPlanner {
                 package_id: request.package_id.clone(),
                 path: artifact_path,
                 source_path: font_file,
-                strategy: request.strategy,
+                strategy: ManifestActivationStrategy::Copy,
             };
 
             if has_unmanaged_conflict(&artifact)? {
@@ -84,7 +98,6 @@ impl ActivationPlanner {
         Ok(ActivationPlan {
             package_id: request.package_id,
             activation_dir: request.activation_dir,
-            strategy: request.strategy,
             artifacts,
             risks,
         })
@@ -117,127 +130,201 @@ impl ActivationPlan {
         reject_existing_symlink(&self.activation_dir)?;
         fs::create_dir_all(&self.activation_dir)?;
 
+        let mut created_artifacts = Vec::new();
         for artifact in &self.artifacts {
-            ensure_path_is_inside(&self.activation_dir, &artifact.path)?;
-            ensure_existing_ancestors_do_not_cross_symlinks(&self.activation_dir, &artifact.path)?;
+            let result = ensure_path_is_inside(&self.activation_dir, &artifact.path)
+                .and_then(|()| {
+                    ensure_existing_ancestors_do_not_cross_symlinks(
+                        &self.activation_dir,
+                        &artifact.path,
+                    )
+                })
+                .and_then(|()| activate_copy(artifact));
 
-            match artifact.strategy {
-                ActivationStrategy::Symlink => activate_symlink(artifact)?,
-                ActivationStrategy::Copy => activate_copy(artifact)?,
+            if let Err(error) = result {
+                let cleanup_error = deactivate(&self.activation_dir, &created_artifacts).err();
+                return match cleanup_error {
+                    Some(cleanup_error) => Err(activation_transaction_error(
+                        &self.package_id,
+                        "activate managed copies",
+                        error,
+                        Some(cleanup_error),
+                        None,
+                    )),
+                    None => Err(error),
+                };
             }
+
+            created_artifacts.push(artifact.clone());
         }
 
-        Ok(self.artifacts.clone())
+        Ok(created_artifacts)
     }
 }
 
 pub fn deactivate(activation_dir: &Path, artifacts: &[ActivationArtifact]) -> Result<()> {
-    for artifact in artifacts {
-        ensure_path_is_inside(activation_dir, &artifact.path)?;
-        ensure_existing_ancestors_do_not_cross_symlinks(activation_dir, &artifact.path)?;
+    let Some(first_artifact) = artifacts.first() else {
+        return Ok(());
+    };
 
-        match artifact.strategy {
-            ActivationStrategy::Symlink => deactivate_symlink(artifact)?,
-            ActivationStrategy::Copy => deactivate_copy(artifact)?,
-        }
+    if artifacts
+        .iter()
+        .any(|artifact| artifact.package_id != first_artifact.package_id)
+    {
+        return Err(FontbrewError::Conflict {
+            package_id: first_artifact.package_id.clone(),
+            message: "activation artifacts from different packages cannot be deactivated together"
+                .to_string(),
+        });
     }
 
-    Ok(())
+    let package_id = first_artifact.package_id.clone();
+    deactivate_transactionally(activation_dir, &package_id, artifacts)?
+        .commit()
+        .map_err(|error| FontbrewError::CommittedCleanup {
+            operation: "deactivation",
+            package_ids: vec![package_id],
+            message: format!("could not remove activation backup: {error}"),
+        })
 }
 
-pub(crate) fn replace_activation(
-    old_artifacts: &[ActivationArtifact],
-    new_plan: &ActivationPlan,
-    policy: ExecutionPolicy,
-) -> Result<Vec<ActivationArtifact>> {
-    let mut removed_old_artifacts = Vec::new();
-    for old_artifact in old_artifacts {
-        if let Err(error) = deactivate(&new_plan.activation_dir, std::slice::from_ref(old_artifact))
-        {
-            let restore_error = restore_activation(
-                &new_plan.activation_dir,
-                &new_plan.package_id,
-                &removed_old_artifacts,
-            )
-            .err();
-            return Err(activation_transaction_error(
-                &new_plan.package_id,
-                "deactivate old activation",
-                error,
-                None,
-                restore_error,
-            ));
-        }
-
-        removed_old_artifacts.push(old_artifact.clone());
-    }
-
-    let mut created_new_artifacts = Vec::new();
-    for new_artifact in &new_plan.artifacts {
-        let single_plan = ActivationPlan {
-            package_id: new_plan.package_id.clone(),
-            activation_dir: new_plan.activation_dir.clone(),
-            strategy: new_plan.strategy,
-            artifacts: vec![new_artifact.clone()],
-            risks: Vec::new(),
-        };
-
-        match single_plan.apply(policy.clone()) {
-            Ok(mut artifacts) => created_new_artifacts.append(&mut artifacts),
-            Err(error) => {
-                let cleanup_error =
-                    deactivate(&new_plan.activation_dir, &created_new_artifacts).err();
-                let restore_error = restore_activation(
-                    &new_plan.activation_dir,
-                    &new_plan.package_id,
-                    old_artifacts,
-                )
-                .err();
-                return Err(activation_transaction_error(
-                    &new_plan.package_id,
-                    "activate new activation",
-                    error,
-                    cleanup_error,
-                    restore_error,
-                ));
-            }
-        }
-    }
-
-    Ok(created_new_artifacts)
-}
-
-pub(crate) fn restore_activation(
+pub(crate) fn deactivate_transactionally(
     activation_dir: &Path,
     package_id: &PackageId,
     artifacts: &[ActivationArtifact],
-) -> Result<()> {
-    if artifacts.is_empty() {
-        return Ok(());
+) -> Result<DeactivationTransaction> {
+    let mut present_artifacts = Vec::new();
+    for artifact in artifacts {
+        match validate_deactivation_artifact(activation_dir, artifact)? {
+            ArtifactPresence::Present => present_artifacts.push(artifact),
+            ArtifactPresence::Missing => {}
+        }
     }
 
-    let plan = ActivationPlan {
+    if present_artifacts.is_empty() {
+        return Ok(DeactivationTransaction::empty(package_id.clone()));
+    }
+
+    let backup_dir = create_deactivation_backup_dir(activation_dir)?;
+    let mut transaction = DeactivationTransaction {
         package_id: package_id.clone(),
-        activation_dir: activation_dir.to_path_buf(),
-        strategy: artifacts[0].strategy,
-        artifacts: artifacts.to_vec(),
-        risks: Vec::new(),
+        backup_dir: Some(backup_dir.clone()),
+        staged_artifacts: Vec::with_capacity(present_artifacts.len()),
     };
-    plan.apply(ExecutionPolicy::AssumeYes)?;
-    Ok(())
+
+    for (index, artifact) in present_artifacts.into_iter().enumerate() {
+        let backup_path = backup_dir.join(index.to_string());
+        if let Err(error) = fs::rename(&artifact.path, &backup_path) {
+            let recovery_error = transaction.rollback().err();
+            return Err(activation_transaction_error(
+                package_id,
+                "stage managed activation",
+                error.into(),
+                None,
+                recovery_error,
+            ));
+        }
+
+        transaction.staged_artifacts.push(StagedActivationArtifact {
+            original_path: artifact.path.clone(),
+            backup_path,
+        });
+    }
+
+    Ok(transaction)
 }
 
-fn activation_transaction_error(
+impl DeactivationTransaction {
+    fn empty(package_id: PackageId) -> Self {
+        Self {
+            package_id,
+            backup_dir: None,
+            staged_artifacts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn rollback(self) -> Result<()> {
+        let mut failures = Vec::new();
+
+        for staged in self.staged_artifacts.iter().rev() {
+            match fs::symlink_metadata(&staged.original_path) {
+                Ok(_) => {
+                    failures.push(format!(
+                        "activation path became occupied during rollback: {}",
+                        staged.original_path.display()
+                    ));
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    failures.push(format!(
+                        "could not inspect activation path {}: {error}",
+                        staged.original_path.display()
+                    ));
+                    continue;
+                }
+            }
+
+            if let Err(error) = fs::rename(&staged.backup_path, &staged.original_path) {
+                failures.push(format!(
+                    "could not restore activation path {}: {error}",
+                    staged.original_path.display()
+                ));
+            }
+        }
+
+        if failures.is_empty() {
+            if let Some(backup_dir) = self.backup_dir {
+                match fs::remove_dir(backup_dir) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => failures.push(format!(
+                        "could not remove empty activation backup directory: {error}"
+                    )),
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(FontbrewError::Conflict {
+                package_id: self.package_id,
+                message: format!("activation rollback failed: {}", failures.join("; ")),
+            })
+        }
+    }
+
+    pub(crate) fn commit(self) -> Result<()> {
+        let Some(backup_dir) = self.backup_dir else {
+            return Ok(());
+        };
+
+        fs::remove_dir_all(&backup_dir).map_err(|error| FontbrewError::Conflict {
+            package_id: self.package_id,
+            message: format!(
+                "could not remove activation transaction backup at {}: {error}",
+                backup_dir.display()
+            ),
+        })
+    }
+}
+
+pub(crate) fn activation_transaction_error(
     package_id: &PackageId,
     phase: &str,
     primary_error: FontbrewError,
     cleanup_error: Option<FontbrewError>,
     restore_error: Option<FontbrewError>,
 ) -> FontbrewError {
+    if cleanup_error.is_none() && restore_error.is_none() {
+        return primary_error;
+    }
+
     let mut message = format!("{phase} failed: {primary_error}");
 
     if let Some(error) = cleanup_error {
-        message.push_str(&format!("; cleanup new activation failed: {error}"));
+        message.push_str(&format!("; cleanup failed: {error}"));
     }
 
     if let Some(error) = restore_error {
@@ -250,108 +337,108 @@ fn activation_transaction_error(
     }
 }
 
-fn deactivate_symlink(artifact: &ActivationArtifact) -> Result<()> {
-    match fs::read_link(&artifact.path) {
-        Ok(target) if target == artifact.source_path => fs::remove_file(&artifact.path)?,
-        Ok(_) => {
-            return Err(FontbrewError::Conflict {
-                package_id: artifact.package_id.clone(),
-                message: format!(
-                    "activation symlink points to a different source: {}",
-                    artifact.path.display()
-                ),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
-            return Err(FontbrewError::Conflict {
-                package_id: artifact.package_id.clone(),
-                message: format!(
-                    "activation artifact already exists and is not a symlink: {}",
-                    artifact.path.display()
-                ),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    Ok(())
-}
-
-fn deactivate_copy(artifact: &ActivationArtifact) -> Result<()> {
+fn validate_deactivation_artifact(
+    activation_dir: &Path,
+    artifact: &ActivationArtifact,
+) -> Result<ArtifactPresence> {
+    ensure_path_is_inside(activation_dir, &artifact.path)?;
+    ensure_existing_ancestors_do_not_cross_symlinks(activation_dir, &artifact.path)?;
     let metadata = match fs::symlink_metadata(&artifact.path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ArtifactPresence::Missing);
+        }
         Err(error) => return Err(error.into()),
     };
 
-    if !metadata.file_type().is_file() {
-        return Err(FontbrewError::Conflict {
-            package_id: artifact.package_id.clone(),
-            message: format!(
-                "activation artifact already exists and is not a managed copy: {}",
-                artifact.path.display()
-            ),
-        });
+    match artifact.strategy {
+        ManifestActivationStrategy::Copy => {
+            if !metadata.file_type().is_file() {
+                return Err(FontbrewError::Conflict {
+                    package_id: artifact.package_id.clone(),
+                    message: format!(
+                        "activation artifact is recorded as a copy but is not a regular file: {}",
+                        artifact.path.display()
+                    ),
+                });
+            }
+
+            if !copy_matches_source(artifact)? {
+                return Err(FontbrewError::Conflict {
+                    package_id: artifact.package_id.clone(),
+                    message: format!(
+                        "activation copy no longer matches managed source: {}",
+                        artifact.path.display()
+                    ),
+                });
+            }
+        }
+        ManifestActivationStrategy::Symlink => {
+            if !metadata.file_type().is_symlink() {
+                return Err(FontbrewError::Conflict {
+                    package_id: artifact.package_id.clone(),
+                    message: format!(
+                        "legacy activation artifact is recorded as a symlink but is not a symlink: {}",
+                        artifact.path.display()
+                    ),
+                });
+            }
+
+            if fs::read_link(&artifact.path)? != artifact.source_path {
+                return Err(FontbrewError::Conflict {
+                    package_id: artifact.package_id.clone(),
+                    message: format!(
+                        "legacy activation symlink points to a different source: {}",
+                        artifact.path.display()
+                    ),
+                });
+            }
+        }
     }
 
-    if !copy_matches_source(artifact)? {
-        return Err(FontbrewError::Conflict {
-            package_id: artifact.package_id.clone(),
-            message: format!(
-                "activation copy no longer matches managed source: {}",
-                artifact.path.display()
-            ),
-        });
-    }
-
-    fs::remove_file(&artifact.path)?;
-    Ok(())
+    Ok(ArtifactPresence::Present)
 }
 
-fn activate_symlink(artifact: &ActivationArtifact) -> Result<()> {
-    match fs::read_link(&artifact.path) {
-        Ok(target) if target == artifact.source_path => return Ok(()),
-        Ok(_) => {
-            return Err(FontbrewError::Conflict {
-                package_id: artifact.package_id.clone(),
-                message: format!(
-                    "activation symlink points to a different source: {}",
-                    artifact.path.display()
-                ),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
-            return Err(FontbrewError::Conflict {
-                package_id: artifact.package_id.clone(),
-                message: format!(
-                    "activation artifact already exists and is not a symlink: {}",
-                    artifact.path.display()
-                ),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
+fn create_deactivation_backup_dir(activation_dir: &Path) -> Result<PathBuf> {
+    static NEXT_TRANSACTION_ID: AtomicU64 = AtomicU64::new(0);
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&artifact.source_path, &artifact.path)?;
-        Ok(())
-    }
+    reject_existing_symlink(activation_dir)?;
+    fs::create_dir_all(activation_dir)?;
 
-    #[cfg(not(unix))]
-    {
-        let _ = artifact;
-        Err(FontbrewError::NotImplemented {
-            operation: "symlink_activation_on_non_unix",
-        })
+    loop {
+        let id = NEXT_TRANSACTION_ID.fetch_add(1, Ordering::Relaxed);
+        let backup_dir = activation_dir.join(format!(
+            ".fontbrew-deactivation-{}-{id}",
+            std::process::id()
+        ));
+        match fs::create_dir(&backup_dir) {
+            Ok(()) => return Ok(backup_dir),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
 fn activate_copy(artifact: &ActivationArtifact) -> Result<()> {
-    match fs::symlink_metadata(&artifact.path) {
-        Ok(_) => {
+    if artifact.strategy != ManifestActivationStrategy::Copy {
+        return Err(FontbrewError::Conflict {
+            package_id: artifact.package_id.clone(),
+            message: "new activation artifacts must use the copy strategy".to_string(),
+        });
+    }
+
+    if let Some(parent) = artifact.path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut source = File::open(&artifact.source_path)?;
+    let mut destination = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&artifact.path)
+    {
+        Ok(destination) => destination,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             return Err(FontbrewError::Conflict {
                 package_id: artifact.package_id.clone(),
                 message: format!(
@@ -360,34 +447,29 @@ fn activate_copy(artifact: &ActivationArtifact) -> Result<()> {
                 ),
             });
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
+    };
+
+    if let Err(error) = io::copy(&mut source, &mut destination) {
+        let cleanup_error = fs::remove_file(&artifact.path)
+            .err()
+            .map(FontbrewError::from);
+        return match cleanup_error {
+            Some(cleanup_error) => Err(activation_transaction_error(
+                &artifact.package_id,
+                "copy activation file",
+                error.into(),
+                Some(cleanup_error),
+                None,
+            )),
+            None => Err(error.into()),
+        };
     }
 
-    if let Some(parent) = artifact.path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&artifact.source_path, &artifact.path)?;
     Ok(())
 }
 
 fn has_unmanaged_conflict(artifact: &ActivationArtifact) -> Result<bool> {
-    match artifact.strategy {
-        ActivationStrategy::Symlink => has_unmanaged_symlink_conflict(artifact),
-        ActivationStrategy::Copy => has_unmanaged_copy_conflict(artifact),
-    }
-}
-
-fn has_unmanaged_symlink_conflict(artifact: &ActivationArtifact) -> Result<bool> {
-    match fs::read_link(&artifact.path) {
-        Ok(target) => Ok(target != artifact.source_path),
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn has_unmanaged_copy_conflict(artifact: &ActivationArtifact) -> Result<bool> {
     match fs::symlink_metadata(&artifact.path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -482,5 +564,67 @@ fn reject_existing_symlink(path: &Path) -> Result<()> {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn package_id() -> PackageId {
+        PackageId::parse("inter").expect("valid package id")
+    }
+
+    #[test]
+    fn transaction_error_preserves_primary_error_without_recovery_failure() {
+        let error = activation_transaction_error(
+            &package_id(),
+            "test transaction",
+            FontbrewError::PathResolution {
+                message: "primary path error".to_string(),
+            },
+            None,
+            None,
+        );
+
+        assert!(matches!(error, FontbrewError::PathResolution { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_rollback_restores_legacy_symlink_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let activation_dir = temp.path().join("activation");
+        let source_path = temp.path().join("source.ttf");
+        let artifact_path = activation_dir.join("Inter-Regular.ttf");
+        fs::create_dir_all(&activation_dir).expect("create activation dir");
+        fs::write(&source_path, b"font").expect("write source");
+        std::os::unix::fs::symlink(&source_path, &artifact_path)
+            .expect("create legacy activation symlink");
+        let artifact = ActivationArtifact {
+            package_id: package_id(),
+            path: artifact_path.clone(),
+            source_path: source_path.clone(),
+            strategy: ManifestActivationStrategy::Symlink,
+        };
+
+        let transaction = deactivate_transactionally(
+            &activation_dir,
+            &artifact.package_id,
+            std::slice::from_ref(&artifact),
+        )
+        .expect("stage legacy activation");
+        assert!(fs::symlink_metadata(&artifact_path).is_err());
+
+        transaction.rollback().expect("restore legacy activation");
+
+        assert!(fs::symlink_metadata(&artifact_path)
+            .expect("restored artifact metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&artifact_path).expect("restored symlink target"),
+            source_path
+        );
     }
 }

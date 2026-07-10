@@ -2,11 +2,10 @@ use std::fs;
 use std::time::Duration;
 
 use fontbrew_core::{
-    config::{ActivationStrategy, FontbrewConfig},
+    config::FontbrewConfig,
     fs::{write_atomically, GlobalFileLock},
     platform::FontbrewPaths,
-    ConfigGetRequest, ConfigSetRequest, ConfigValue, FontFormat, Fontbrew, FontbrewError,
-    FontbrewOptions, PackageId, PackageVersion,
+    ConfigValue, FontFormat, Fontbrew, FontbrewError, FontbrewOptions, PackageId, PackageVersion,
 };
 
 fn package_id(id: &str) -> PackageId {
@@ -63,14 +62,14 @@ fn injected_paths_resolve_all_fontbrew_locations_without_home_access() {
     );
 }
 
-#[tokio::test]
-async fn list_packages_returns_empty_report_from_core_api() {
+#[test]
+fn list_packages_returns_empty_collection_from_core_api() {
     let temp = tempfile::tempdir().expect("tempdir");
     let app = fontbrew_with_paths(test_paths(&temp));
 
-    let report = app.list_packages().await.expect("list packages");
+    let packages = app.list_packages().expect("list packages");
 
-    assert!(report.packages.is_empty());
+    assert!(packages.is_empty());
 }
 
 #[test]
@@ -90,13 +89,12 @@ fn missing_config_file_uses_deterministic_v1_defaults() {
             FontFormat::Otc
         ]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
 }
 
 #[test]
-fn config_file_parses_v1_toml_shape() {
+fn config_file_ignores_legacy_symlink_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -115,19 +113,18 @@ update_concurrency = 2
     )
     .expect("write config");
 
-    let config = FontbrewConfig::load(&config_path).expect("config should parse");
+    let config = FontbrewConfig::load(&config_path).expect("legacy config should parse");
 
     assert_eq!(
         config.format_preference,
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Symlink);
     assert_eq!(config.metadata_ttl, Duration::from_secs(6 * 60 * 60));
     assert_eq!(config.update_concurrency, 2);
 }
 
 #[test]
-fn config_file_accepts_copy_activation_strategy() {
+fn config_file_ignores_legacy_copy_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config_path = temp.path().join("config.toml");
     fs::write(
@@ -141,9 +138,7 @@ activation_strategy = "copy"
     )
     .expect("write config");
 
-    let config = FontbrewConfig::load(&config_path).expect("copy activation should parse");
-
-    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
+    FontbrewConfig::load(&config_path).expect("legacy config should parse");
 }
 
 #[test]
@@ -187,18 +182,24 @@ async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = fontbrew_with_paths(paths.clone());
+    fs::create_dir_all(paths.config_path().parent().expect("config parent"))
+        .expect("create config dir");
+    fs::write(
+        paths.config_path(),
+        "schema_version = 1\n\n[install]\nactivation_strategy = \"symlink\"\n",
+    )
+    .expect("write legacy config");
 
-    let set_report = app
-        .config_set(ConfigSetRequest {
-            key: "install.format_preference".to_string(),
-            value: "ttf,otf".to_string(),
-        })
+    let value = app
+        .config_set(
+            "install.format_preference".to_string(),
+            "ttf,otf".to_string(),
+        )
         .await
         .expect("set format preference");
 
-    assert_eq!(set_report.key, "install.format_preference");
     assert_eq!(
-        set_report.value,
+        value,
         ConfigValue::List(vec!["ttf".to_string(), "otf".to_string()])
     );
     assert!(paths.config_path().exists());
@@ -208,20 +209,18 @@ async fn config_set_persists_v1_toml_and_config_get_reads_known_keys() {
         config.format_preference,
         vec![FontFormat::Ttf, FontFormat::Otf]
     );
-    assert_eq!(config.activation_strategy, ActivationStrategy::Copy);
     assert_eq!(config.metadata_ttl, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.update_concurrency, 4);
+    assert!(!fs::read_to_string(paths.config_path())
+        .expect("read persisted config")
+        .contains("activation_strategy"));
 
-    let get_report = app
-        .config_get(ConfigGetRequest {
-            key: "install.format_preference".to_string(),
-        })
-        .await
+    let value = app
+        .config_get("install.format_preference")
         .expect("get format preference");
 
-    assert_eq!(get_report.key, "install.format_preference");
     assert_eq!(
-        get_report.value,
+        value,
         ConfigValue::List(vec!["ttf".to_string(), "otf".to_string()])
     );
 }
@@ -232,57 +231,34 @@ async fn config_set_and_get_support_all_known_scalar_keys() {
     let app = fontbrew_with_paths(test_paths(&temp));
 
     for (key, raw_value, expected_value) in [
-        (
-            "install.activation_strategy",
-            "copy",
-            ConfigValue::String("copy".to_string()),
-        ),
         ("network.metadata_ttl_hours", "6", ConfigValue::Integer(6)),
         ("network.update_concurrency", "2", ConfigValue::Integer(2)),
     ] {
-        let set_report = app
-            .config_set(ConfigSetRequest {
-                key: key.to_string(),
-                value: raw_value.to_string(),
-            })
+        let value = app
+            .config_set(key.to_string(), raw_value.to_string())
             .await
             .expect("set known config key");
-        assert_eq!(set_report.key, key);
-        assert_eq!(set_report.value, expected_value);
+        assert_eq!(value, expected_value);
 
-        let get_report = app
-            .config_get(ConfigGetRequest {
-                key: key.to_string(),
-            })
-            .await
-            .expect("get known config key");
-        assert_eq!(get_report.key, key);
-        assert_eq!(get_report.value, expected_value);
+        let value = app.config_get(key).expect("get known config key");
+        assert_eq!(value, expected_value);
     }
 }
 
 #[tokio::test]
-async fn config_set_accepts_symlink_activation_strategy() {
+async fn config_set_rejects_removed_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let paths = test_paths(&temp);
-    let app = fontbrew_with_paths(paths.clone());
+    let app = fontbrew_with_paths(test_paths(&temp));
 
-    let report = app
-        .config_set(ConfigSetRequest {
-            key: "install.activation_strategy".to_string(),
-            value: "symlink".to_string(),
-        })
+    let error = app
+        .config_set(
+            "install.activation_strategy".to_string(),
+            "symlink".to_string(),
+        )
         .await
-        .expect("symlink activation should still be configurable");
+        .expect_err("removed activation strategy should be rejected");
 
-    assert_eq!(report.key, "install.activation_strategy");
-    assert_eq!(report.value, ConfigValue::String("symlink".to_string()));
-    assert_eq!(
-        FontbrewConfig::load(&paths.config_path())
-            .expect("load persisted config")
-            .activation_strategy,
-        ActivationStrategy::Symlink
-    );
+    assert!(matches!(error, FontbrewError::Config { .. }));
 }
 
 #[tokio::test]
@@ -295,10 +271,7 @@ async fn config_set_uses_global_write_lock() {
             .expect("hold global write lock");
 
     let error = app
-        .config_set(ConfigSetRequest {
-            key: "network.metadata_ttl_hours".to_string(),
-            value: "6".to_string(),
-        })
+        .config_set("network.metadata_ttl_hours".to_string(), "6".to_string())
         .await
         .expect_err("config set should fail while global lock is held");
 
@@ -312,23 +285,14 @@ async fn config_get_and_set_reject_unknown_keys_and_malformed_values() {
     let app = fontbrew_with_paths(test_paths(&temp));
 
     let unknown_get = app
-        .config_get(ConfigGetRequest {
-            key: "install.unknown".to_string(),
-        })
-        .await
+        .config_get("install.unknown")
         .expect_err("unknown get key should fail");
     let unknown_set = app
-        .config_set(ConfigSetRequest {
-            key: "install.unknown".to_string(),
-            value: "true".to_string(),
-        })
+        .config_set("install.unknown".to_string(), "true".to_string())
         .await
         .expect_err("unknown set key should fail");
     let malformed_set = app
-        .config_set(ConfigSetRequest {
-            key: "network.update_concurrency".to_string(),
-            value: "many".to_string(),
-        })
+        .config_set("network.update_concurrency".to_string(), "many".to_string())
         .await
         .expect_err("malformed set value should fail");
 

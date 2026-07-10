@@ -9,12 +9,14 @@ use std::{
 };
 
 use fontbrew_core::{
-    activation::ActivationStrategy,
-    manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
+    manifest::{
+        ManifestActivationStrategy, ManifestPackageRecord, ManifestSource, ManifestStore,
+        ManifestV1,
+    },
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, FontFormat, Fontbrew, FontbrewError,
-    FontbrewOptions, InfoRequest, InstallRequest, InstallSource, NoCancellation, PackageId,
-    PackageVersion, PlanRisk, ProgressEvent, ProgressSink, ProviderKind, RemovePlan, RemoveRequest,
+    FontbrewOptions, InstallRequest, InstallSource, NoCancellation, PackageId, PackageVersion,
+    PlanRisk, ProgressEvent, ProgressSink, ProviderKind, RemovePlan,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
@@ -278,6 +280,29 @@ async fn apply_install(app: &Fontbrew, archive_path: &Path) -> fontbrew_core::Re
     )
     .await?;
     Ok(())
+}
+
+async fn install_two_font_package(app: &Fontbrew, archive_path: &Path) -> Vec<(PathBuf, PathBuf)> {
+    write_fixture_archive(
+        archive_path,
+        &[
+            ("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+            ("SourceCodePro-Bold.ttf", "SourceCodePro-Bold.ttf"),
+        ],
+    );
+    apply_install(app, archive_path)
+        .await
+        .expect("install two-font package");
+
+    let info = app
+        .package_info(&package_id("source-code-pro"))
+        .expect("read installed package");
+    assert_eq!(info.activation_artifacts.len(), 2);
+
+    info.activation_artifacts
+        .into_iter()
+        .map(|artifact| (artifact.path, artifact.source_path))
+        .collect()
 }
 
 #[tokio::test]
@@ -618,34 +643,25 @@ async fn local_archive_install_list_info_remove_round_trip() {
     assert!(managed_font_path.exists());
     assert_activation_copy_matches(&activation_path, &managed_font_path);
 
-    let list = app.list_packages().await.expect("list packages");
-    assert_eq!(list.packages.len(), 1);
-    assert_eq!(list.packages[0].package_id, package_id("source-code-pro"));
-    assert_eq!(list.packages[0].families[0].as_str(), "Source Code Pro");
-    assert!(list.packages[0].activated);
+    let list = app.list_packages().expect("list packages");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].package_id, package_id("source-code-pro"));
+    assert_eq!(list[0].families[0].as_str(), "Source Code Pro");
+    assert!(list[0].activated);
 
     let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .package_info(&package_id("source-code-pro"))
         .expect("package info");
-    assert_eq!(info.package.package_id, package_id("source-code-pro"));
-    assert_eq!(info.package.version.as_str(), "local");
-    assert_eq!(info.package.families[0].as_str(), "Source Code Pro");
-    assert!(info.package.source.starts_with("local archive:"));
-    assert!(info.package.source.contains("source-code-pro.zip"));
-    assert_eq!(info.package.update_source, None);
-    assert!(info.package.activated);
+    assert_eq!(info.package_id, package_id("source-code-pro"));
+    assert_eq!(info.version.as_str(), "local");
+    assert_eq!(info.families[0].as_str(), "Source Code Pro");
+    assert!(info.source.starts_with("local archive:"));
+    assert!(info.source.contains("source-code-pro.zip"));
+    assert_eq!(info.update_source, None);
+    assert!(info.activated);
 
     let remove_plan = app
-        .remove_plan_with_cancellation(
-            RemoveRequest {
-                package_id: package_id("source-code-pro"),
-            },
-            cancellation.clone(),
-        )
-        .await
+        .plan_remove_with_cancellation(package_id("source-code-pro"), cancellation.clone())
         .expect("plan remove");
     assert!(!remove_plan.changes.is_empty());
     assert!(remove_plan.risks.is_empty());
@@ -662,12 +678,7 @@ async fn local_archive_install_list_info_remove_round_trip() {
     assert!(remove_report.removed);
     assert!(!activation_path.exists());
     assert!(!managed_font_path.exists());
-    assert!(app
-        .list_packages()
-        .await
-        .expect("list after remove")
-        .packages
-        .is_empty());
+    assert!(app.list_packages().expect("list after remove").is_empty());
 }
 
 #[tokio::test]
@@ -925,10 +936,7 @@ async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction()
     assert!(activation_path.exists());
 
     let remove_plan = app
-        .remove_plan(RemoveRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .plan_remove(package_id("source-code-pro"))
         .expect("plan remove");
     let report = app
         .apply_remove(
@@ -950,7 +958,7 @@ async fn remove_cancellation_after_mutation_starts_finishes_remove_transaction()
 }
 
 #[tokio::test]
-async fn install_uses_copy_activation_config() {
+async fn install_ignores_legacy_activation_config() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
     let app = fontbrew_with_paths(paths.clone());
@@ -975,7 +983,7 @@ activation_strategy = "copy"
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
         .await
-        .expect("copy activation config should be accepted");
+        .expect("legacy activation config should be accepted");
 
     let report = app
         .apply_install_plan(
@@ -985,22 +993,12 @@ activation_strategy = "copy"
             Arc::new(NeverCancelled),
         )
         .await
-        .expect("apply copy activation install");
-
+        .expect("apply install");
     let managed_font_path = paths
         .package_store_dir(&package_id("source-code-pro"), &report.installed_version)
         .join("files/SourceCodePro-Regular.ttf");
     let activation_path = paths.activation_dir().join("SourceCodePro-Regular.ttf");
     assert_activation_copy_matches(&activation_path, &managed_font_path);
-    let manifest = ManifestStore::read_or_empty(&paths.manifest_path()).expect("read manifest");
-    let record = manifest
-        .get_package(&package_id("source-code-pro"))
-        .expect("manifest record");
-    assert!(record
-        .activation_artifacts
-        .iter()
-        .all(|artifact| artifact.strategy == ActivationStrategy::Copy));
-    assert!(staging_entries(&paths).is_empty());
 }
 
 #[tokio::test]
@@ -1364,6 +1362,91 @@ async fn failed_reinstall_preserves_existing_activation_and_package_store() {
 }
 
 #[tokio::test]
+async fn failed_multi_artifact_reinstall_restores_previously_deactivated_artifacts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = fontbrew_with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    let artifacts = install_two_font_package(&app, &archive_path).await;
+    let (first_path, first_source_path) = &artifacts[0];
+    let (changed_path, _) = &artifacts[1];
+    fs::write(changed_path, b"changed activation").expect("change second activation");
+
+    let reinstall_plan = app
+        .install_plan(local_archive_request(&archive_path, true))
+        .await
+        .expect("plan reinstall");
+    let error = app
+        .apply_install_plan(
+            reinstall_plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("changed activation should block reinstall");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert_activation_copy_matches(first_path, first_source_path);
+    assert_eq!(
+        fs::read(changed_path).expect("changed activation remains"),
+        b"changed activation"
+    );
+    let info = app
+        .package_info(&package_id("source-code-pro"))
+        .expect("package remains installed");
+    assert!(info.activated);
+    assert!(paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[tokio::test]
+async fn failed_multi_artifact_remove_restores_previously_deactivated_artifacts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let app = fontbrew_with_paths(paths.clone());
+    let archive_path = temp.path().join("source-code-pro.zip");
+    let artifacts = install_two_font_package(&app, &archive_path).await;
+    let (first_path, first_source_path) = &artifacts[0];
+    let (changed_path, _) = &artifacts[1];
+    fs::write(changed_path, b"changed activation").expect("change second activation");
+
+    let remove_plan = app
+        .plan_remove(package_id("source-code-pro"))
+        .expect("plan remove");
+    let error = app
+        .apply_remove(
+            remove_plan,
+            ExecutionPolicy::SafeOnly,
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect_err("changed activation should block remove");
+
+    assert!(matches!(error, FontbrewError::Conflict { .. }));
+    assert_activation_copy_matches(first_path, first_source_path);
+    assert_eq!(
+        fs::read(changed_path).expect("changed activation remains"),
+        b"changed activation"
+    );
+    let info = app
+        .package_info(&package_id("source-code-pro"))
+        .expect("package remains installed");
+    assert!(info.activated);
+    assert!(paths
+        .package_store_dir(
+            &package_id("source-code-pro"),
+            &PackageVersion::new("local"),
+        )
+        .exists());
+}
+
+#[tokio::test]
 async fn repeated_local_archive_install_without_reinstall_is_noop() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -1437,10 +1520,7 @@ async fn remove_keeps_unmanaged_files_config_and_provider_metadata() {
     fs::write(&config_path, b"schema_version = 1\n").expect("write config");
 
     let remove_plan = app
-        .remove_plan(RemoveRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .plan_remove(package_id("source-code-pro"))
         .expect("plan remove");
     let mut progress = NoProgress;
     let cancellation: Arc<dyn CancellationToken> = Arc::new(NeverCancelled);
@@ -1484,9 +1564,7 @@ async fn failed_local_archive_install_does_not_update_manifest() {
     assert!(!paths.manifest_path().exists());
     assert!(app
         .list_packages()
-        .await
         .expect("list after failed install")
-        .packages
         .is_empty());
 }
 
@@ -1640,13 +1718,21 @@ async fn install_plan_reports_activation_artifact_managed_by_another_package() {
             activation_artifacts: vec![fontbrew_core::manifest::ManifestActivationArtifactRecord {
                 path: shared_activation_path.clone(),
                 source_path: other_source_path.clone(),
-                strategy: ActivationStrategy::Symlink,
+                strategy: ManifestActivationStrategy::Symlink,
             }],
             installed_at: "unix:1".to_string(),
             active_version: Some(other_version),
         })
         .expect("insert other package record");
     ManifestStore::write(&paths.manifest_path(), &manifest).expect("write manifest");
+
+    let info = app
+        .package_info(&other_package_id)
+        .expect("read legacy managed package");
+    assert_eq!(
+        info.activation_artifacts[0].strategy,
+        ManifestActivationStrategy::Symlink
+    );
 
     let plan = app
         .install_plan(local_archive_request(&archive_path, false))
@@ -1756,13 +1842,10 @@ async fn reinstall_from_different_source_does_not_adopt_source_even_with_approve
 
     assert!(matches!(error, FontbrewError::Conflict { .. }));
     let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .package_info(&package_id("source-code-pro"))
         .expect("package info after rejected reinstall");
-    assert!(info.package.source.contains("source-code-pro-first.zip"));
-    assert!(!info.package.source.contains("source-code-pro-second.zip"));
+    assert!(info.source.contains("source-code-pro-first.zip"));
+    assert!(!info.source.contains("source-code-pro-second.zip"));
 }
 
 #[cfg(unix)]
@@ -1913,7 +1996,7 @@ async fn stale_install_plan_rechecks_managed_activation_conflict_before_copying(
             activation_artifacts: vec![fontbrew_core::manifest::ManifestActivationArtifactRecord {
                 path: shared_activation_path.clone(),
                 source_path: other_source_path.clone(),
-                strategy: ActivationStrategy::Symlink,
+                strategy: ManifestActivationStrategy::Symlink,
             }],
             installed_at: "unix:1".to_string(),
             active_version: Some(other_version.clone()),

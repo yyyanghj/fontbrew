@@ -165,7 +165,6 @@ pub(super) fn prepare_package_from_parsed_archive_with_config(
         package_id: package_id.clone(),
         font_files: activation_sources,
         activation_dir: paths.activation_dir(),
-        strategy: loaded_config.config.activation_strategy,
     })?;
 
     Ok(PreparedInstallPackage {
@@ -175,7 +174,6 @@ pub(super) fn prepare_package_from_parsed_archive_with_config(
         families,
         font_files,
         activation_dir: activation_plan.activation_dir,
-        activation_strategy: activation_plan.strategy,
         activation_artifacts: activation_plan.artifacts,
         activation_risks: activation_plan.risks,
         staging_dir,

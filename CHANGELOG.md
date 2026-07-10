@@ -2,6 +2,29 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## Unreleased
+
+- 移除 macOS 无法可靠生效的软链接激活策略和对应配置项；安装、重装和更新统一复制
+  真实字体文件，同时兼容读取并忽略 schema v1 的旧配置字段，并保留旧 manifest 软链接
+  的识别与安全卸载。事务回滚通过重命名恢复原激活产物，不会改写 legacy 产物类型。
+- 统一批量安装执行入口，移除未使用的旧安装状态机、任务运行器和仅用于 CLI 包装的
+  core 请求/报告类型，缩小公开 API 与维护面。
+- 复用单个网络客户端，并为 Fontsource 搜索详情请求和过期检查增加有界并发，减少
+  串行网络等待与重复客户端初始化。
+- 安装和移除按 manifest 原子写入的提交状态决定回滚行为，避免提交状态不确定时
+  错误恢复出与 manifest 不一致的本地状态。
+- 修复安装与移除回滚吞掉恢复错误、提交后备份清理失败仍报告成功的问题，并确保
+  激活失败只清理本事务排他创建的字体副本；多字体包失活会先完整校验并事务性暂存
+  全部激活产物，失败时恢复原始状态。
+- 安装、重装、移除、更新和公共失活 API 在状态已提交但清理失败时统一返回
+  committed-cleanup 错误；批量更新会继续处理后续包并在结束后汇总该错误，所有
+  package-store 删除失败也会保留并上报。
+- manifest 提交状态不确定时统一返回顶层 commit-uncertain 错误，更新不再以 skipped
+  和成功退出码掩盖可能已经落盘的新状态；跨版本重装仅在新 manifest 提交后删除旧
+  package store，失败时保留旧版本。
+- 保持 JSON schema v1 的激活产物 `strategy` 字段兼容，移除重复的批量安装报告
+  类型；`search --limit` 现在只接受大于零的值。
+
 ## 0.0.13 - 2026-07-10
 
 - 将 `fontbrew-core` 的单体 `FontbrewApp` 接口替换为可组合的 `Fontbrew` API，

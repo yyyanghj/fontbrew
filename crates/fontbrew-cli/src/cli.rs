@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    num::NonZeroUsize,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -10,18 +11,20 @@ use std::{
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use fontbrew_core::{
     sources::{GitHubRepo, ProviderSource},
-    CancellationToken, ConfigGetRequest, ConfigSetRequest, FamilyName, FetchInstallMetadataRequest,
-    FontFormat, Fontbrew, FontbrewError, FontbrewOptions, InfoRequest, InstallBatchReport,
-    InstallCandidate, InstallMetadata, InstallPlan, InstallReport, InstallSource, InstallTarget,
-    OutdatedRequest, PackageId, PlanInstallRequest, PrepareInstallAssetRequest, RemoveRequest,
-    SearchRequest, UpdateRequest,
+    ApplyOptions, CancellationToken, FamilyName, FetchInstallMetadataRequest, FontFormat, Fontbrew,
+    FontbrewError, FontbrewOptions, InstallCandidate, InstallMetadata, InstallReport,
+    InstallReportSet, InstallSource, InstallTarget, OutdatedRequest, PackageId, PlanInstallRequest,
+    PrepareInstallAssetRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
     confirm::{ConfirmationOptions, Confirmer, HumanConfirmer, JsonConfirmer},
     exit::{self, CliResult},
     progress::ProgressAdapter,
-    reporter::{human::HumanReporter, json::JsonReporter, Reporter},
+    reporter::{
+        human::HumanReporter, json::JsonReporter, ConfigReport, InfoReport, ListReport, Reporter,
+        SearchReport,
+    },
     self_update::{self as self_update_command, SelfUpdateRequest},
 };
 
@@ -157,8 +160,11 @@ struct SearchArgs {
     )]
     query: Option<String>,
 
-    #[arg(long, help = "Maximum number of results to return")]
-    limit: Option<usize>,
+    #[arg(
+        long,
+        help = "Maximum number of results to return; must be greater than 0"
+    )]
+    limit: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Args)]
@@ -387,12 +393,28 @@ async fn install(
             targets,
         })?;
         reporter.finish_activity()?;
-        plans.into_install_plans()
+        plans
     };
-    let reports =
-        apply_install_plans(&args, plans, fontbrew, reporter, confirmer, cancellation).await?;
+    let policy = confirmer.execution_policy(
+        plans.risks(),
+        ConfirmationOptions {
+            assume_yes: args.yes,
+            dry_run: args.dry_run,
+        },
+    )?;
+    reporter.start_activity("Applying install plan")?;
+    let mut progress = ProgressAdapter::new(reporter);
+    let reports = fontbrew
+        .apply_install_with_progress_and_cancellation(
+            plans,
+            ApplyOptions { policy },
+            &mut progress,
+            cancellation,
+        )
+        .await?;
+    progress.finish()?;
 
-    render_install_reports(reporter, reports)
+    render_install_reports(reporter, reports.packages)
 }
 
 fn selected_family_args(families: &[String]) -> Vec<FamilyName> {
@@ -576,60 +598,6 @@ fn install_source_label(source: &InstallSource) -> String {
     }
 }
 
-async fn apply_install_plans(
-    args: &InstallArgs,
-    mut plans: Vec<InstallPlan>,
-    fontbrew: &Fontbrew,
-    reporter: &mut dyn Reporter,
-    confirmer: &mut dyn Confirmer,
-    cancellation: Arc<dyn CancellationToken>,
-) -> CliResult<Vec<InstallReport>> {
-    let risks = plans
-        .iter()
-        .flat_map(|plan| plan.risks.iter().cloned())
-        .collect::<Vec<_>>();
-    let policy = match confirmer.execution_policy(
-        &risks,
-        ConfirmationOptions {
-            assume_yes: args.yes,
-            dry_run: args.dry_run,
-        },
-    ) {
-        Ok(policy) => policy,
-        Err(error) => {
-            for plan in plans {
-                fontbrew.discard_install_plan(plan);
-            }
-            return Err(error);
-        }
-    };
-
-    plans.reverse();
-    let mut reports = Vec::new();
-    while let Some(plan) = plans.pop() {
-        let result: CliResult<InstallReport> = {
-            reporter.start_activity(&format!("Applying install {}", plan.package_id.as_str()))?;
-            let mut progress = ProgressAdapter::new(reporter);
-            let report = fontbrew
-                .apply_install_plan(plan, policy.clone(), &mut progress, cancellation.clone())
-                .await?;
-            progress.finish()?;
-            Ok(report)
-        };
-        match result {
-            Ok(report) => reports.push(report),
-            Err(error) => {
-                for plan in plans {
-                    fontbrew.discard_install_plan(plan);
-                }
-                return Err(error);
-            }
-        };
-    }
-
-    Ok(reports)
-}
-
 fn render_install_reports(
     reporter: &mut dyn Reporter,
     mut reports: Vec<InstallReport>,
@@ -638,18 +606,22 @@ fn render_install_reports(
         return reporter.render_install_report(reports.remove(0));
     }
 
-    reporter.render_install_batch_report(InstallBatchReport { packages: reports })
+    reporter.render_install_batch_report(InstallReportSet { packages: reports })
 }
 
 async fn list(fontbrew: &Fontbrew, reporter: &mut dyn Reporter) -> CliResult<()> {
-    let report = fontbrew.list_packages().await?;
+    let report = ListReport {
+        packages: fontbrew.list_packages()?,
+    };
 
     reporter.render_list_report(report)
 }
 
 async fn info(args: InfoArgs, fontbrew: &Fontbrew, reporter: &mut dyn Reporter) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
-    let report = fontbrew.package_info(InfoRequest { package_id }).await?;
+    let report = InfoReport {
+        package: fontbrew.package_info(&package_id)?,
+    };
 
     reporter.render_info_report(report)
 }
@@ -663,14 +635,8 @@ async fn remove(
 ) -> CliResult<()> {
     let package_id = PackageId::parse(args.package_id)?;
     reporter.start_activity(&format!("Planning removal {}", package_id.as_str()))?;
-    let plan_result = fontbrew
-        .remove_plan_with_cancellation(
-            RemoveRequest {
-                package_id: package_id.clone(),
-            },
-            cancellation.clone(),
-        )
-        .await;
+    let plan_result =
+        fontbrew.plan_remove_with_cancellation(package_id.clone(), cancellation.clone());
     reporter.finish_activity()?;
     let plan = plan_result?;
     let policy = confirmer.execution_policy(
@@ -702,11 +668,13 @@ async fn search(
     let report_result = fontbrew
         .search(SearchRequest {
             query: args.query.unwrap_or_default(),
-            limit: args.limit,
+            limit: args.limit.map(NonZeroUsize::get),
         })
         .await;
     reporter.finish_activity()?;
-    let report = report_result?;
+    let report = SearchReport {
+        results: report_result?,
+    };
 
     reporter.render_search_report(report)
 }
@@ -787,18 +755,18 @@ async fn config(
 ) -> CliResult<()> {
     match args.command {
         ConfigCommand::Get(args) => {
-            let report = fontbrew
-                .config_get(ConfigGetRequest { key: args.key })
-                .await?;
+            let report = ConfigReport {
+                value: fontbrew.config_get(&args.key)?,
+                key: args.key,
+            };
             reporter.render_config_get_report(report)
         }
         ConfigCommand::Set(args) => {
-            let report = fontbrew
-                .config_set(ConfigSetRequest {
-                    key: args.key,
-                    value: args.value,
-                })
-                .await?;
+            let key = args.key;
+            let report = ConfigReport {
+                value: fontbrew.config_set(key.clone(), args.value).await?,
+                key,
+            };
             reporter.render_config_set_report(report)
         }
     }

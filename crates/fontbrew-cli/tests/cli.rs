@@ -626,10 +626,13 @@ fn json_install_and_list_write_parseable_stdout_only() {
         .as_array()
         .expect("activation_artifacts should be an array")
         .iter()
-        .any(|artifact| artifact["path"]
-            .as_str()
-            .expect("activation artifact path should be a string")
-            .contains("SourceCodePro-Regular.ttf")));
+        .any(|artifact| {
+            artifact["path"]
+                .as_str()
+                .expect("activation artifact path should be a string")
+                .contains("SourceCodePro-Regular.ttf")
+                && artifact["strategy"] == "Copy"
+        }));
 }
 
 #[test]
@@ -672,38 +675,18 @@ fn config_set_and_get_report_human_and_json_values() {
 }
 
 #[test]
-fn config_set_accepts_copy_activation_strategy() {
+fn config_set_rejects_removed_activation_strategy() {
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("home");
 
     fontbrew(&home)
         .args(["config", "set", "install.activation_strategy", "copy"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "install.activation_strategy = copy",
-        ))
-        .stderr(predicate::str::is_empty());
-
-    let output = fontbrew(&home)
-        .args([
-            "--json",
-            "config",
-            "set",
-            "install.activation_strategy",
-            "copy",
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .clone();
-    let json = stdout_json(&output);
-
-    assert_eq!(json["schemaVersion"], 1);
-    assert_eq!(json["command"], "config_set");
-    assert_eq!(json["report"]["key"], "install.activation_strategy");
-    assert_eq!(json["report"]["value"], "copy");
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "unknown config key: install.activation_strategy",
+        ));
 }
 
 #[test]
@@ -1097,6 +1080,19 @@ fn human_search_reports_fontsource_result_fields_on_stdout_only() {
     assert!(stdout.contains("source-code-pro"));
     assert!(stdout.contains("Source Code Pro"));
     assert!(stdout.contains("fontsource:source-code-pro"));
+}
+
+#[test]
+fn search_rejects_zero_limit_during_argument_parsing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+
+    fontbrew(&home)
+        .args(["search", "inter", "--limit", "0"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("non-zero"));
 }
 
 #[test]

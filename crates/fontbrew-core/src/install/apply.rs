@@ -4,13 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::fs::AtomicWriteCommitStatus;
+
 use super::{
-    cleanup_staging, deactivate, dedupe_family_names, ensure_existing_path_does_not_cross_symlink,
-    ensure_not_cancelled, ensure_path_inside, family_matches_any, font_format_from_manifest_format,
-    installed_at_now, manifest_font_format, operation_suffix, prepared_package_id,
-    ActivationArtifact, ActivationPlan, ActivationPlanner, ActivationRequest, CancellationToken,
-    ExecutionPolicy, FamilyName, FontMetadataReader, FontbrewError, FontbrewPaths, InstallPlan,
-    InstallReport, ManagedActivationArtifact, ManagedFontFile, ManifestActivationArtifactRecord,
+    cleanup_staging, deactivate, deactivate_transactionally, dedupe_family_names,
+    ensure_existing_path_does_not_cross_symlink, ensure_not_cancelled, ensure_path_inside,
+    family_matches_any, font_format_from_manifest_format, installed_at_now, manifest_font_format,
+    operation_suffix, prepared_package_id, ActivationArtifact, ActivationPlan, ActivationPlanner,
+    ActivationRequest, CancellationToken, DeactivationTransaction, ExecutionPolicy, FamilyName,
+    FontMetadataReader, FontbrewError, FontbrewPaths, InstallPlan, InstallReport,
+    ManagedActivationArtifact, ManagedFontFile, ManifestActivationArtifactRecord,
     ManifestFontFileRecord, ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
     PackageId, PackageVersion, PlanRisk, PreparedInstallPackage, PreparedInstallSource,
     ProgressEvent, ProgressSink, ProviderKind, Result, TtfParserMetadataReader,
@@ -29,130 +32,181 @@ pub(super) fn apply_prepared_install(
     reject_unmanaged_package_store(paths, manifest, prepared)?;
     ensure_not_cancelled(cancellation)?;
 
-    let previous_activation_artifacts = if prepared.reinstall {
+    let previous_record = if prepared.reinstall {
         manifest
             .get_package(&prepared_package_id(prepared))
-            .map(activation_artifacts_from_record)
-            .unwrap_or_default()
+            .cloned()
     } else {
-        Vec::new()
+        None
     };
-
-    deactivate(&paths.activation_dir(), &previous_activation_artifacts)?;
-
-    if let Err(error) = ensure_not_cancelled(cancellation) {
-        let _ = restore_activation_artifacts(paths, &previous_activation_artifacts);
-        return Err(error);
+    let previous_activation_artifacts = previous_record
+        .as_ref()
+        .map(activation_artifacts_from_record)
+        .unwrap_or_default();
+    let previous_package_store_dir = previous_record
+        .as_ref()
+        .map(|record| paths.package_store_dir(&record.package_id, &record.version));
+    if let Some(previous_package_store_dir) = &previous_package_store_dir {
+        ensure_existing_path_does_not_cross_symlink(
+            &paths.managed_store_dir(),
+            previous_package_store_dir,
+        )?;
     }
 
-    let backup_dir = match backup_existing_package_store_for_reinstall(paths, prepared) {
+    let deactivation_transaction = deactivate_transactionally(
+        &paths.activation_dir(),
+        &prepared_package_id(prepared),
+        &previous_activation_artifacts,
+    )?;
+
+    if let Err(error) = ensure_not_cancelled(cancellation) {
+        return Err(with_recovery_error(
+            "install cancelled after deactivating the previous package",
+            error,
+            deactivation_transaction.rollback(),
+        ));
+    }
+
+    let backup_result = match previous_record
+        .as_ref()
+        .zip(previous_package_store_dir.as_ref())
+    {
+        Some((record, previous_store_dir))
+            if previous_store_dir == &prepared.package_store_dir && previous_store_dir.exists() =>
+        {
+            backup_package_store(
+                paths,
+                &record.package_id,
+                &record.version,
+                previous_store_dir,
+            )
+            .map(Some)
+        }
+        _ => Ok(None),
+    };
+    let backup_dir = match backup_result {
         Ok(backup_dir) => backup_dir,
         Err(error) => {
-            let _ = restore_activation_artifacts(paths, &previous_activation_artifacts);
-            return Err(error);
+            return Err(with_recovery_error(
+                "package store backup failed after deactivating the previous package",
+                error,
+                deactivation_transaction.rollback(),
+            ));
         }
     };
 
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        rollback_install(
+        let recovery = rollback_package_state(
             paths,
             &[],
             &prepared.package_store_dir,
             backup_dir.as_deref(),
-            &previous_activation_artifacts,
+            deactivation_transaction,
         );
-        return Err(error);
+        return Err(with_recovery_error("install cancelled", error, recovery));
     }
     if let Err(error) = copy_prepared_files(paths, prepared) {
-        rollback_install(
+        let recovery = rollback_package_state(
             paths,
             &[],
             &prepared.package_store_dir,
             backup_dir.as_deref(),
-            &previous_activation_artifacts,
+            deactivation_transaction,
         );
-        return Err(error);
+        return Err(with_recovery_error(
+            "copy prepared package files failed",
+            error,
+            recovery,
+        ));
     }
 
     let activation_plan = ActivationPlan {
         package_id: prepared_package_id(prepared),
         activation_dir: prepared.activation_dir.clone(),
-        strategy: prepared.activation_strategy,
         artifacts: prepared.activation_artifacts.clone(),
         risks: Vec::new(),
     };
-    let preexisting_activation_paths =
-        match preexisting_activation_artifact_paths(&activation_plan.artifacts) {
-            Ok(paths) => paths,
-            Err(error) => {
-                rollback_install(
-                    paths,
-                    &[],
-                    &prepared.package_store_dir,
-                    backup_dir.as_deref(),
-                    &previous_activation_artifacts,
-                );
-                return Err(error);
-            }
-        };
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        rollback_install(
+        let recovery = rollback_package_state(
             paths,
             &[],
             &prepared.package_store_dir,
             backup_dir.as_deref(),
-            &previous_activation_artifacts,
+            deactivation_transaction,
         );
-        return Err(error);
+        return Err(with_recovery_error("install cancelled", error, recovery));
     }
     let activation_artifacts = match activation_plan.apply(policy) {
         Ok(artifacts) => artifacts,
         Err(error) => {
-            let rollback_artifacts = rollback_activation_artifacts(
-                &activation_plan.artifacts,
-                &preexisting_activation_paths,
-            );
-            rollback_install(
+            let recovery = rollback_package_state(
                 paths,
-                &rollback_artifacts,
+                &[],
                 &prepared.package_store_dir,
                 backup_dir.as_deref(),
-                &previous_activation_artifacts,
+                deactivation_transaction,
             );
-            return Err(error);
+            return Err(with_recovery_error(
+                "activate package failed",
+                error,
+                recovery,
+            ));
         }
     };
     let manifest_record = manifest_record_from_prepared(prepared, activation_artifacts.clone())?;
 
     if let Err(error) = ensure_not_cancelled(cancellation) {
-        let rollback_artifacts =
-            rollback_activation_artifacts(&activation_artifacts, &preexisting_activation_paths);
-        rollback_install(
+        let recovery = rollback_package_state(
             paths,
-            &rollback_artifacts,
+            &activation_artifacts,
             &prepared.package_store_dir,
             backup_dir.as_deref(),
-            &previous_activation_artifacts,
+            deactivation_transaction,
         );
-        return Err(error);
+        return Err(with_recovery_error("install cancelled", error, recovery));
     }
     manifest.insert_package(manifest_record.clone())?;
-    if let Err(error) = ManifestStore::write(&paths.manifest_path(), manifest) {
-        let rollback_artifacts =
-            rollback_activation_artifacts(&activation_artifacts, &preexisting_activation_paths);
-        rollback_install(
-            paths,
-            &rollback_artifacts,
-            &prepared.package_store_dir,
-            backup_dir.as_deref(),
-            &previous_activation_artifacts,
-        );
-        return Err(error);
+    if let Err(error) = ManifestStore::write_with_commit_status(&paths.manifest_path(), manifest) {
+        match error.commit_status {
+            AtomicWriteCommitStatus::NotCommitted => {
+                let recovery = rollback_package_state(
+                    paths,
+                    &activation_artifacts,
+                    &prepared.package_store_dir,
+                    backup_dir.as_deref(),
+                    deactivation_transaction,
+                );
+                return Err(with_recovery_error(
+                    "manifest write was not committed",
+                    error.error,
+                    recovery,
+                ));
+            }
+            AtomicWriteCommitStatus::Uncertain => {
+                return Err(FontbrewError::CommitUncertain {
+                    operation: "installation",
+                    package_ids: vec![manifest_record.package_id.clone()],
+                    message: format!(
+                        "manifest write failed after installing package files and activation; kept the new state: {}",
+                        error.error
+                    ),
+                });
+            }
+        }
     }
 
-    if let Some(backup_dir) = backup_dir {
-        let _ = fs::remove_dir_all(backup_dir);
+    let mut package_cleanup_dirs = backup_dir.into_iter().collect::<Vec<_>>();
+    if let Some(previous_store_dir) = previous_package_store_dir {
+        if previous_store_dir != prepared.package_store_dir {
+            package_cleanup_dirs.push(previous_store_dir);
+        }
     }
+    cleanup_committed_backups(
+        "installation",
+        &manifest_record.package_id,
+        package_cleanup_dirs,
+        deactivation_transaction,
+    )?;
 
     progress.emit(ProgressEvent::FinishedPackage {
         package_id: manifest_record.package_id.clone(),
@@ -214,110 +268,121 @@ fn reject_unmanaged_package_store(
     Ok(())
 }
 
-fn backup_existing_package_store_for_reinstall(
+pub(super) fn backup_package_store(
     paths: &FontbrewPaths,
-    prepared: &PreparedInstallPackage,
-) -> Result<Option<PathBuf>> {
-    if prepared.reinstall && prepared.package_store_dir.exists() {
-        return backup_existing_package_store(paths, prepared).map(Some);
-    }
-
-    Ok(None)
-}
-
-fn backup_existing_package_store(
-    paths: &FontbrewPaths,
-    prepared: &PreparedInstallPackage,
+    package_id: &PackageId,
+    version: &PackageVersion,
+    package_store_dir: &Path,
 ) -> Result<PathBuf> {
-    ensure_existing_path_does_not_cross_symlink(
-        &paths.managed_store_dir(),
-        &prepared.package_store_dir,
-    )?;
+    ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), package_store_dir)?;
 
-    let backup_dir = prepared
-        .package_store_dir
+    let backup_dir = package_store_dir
         .parent()
         .ok_or_else(|| FontbrewError::PathResolution {
             message: format!(
                 "package store path has no parent: {}",
-                prepared.package_store_dir.display()
+                package_store_dir.display()
             ),
         })?
         .join(format!(
             ".{}-{}-backup-{}",
-            prepared_package_id(prepared).as_str(),
-            prepared.version.as_str(),
+            package_id.as_str(),
+            version.as_str(),
             operation_suffix()?
         ));
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &backup_dir)?;
-    fs::rename(&prepared.package_store_dir, &backup_dir)?;
+    fs::rename(package_store_dir, &backup_dir)?;
 
     Ok(backup_dir)
 }
 
-fn rollback_install(
+pub(super) fn rollback_package_state(
     paths: &FontbrewPaths,
     activation_artifacts: &[ActivationArtifact],
     package_store_dir: &Path,
     backup_dir: Option<&Path>,
-    previous_activation_artifacts: &[ActivationArtifact],
-) {
-    let _ = deactivate(&paths.activation_dir(), activation_artifacts);
-    rollback_package_store(package_store_dir, backup_dir);
-    let _ = restore_activation_artifacts(paths, previous_activation_artifacts);
+    deactivation_transaction: DeactivationTransaction,
+) -> Result<()> {
+    let mut failures = Vec::new();
+
+    if let Err(error) = deactivate(&paths.activation_dir(), activation_artifacts) {
+        failures.push(format!("cleanup new activation failed: {error}"));
+    }
+    if let Err(error) = rollback_package_store(package_store_dir, backup_dir) {
+        failures.push(format!("restore package store failed: {error}"));
+    }
+    if let Err(error) = deactivation_transaction.rollback() {
+        failures.push(format!("restore previous activation failed: {error}"));
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(FontbrewError::Manifest {
+            message: format!("package state rollback failed: {}", failures.join("; ")),
+        })
+    }
 }
 
-fn restore_activation_artifacts(
-    paths: &FontbrewPaths,
-    artifacts: &[ActivationArtifact],
-) -> Result<()> {
-    for artifact in artifacts {
-        let plan = ActivationPlan {
-            package_id: artifact.package_id.clone(),
-            activation_dir: paths.activation_dir(),
-            strategy: artifact.strategy,
-            artifacts: vec![artifact.clone()],
-            risks: Vec::new(),
-        };
-        plan.apply(ExecutionPolicy::AssumeYes)?;
+fn rollback_package_store(package_store_dir: &Path, backup_dir: Option<&Path>) -> Result<()> {
+    remove_dir_all_if_exists(package_store_dir)?;
+
+    if let Some(backup_dir) = backup_dir {
+        fs::rename(backup_dir, package_store_dir)?;
     }
 
     Ok(())
 }
 
-fn preexisting_activation_artifact_paths(artifacts: &[ActivationArtifact]) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
+pub(super) fn with_recovery_error(
+    context: &str,
+    primary_error: FontbrewError,
+    recovery: Result<()>,
+) -> FontbrewError {
+    match recovery {
+        Ok(()) => primary_error,
+        Err(recovery_error) => FontbrewError::Manifest {
+            message: format!("{context}: {primary_error}; recovery also failed: {recovery_error}"),
+        },
+    }
+}
 
-    for artifact in artifacts {
-        match fs::read_link(&artifact.path) {
-            Ok(target) if target == artifact.source_path => paths.push(artifact.path.clone()),
-            Ok(_) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    || error.kind() == std::io::ErrorKind::InvalidInput => {}
-            Err(error) => return Err(error.into()),
+pub(super) fn cleanup_committed_backups(
+    operation: &'static str,
+    package_id: &PackageId,
+    package_cleanup_dirs: Vec<PathBuf>,
+    deactivation_transaction: DeactivationTransaction,
+) -> Result<()> {
+    let mut failures = Vec::new();
+
+    for cleanup_dir in package_cleanup_dirs {
+        if let Err(error) = remove_dir_all_if_exists(&cleanup_dir) {
+            failures.push(format!(
+                "could not remove package cleanup directory at {}: {error}",
+                cleanup_dir.display()
+            ));
         }
     }
+    if let Err(error) = deactivation_transaction.commit() {
+        failures.push(format!("could not remove activation backup: {error}"));
+    }
 
-    Ok(paths)
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(FontbrewError::CommittedCleanup {
+            operation,
+            package_ids: vec![package_id.clone()],
+            message: failures.join("; "),
+        })
+    }
 }
 
-fn rollback_activation_artifacts(
-    artifacts: &[ActivationArtifact],
-    preexisting_paths: &[PathBuf],
-) -> Vec<ActivationArtifact> {
-    artifacts
-        .iter()
-        .filter(|artifact| !preexisting_paths.iter().any(|path| path == &artifact.path))
-        .cloned()
-        .collect()
-}
-
-fn rollback_package_store(package_store_dir: &Path, backup_dir: Option<&Path>) {
-    let _ = fs::remove_dir_all(package_store_dir);
-
-    if let Some(backup_dir) = backup_dir {
-        let _ = fs::rename(backup_dir, package_store_dir);
+fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -630,7 +695,6 @@ fn current_activation_artifact_risks(
             .map(|artifact| artifact.source_path.clone())
             .collect(),
         activation_dir: prepared.activation_dir.clone(),
-        strategy: prepared.activation_strategy,
     })?;
 
     Ok(activation_plan.risks)

@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use futures::{stream, StreamExt};
 use serde::Deserialize;
 
 use super::{ProviderFontAsset, ProviderSearchRequest, ResolvedProviderPackage};
@@ -21,6 +22,7 @@ use crate::{
 };
 
 const DEFAULT_PROVIDER_SEARCH_LIMIT: usize = 25;
+const DEFAULT_PROVIDER_SEARCH_CONCURRENCY: usize = 4;
 
 pub(crate) type FontsourceResolvedPackage = ResolvedProviderPackage;
 type FontsourceFontAsset = ProviderFontAsset;
@@ -60,30 +62,33 @@ impl<'a> FontsourceProvider<'a> {
         matched_records
             .sort_by(|left, right| left.0.cmp(&right.0).then(left.1.id.cmp(&right.1.id)));
 
-        let mut results = Vec::new();
         let result_limit = provider_search_limit(request.limit);
-        for (_, record) in matched_records {
-            if results.len() >= result_limit {
-                break;
-            }
+        let detail_requests = matched_records.into_iter().filter_map(|(_, record)| {
+            PackageId::parse(&record.id).ok()?;
+            Some(async move {
+                let detail = fetch_fontsource_detail(
+                    self.network_client,
+                    &snapshot_store,
+                    &record.id,
+                    metadata_ttl,
+                    true,
+                )
+                .await?;
+                search_result_from_detail(&detail)
+            })
+        });
+        let mut detail_results =
+            stream::iter(detail_requests).buffered(DEFAULT_PROVIDER_SEARCH_CONCURRENCY);
+        let mut results = Vec::new();
 
-            if PackageId::parse(&record.id).is_err() {
-                continue;
-            }
-
-            let detail = fetch_fontsource_detail(
-                self.network_client,
-                &snapshot_store,
-                &record.id,
-                metadata_ttl,
-                true,
-            )
-            .await?;
-
-            let Some(result) = search_result_from_detail(&detail)? else {
+        while let Some(result) = detail_results.next().await {
+            let Some(result) = result? else {
                 continue;
             };
             results.push(result);
+            if results.len() >= result_limit {
+                break;
+            }
         }
 
         Ok(results)

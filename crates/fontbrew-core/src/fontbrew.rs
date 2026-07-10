@@ -13,14 +13,13 @@ use crate::{
     fs::GlobalFileLock,
     install::{self, ParsedArchiveInstallTarget},
     model::{
-        ensure_not_cancelled, ApplyOptions, CancellationToken, ConfigGetRequest, ConfigReport,
-        ConfigSetRequest, ExecutionPolicy, InfoReport, InfoRequest, InstallCandidate,
-        InstallCandidateId, InstallPlan, InstallPlanSummary, InstallReport, InstallReportSet,
-        InstallRequest, InstallSource, ListReport, NoCancellation, NoProgress, OutdatedReport,
-        OutdatedRequest, PackageId, PlanRisk, PlannedChange, PreparedInstallPackage,
-        PreparedInstallSource, ProgressEvent, ProgressSink, ProgressSubject, RemovePlan,
-        RemoveReport, RemoveRequest, SearchReport, SearchRequest, UpdatePlan, UpdateReport,
-        UpdateRequest,
+        ensure_not_cancelled, ApplyOptions, CancellationToken, ConfigValue, ExecutionPolicy,
+        InstallCandidate, InstallCandidateId, InstallPlan, InstallPlanSummary, InstallReport,
+        InstallReportSet, InstallRequest, InstallSource, ListPackage, NoCancellation, NoProgress,
+        OutdatedReport, OutdatedRequest, PackageId, PackageInfo, PlanRisk, PlannedChange,
+        PreparedInstallPackage, PreparedInstallSource, ProgressEvent, ProgressSink,
+        ProgressSubject, RemovePlan, RemoveReport, SearchRequest, SearchResult, UpdatePlan,
+        UpdateReport, UpdateRequest,
     },
     platform::{DefaultFontbrewLocations, FontbrewPaths},
     providers::{github, FontsourceProvider, ProviderSearchRequest, ResolvedProviderPackage},
@@ -38,13 +37,7 @@ pub struct FontbrewOptions {
 #[derive(Debug, Clone)]
 pub struct Fontbrew {
     paths: FontbrewPaths,
-    network_client: Option<Arc<NetworkClient>>,
-}
-
-pub enum InstallPreparation {
-    Plan(InstallPlan),
-    AssetSelection(PendingAssetSelection),
-    FamilySelection(PendingFamilySelection),
+    network_client: Arc<NetworkClient>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,18 +74,6 @@ pub struct PrepareInstallAssetRequest {
     pub metadata: InstallMetadata,
     pub asset_selector: Option<String>,
     pub format_preference: Vec<FontFormat>,
-}
-
-pub struct PendingAssetSelection {
-    source_label: String,
-    assets: Vec<String>,
-    pending: Option<install::PendingGitHubAssetSelection>,
-}
-
-pub struct PendingFamilySelection {
-    families: Vec<FamilyName>,
-    package_id_override: Option<PackageId>,
-    parsed_archive: Option<install::ParsedFontArchive>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,81 +180,6 @@ impl InstallMetadata {
     }
 }
 
-impl PendingFamilySelection {
-    fn new(
-        parsed_archive: install::ParsedFontArchive,
-        package_id_override: Option<PackageId>,
-    ) -> Self {
-        Self {
-            families: parsed_archive.archive_families.clone(),
-            package_id_override,
-            parsed_archive: Some(parsed_archive),
-        }
-    }
-
-    pub fn families(&self) -> &[FamilyName] {
-        &self.families
-    }
-
-    fn take_parsed_archive(&mut self) -> Result<install::ParsedFontArchive> {
-        self.parsed_archive
-            .take()
-            .ok_or_else(|| FontbrewError::Config {
-                message: "pending family selection has already been consumed".to_string(),
-            })
-    }
-}
-
-impl PendingAssetSelection {
-    fn new(pending: install::PendingGitHubAssetSelection) -> Self {
-        Self {
-            source_label: pending.source_label().to_string(),
-            assets: pending.assets().to_vec(),
-            pending: Some(pending),
-        }
-    }
-
-    pub fn source_label(&self) -> &str {
-        &self.source_label
-    }
-
-    pub fn assets(&self) -> &[String] {
-        &self.assets
-    }
-
-    fn take_pending(&mut self) -> Result<install::PendingGitHubAssetSelection> {
-        self.pending.take().ok_or_else(|| FontbrewError::Config {
-            message: "pending asset selection has already been consumed".to_string(),
-        })
-    }
-}
-
-impl Drop for PendingFamilySelection {
-    fn drop(&mut self) {
-        if let Some(parsed_archive) = &self.parsed_archive {
-            install::cleanup_staging(&parsed_archive.staging_dir);
-        }
-    }
-}
-
-impl From<install::InstallPlanCandidate> for InstallPreparation {
-    fn from(candidate: install::InstallPlanCandidate) -> Self {
-        match candidate {
-            install::InstallPlanCandidate::Plan(plan) => Self::Plan(plan),
-            install::InstallPlanCandidate::AssetSelection(pending) => {
-                Self::AssetSelection(PendingAssetSelection::new(pending))
-            }
-            install::InstallPlanCandidate::FamilySelection {
-                parsed_archive,
-                package_id_override,
-            } => Self::FamilySelection(PendingFamilySelection::new(
-                parsed_archive,
-                package_id_override,
-            )),
-        }
-    }
-}
-
 impl Fontbrew {
     pub fn new(options: FontbrewOptions) -> Result<Self> {
         let cwd = env::current_dir()?;
@@ -306,13 +212,13 @@ impl Fontbrew {
 
         Ok(Self {
             paths: FontbrewPaths::from_locations(store_dir, config_path, activation_dir),
-            network_client: None,
+            network_client: Arc::new(NetworkClient::new()?),
         })
     }
 
     #[doc(hidden)]
     pub fn with_network_client(mut self, network_client: Arc<NetworkClient>) -> Self {
-        self.network_client = Some(network_client);
+        self.network_client = network_client;
         self
     }
 
@@ -332,7 +238,7 @@ impl Fontbrew {
                 let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
                 let source_label = github_repo.label();
                 let release = github::resolve_latest_stable_release(
-                    self.network_client()?.as_ref(),
+                    self.network_client.as_ref(),
                     &github_repo,
                 )
                 .await?;
@@ -357,10 +263,9 @@ impl Fontbrew {
                 provider: ProviderKind::Fontsource,
                 id,
             } => {
-                let resolved =
-                    FontsourceProvider::new(&self.paths, self.network_client()?.as_ref())
-                        .resolve_install_package(&id)
-                        .await?;
+                let resolved = FontsourceProvider::new(&self.paths, self.network_client.as_ref())
+                    .resolve_install_package(&id)
+                    .await?;
                 let package_id = resolved.package_id.clone();
 
                 Ok(InstallMetadata {
@@ -436,7 +341,7 @@ impl Fontbrew {
                     source,
                     options,
                     progress,
-                    self.network_client()?.as_ref(),
+                    self.network_client.as_ref(),
                     cancellation,
                 )
                 .await?;
@@ -472,7 +377,7 @@ impl Fontbrew {
                     resolved,
                     options,
                     progress,
-                    self.network_client()?.as_ref(),
+                    self.network_client.as_ref(),
                     cancellation,
                 )
                 .await?;
@@ -515,7 +420,6 @@ impl Fontbrew {
             }
             InstallSource::GitHubRepo { owner, repo } => {
                 let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
-                let network_client = self.network_client()?;
                 let mut progress = NoProgress;
                 let parsed_archive = install::prepare_github_repo_install_source(
                     &self.paths,
@@ -523,7 +427,7 @@ impl Fontbrew {
                     request.asset_selector,
                     request.format_preference.unwrap_or_default(),
                     &mut progress,
-                    network_client.as_ref(),
+                    self.network_client.as_ref(),
                     Arc::new(NoCancellation),
                 )
                 .await?;
@@ -546,14 +450,13 @@ impl Fontbrew {
                     });
                 }
 
-                let network_client = self.network_client()?;
                 let mut progress = NoProgress;
                 let prepared = install::prepare_fontsource_install_source(
                     &self.paths,
                     id,
                     request.format_preference.unwrap_or_default(),
                     &mut progress,
-                    network_client.as_ref(),
+                    self.network_client.as_ref(),
                     Arc::new(NoCancellation),
                 )
                 .await?;
@@ -655,6 +558,23 @@ impl Fontbrew {
         plans: InstallPlanSet,
         options: ApplyOptions,
     ) -> Result<InstallReportSet> {
+        let mut progress = NoProgress;
+        self.apply_install_with_progress_and_cancellation(
+            plans,
+            options,
+            &mut progress,
+            Arc::new(NoCancellation),
+        )
+        .await
+    }
+
+    pub async fn apply_install_with_progress_and_cancellation(
+        &self,
+        plans: InstallPlanSet,
+        options: ApplyOptions,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<InstallReportSet> {
         let mut pending_plans = plans.into_plans();
         pending_plans.reverse();
         let mut reports = Vec::new();
@@ -662,11 +582,20 @@ impl Fontbrew {
         while let Some(plan) = pending_plans.pop() {
             let paths = self.paths.clone();
             let policy = options.policy.clone();
-            let result = spawn_blocking_result(move || {
-                let mut progress = NoProgress;
-                install::apply_install(&paths, plan, policy, &mut progress, &NoCancellation)
+            let cancellation = cancellation.clone();
+            let (result, events) = spawn_blocking_result(move || {
+                let mut recording = RecordingProgressSink::default();
+                let result = install::apply_install(
+                    &paths,
+                    plan,
+                    policy,
+                    &mut recording,
+                    cancellation.as_ref(),
+                );
+                Ok((result, recording.events))
             })
-            .await;
+            .await?;
+            replay_progress(progress, events);
 
             match result {
                 Ok(report) => reports.push(report),
@@ -729,7 +658,7 @@ impl Fontbrew {
                     github_repo,
                     request,
                     progress,
-                    self.network_client()?.as_ref(),
+                    self.network_client.as_ref(),
                     cancellation.clone(),
                 )
                 .await
@@ -743,175 +672,12 @@ impl Fontbrew {
                     id,
                     request,
                     progress,
-                    self.network_client()?.as_ref(),
+                    self.network_client.as_ref(),
                     cancellation.clone(),
                 )
                 .await
             }
         }
-    }
-
-    pub async fn prepare_install(
-        &self,
-        request: InstallRequest,
-        progress: &mut dyn ProgressSink,
-        cancellation: Arc<dyn CancellationToken>,
-    ) -> Result<InstallPreparation> {
-        ensure_not_cancelled(cancellation.as_ref())?;
-        let paths = self.paths.clone();
-        install::ensure_package_id_override_allowed_for_source(&request)?;
-        match request.source.clone() {
-            InstallSource::LocalPath(_) => {
-                let (result, events) = spawn_blocking_result(move || {
-                    let mut recording = RecordingProgressSink::default();
-                    let InstallRequest {
-                        source,
-                        package_id_override,
-                        format_preference,
-                        selected_families,
-                        reinstall,
-                        ..
-                    } = request;
-                    let InstallSource::LocalPath(path) = source else {
-                        unreachable!("local install branch should receive a local path");
-                    };
-                    let result = install::local_archive_install_plan_candidate(
-                        &paths,
-                        path,
-                        package_id_override,
-                        reinstall,
-                        format_preference,
-                        selected_families,
-                        &mut recording,
-                        cancellation.as_ref(),
-                    )
-                    .map(InstallPreparation::from);
-                    Ok((result, recording.events))
-                })
-                .await?;
-                replay_progress(progress, events);
-                result
-            }
-            InstallSource::GitHubRepo { owner, repo } => {
-                let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
-                install::github_repo_install_plan_candidate(
-                    &paths,
-                    github_repo,
-                    request,
-                    progress,
-                    self.network_client()?.as_ref(),
-                    cancellation.clone(),
-                )
-                .await
-                .map(InstallPreparation::from)
-            }
-            InstallSource::Provider { .. } => {
-                let plan = self
-                    .install_plan_with_progress_and_cancellation(request, progress, cancellation)
-                    .await?;
-                Ok(InstallPreparation::Plan(plan))
-            }
-        }
-    }
-
-    pub async fn install_plans_with_progress_and_cancellation(
-        &self,
-        request: InstallRequest,
-        progress: &mut dyn ProgressSink,
-        cancellation: Arc<dyn CancellationToken>,
-    ) -> Result<Vec<InstallPlan>> {
-        ensure_not_cancelled(cancellation.as_ref())?;
-        let paths = self.paths.clone();
-        install::ensure_package_id_override_allowed_for_source(&request)?;
-        match request.source.clone() {
-            InstallSource::LocalPath(_) => {
-                let (result, events) = spawn_blocking_result(move || {
-                    let mut recording = RecordingProgressSink::default();
-                    let result = install::install_plans_with_progress(
-                        &paths,
-                        request,
-                        &mut recording,
-                        cancellation.as_ref(),
-                    );
-                    Ok((result, recording.events))
-                })
-                .await?;
-                replay_progress(progress, events);
-                result
-            }
-            InstallSource::GitHubRepo { owner, repo } => {
-                let github_repo = GitHubRepo::parse(format!("{owner}/{repo}"))?;
-                install::github_repo_install_plans(
-                    &paths,
-                    github_repo,
-                    request,
-                    progress,
-                    self.network_client()?.as_ref(),
-                    cancellation.clone(),
-                )
-                .await
-            }
-            InstallSource::Provider { .. } => {
-                let plan = self
-                    .install_plan_with_progress_and_cancellation(request, progress, cancellation)
-                    .await?;
-                Ok(vec![plan])
-            }
-        }
-    }
-
-    pub async fn prepare_selected_families(
-        &self,
-        mut pending: PendingFamilySelection,
-        selected_families: Vec<FamilyName>,
-        progress: &mut dyn ProgressSink,
-        cancellation: Arc<dyn CancellationToken>,
-    ) -> Result<Vec<InstallPlan>> {
-        ensure_not_cancelled(cancellation.as_ref())?;
-        if pending.package_id_override.is_some() && !selected_families.is_empty() {
-            return Err(FontbrewError::Config {
-                message: "--id cannot be combined with --family".to_string(),
-            });
-        }
-
-        let paths = self.paths.clone();
-        let parsed_archive = pending.take_parsed_archive()?;
-        let (result, events) = spawn_blocking_result(move || {
-            let mut recording = RecordingProgressSink::default();
-            let result = install::family_install_plans_from_parsed_archive(
-                &paths,
-                parsed_archive,
-                selected_families,
-                &mut recording,
-                cancellation.as_ref(),
-            );
-            Ok((result, recording.events))
-        })
-        .await?;
-        replay_progress(progress, events);
-        result
-    }
-
-    pub async fn prepare_selected_asset(
-        &self,
-        mut pending: PendingAssetSelection,
-        asset_selector: String,
-        progress: &mut dyn ProgressSink,
-        cancellation: Arc<dyn CancellationToken>,
-    ) -> Result<InstallPreparation> {
-        ensure_not_cancelled(cancellation.as_ref())?;
-        let paths = self.paths.clone();
-        let pending = pending.take_pending()?;
-        install::prepare_selected_github_asset(
-            &paths,
-            pending,
-            asset_selector,
-            progress,
-            self.network_client()?.as_ref(),
-            cancellation.clone(),
-        )
-        .await
-        .map(InstallPreparation::from)
     }
 
     pub async fn apply_install_plan(
@@ -937,24 +703,24 @@ impl Fontbrew {
         install::discard_install_plan(plan);
     }
 
-    pub async fn list_packages(&self) -> Result<ListReport> {
+    pub fn list_packages(&self) -> Result<Vec<ListPackage>> {
         install::list_packages(&self.paths)
     }
 
-    pub async fn package_info(&self, request: InfoRequest) -> Result<InfoReport> {
-        install::package_info(&self.paths, request)
+    pub fn package_info(&self, package_id: &PackageId) -> Result<PackageInfo> {
+        install::package_info(&self.paths, package_id)
     }
 
-    pub async fn remove_plan(&self, request: RemoveRequest) -> Result<RemovePlan> {
-        install::remove_plan(&self.paths, request)
+    pub fn plan_remove(&self, package_id: PackageId) -> Result<RemovePlan> {
+        install::remove_plan(&self.paths, package_id)
     }
 
-    pub async fn remove_plan_with_cancellation(
+    pub fn plan_remove_with_cancellation(
         &self,
-        request: RemoveRequest,
+        package_id: PackageId,
         cancellation: Arc<dyn CancellationToken>,
     ) -> Result<RemovePlan> {
-        install::remove_plan_with_cancellation(&self.paths, request, cancellation.as_ref())
+        install::remove_plan_with_cancellation(&self.paths, package_id, cancellation.as_ref())
     }
 
     pub async fn apply_remove(
@@ -977,7 +743,7 @@ impl Fontbrew {
     }
 
     pub async fn outdated(&self, request: OutdatedRequest) -> Result<OutdatedReport> {
-        update::outdated(&self.paths, request, self.network_client()?.as_ref()).await
+        update::outdated(&self.paths, request, self.network_client.as_ref()).await
     }
 
     pub async fn update_plan(
@@ -989,7 +755,7 @@ impl Fontbrew {
         update::update_plan(
             &self.paths,
             request,
-            self.network_client()?.as_ref(),
+            self.network_client.as_ref(),
             progress,
             cancellation.clone(),
         )
@@ -1019,44 +785,36 @@ impl Fontbrew {
         update::discard_update_plan(plan);
     }
 
-    pub async fn search(&self, request: SearchRequest) -> Result<SearchReport> {
-        if let Some(provider_source) = ProviderSource::parse_prefixed(&request.query) {
-            let results = self
-                .search_provider_source(provider_source, &request)
-                .await?;
-            return Ok(SearchReport { results });
+    pub async fn search(&self, request: SearchRequest) -> Result<Vec<SearchResult>> {
+        if request.limit == Some(0) {
+            return Err(FontbrewError::Config {
+                message: "search limit must be greater than 0".to_string(),
+            });
         }
 
-        let network_client = self.network_client()?;
-        let results = FontsourceProvider::new(&self.paths, network_client.as_ref())
+        if let Some(provider_source) = ProviderSource::parse_prefixed(&request.query) {
+            return self.search_provider_source(provider_source, &request).await;
+        }
+
+        FontsourceProvider::new(&self.paths, self.network_client.as_ref())
             .search(ProviderSearchRequest {
                 query: &request.query,
                 limit: request.limit,
             })
-            .await?;
-
-        Ok(SearchReport { results })
+            .await
     }
 
-    pub async fn config_get(&self, request: ConfigGetRequest) -> Result<ConfigReport> {
-        FontbrewConfig::get(&self.paths.config_path(), request)
+    pub fn config_get(&self, key: &str) -> Result<ConfigValue> {
+        FontbrewConfig::get(&self.paths.config_path(), key)
     }
 
-    pub async fn config_set(&self, request: ConfigSetRequest) -> Result<ConfigReport> {
+    pub async fn config_set(&self, key: String, value: String) -> Result<ConfigValue> {
         let paths = self.paths.clone();
         spawn_blocking_result(move || {
             let _lock = GlobalFileLock::try_exclusive(&install::write_lock_path(&paths))?;
-            FontbrewConfig::set(&paths.config_path(), request)
+            FontbrewConfig::set(&paths.config_path(), &key, &value)
         })
         .await
-    }
-
-    fn network_client(&self) -> Result<Arc<NetworkClient>> {
-        if let Some(network_client) = &self.network_client {
-            return Ok(network_client.clone());
-        }
-
-        Ok(Arc::new(NetworkClient::new()?))
     }
 
     async fn search_provider_source(
@@ -1064,11 +822,9 @@ impl Fontbrew {
         provider_source: ProviderSource,
         request: &SearchRequest,
     ) -> Result<Vec<crate::SearchResult>> {
-        let network_client = self.network_client()?;
-
         match provider_source.provider {
             ProviderKind::Fontsource => {
-                FontsourceProvider::new(&self.paths, network_client.as_ref())
+                FontsourceProvider::new(&self.paths, self.network_client.as_ref())
                     .search(ProviderSearchRequest {
                         query: &provider_source.id,
                         limit: request.limit,
@@ -1145,10 +901,6 @@ impl InstallPlanSet {
 
     pub fn changes(&self) -> &[PlannedChange] {
         &self.changes
-    }
-
-    pub fn into_install_plans(mut self) -> Vec<InstallPlan> {
-        self.plans.take().unwrap_or_default()
     }
 
     fn into_plans(mut self) -> Vec<InstallPlan> {

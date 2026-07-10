@@ -2,16 +2,38 @@ pub mod human;
 pub mod json;
 
 use fontbrew_core::{
-    ConfigReport, InfoReport, InstallBatchReport, InstallReport, ListReport, OutdatedReport,
-    ProgressEvent, RemoveReport, SearchReport, UpdateReport,
+    ConfigValue, InstallReport, InstallReportSet, ListPackage, OutdatedReport, PackageInfo,
+    ProgressEvent, RemoveReport, SearchResult, UpdateReport,
 };
+use serde::Serialize;
 
 use crate::exit::{CliError, CliResult};
 use crate::self_update::SelfUpdateReport;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListReport {
+    pub packages: Vec<ListPackage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InfoReport {
+    pub package: PackageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchReport {
+    pub results: Vec<SearchResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigReport {
+    pub key: String,
+    pub value: ConfigValue,
+}
+
 pub trait Reporter {
     fn render_install_report(&mut self, report: InstallReport) -> CliResult<()>;
-    fn render_install_batch_report(&mut self, report: InstallBatchReport) -> CliResult<()> {
+    fn render_install_batch_report(&mut self, report: InstallReportSet) -> CliResult<()> {
         for package in report.packages {
             self.render_install_report(package)?;
         }

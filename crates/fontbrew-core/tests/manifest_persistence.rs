@@ -1,10 +1,9 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use fontbrew_core::{
-    config::ActivationStrategy,
     manifest::{
-        ManifestActivationArtifactRecord, ManifestFontFileFormat, ManifestPackageRecord,
-        ManifestSource, ManifestStore, ManifestV1,
+        ManifestActivationArtifactRecord, ManifestActivationStrategy, ManifestFontFileFormat,
+        ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
     },
     FamilyName, FontbrewError, PackageId, PackageVersion, ProviderKind,
 };
@@ -36,7 +35,7 @@ fn package_record(id: &str, version: &str) -> ManifestPackageRecord {
         activation_artifacts: vec![ManifestActivationArtifactRecord {
             path: PathBuf::from("activated/Inter-Regular.ttf"),
             source_path: PathBuf::from("packages/inter/fonts/Inter-Regular.ttf"),
-            strategy: ActivationStrategy::Symlink,
+            strategy: ManifestActivationStrategy::Symlink,
         }],
         installed_at: "2026-07-04T10:20:30Z".to_string(),
         active_version: Some(PackageVersion::new(version)),

@@ -1149,7 +1149,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::confirm::{ConfirmationOptions, Confirmer};
+    use crate::{
+        confirm::{ConfirmationOptions, Confirmer},
+        reporter::{ConfigReport, InfoReport, ListReport, SearchReport},
+    };
 
     struct NeverCancelled;
 
@@ -1854,16 +1857,16 @@ mod tests {
         ) -> CliResult<()> {
             Ok(())
         }
-        fn render_list_report(&mut self, _report: fontbrew_core::ListReport) -> CliResult<()> {
+        fn render_list_report(&mut self, _report: ListReport) -> CliResult<()> {
             Ok(())
         }
-        fn render_info_report(&mut self, _report: fontbrew_core::InfoReport) -> CliResult<()> {
+        fn render_info_report(&mut self, _report: InfoReport) -> CliResult<()> {
             Ok(())
         }
         fn render_remove_report(&mut self, _report: fontbrew_core::RemoveReport) -> CliResult<()> {
             Ok(())
         }
-        fn render_search_report(&mut self, _report: fontbrew_core::SearchReport) -> CliResult<()> {
+        fn render_search_report(&mut self, _report: SearchReport) -> CliResult<()> {
             Ok(())
         }
         fn render_outdated_report(
@@ -1875,16 +1878,10 @@ mod tests {
         fn render_update_report(&mut self, _report: fontbrew_core::UpdateReport) -> CliResult<()> {
             Ok(())
         }
-        fn render_config_get_report(
-            &mut self,
-            _report: fontbrew_core::ConfigReport,
-        ) -> CliResult<()> {
+        fn render_config_get_report(&mut self, _report: ConfigReport) -> CliResult<()> {
             Ok(())
         }
-        fn render_config_set_report(
-            &mut self,
-            _report: fontbrew_core::ConfigReport,
-        ) -> CliResult<()> {
+        fn render_config_set_report(&mut self, _report: ConfigReport) -> CliResult<()> {
             Ok(())
         }
         fn render_self_update_report(&mut self, report: SelfUpdateReport) -> CliResult<()> {

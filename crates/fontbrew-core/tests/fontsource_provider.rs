@@ -13,8 +13,8 @@ use fontbrew_core::{
     },
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewError, FontbrewOptions,
-    InfoRequest, InstallRequest, InstallSource, OutdatedRequest, PackageId, PackageVersion,
-    ProgressEvent, ProgressSink, ProviderKind, SearchRequest, UpdateRequest,
+    InstallRequest, InstallSource, OutdatedRequest, PackageId, PackageVersion, ProgressEvent,
+    ProgressSink, ProviderKind, SearchRequest, UpdateRequest,
 };
 
 mod support;
@@ -307,18 +307,11 @@ async fn fontsource_search_returns_only_results_with_desktop_urls_and_writes_met
         .await
         .expect("search Fontsource");
 
-    assert_eq!(report.results.len(), 1);
-    assert_eq!(report.results[0].package_id, package_id("abel"));
-    assert_eq!(report.results[0].display_name, "Abel");
-    assert_eq!(report.results[0].source, "fontsource:abel");
-    assert_eq!(
-        report.results[0]
-            .version
-            .as_ref()
-            .expect("version")
-            .as_str(),
-        "v18"
-    );
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].package_id, package_id("abel"));
+    assert_eq!(report[0].display_name, "Abel");
+    assert_eq!(report[0].source, "fontsource:abel");
+    assert_eq!(report[0].version.as_ref().expect("version").as_str(), "v18");
     assert_eq!(
         server.request_urls(),
         vec![
@@ -390,13 +383,9 @@ async fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
         .await
         .expect("first search should write Fontsource metadata snapshot");
 
-    assert_eq!(first_report.results.len(), 1);
+    assert_eq!(first_report.len(), 1);
     assert_eq!(
-        first_report.results[0]
-            .version
-            .as_ref()
-            .expect("version")
-            .as_str(),
+        first_report[0].version.as_ref().expect("version").as_str(),
         "v18"
     );
 
@@ -408,14 +397,10 @@ async fn fontsource_search_uses_fresh_metadata_snapshot_without_network() {
         .await
         .expect("second search should use fresh Fontsource metadata snapshot");
 
-    assert_eq!(second_report.results.len(), 1);
-    assert_eq!(second_report.results[0].source, "fontsource:abel");
+    assert_eq!(second_report.len(), 1);
+    assert_eq!(second_report[0].source, "fontsource:abel");
     assert_eq!(
-        second_report.results[0]
-            .version
-            .as_ref()
-            .expect("version")
-            .as_str(),
+        second_report[0].version.as_ref().expect("version").as_str(),
         "v18"
     );
     assert_eq!(
@@ -494,14 +479,10 @@ async fn fontsource_search_falls_back_to_stale_metadata_snapshot_when_refresh_fa
         .await
         .expect("stale Fontsource metadata should be used when refresh fails");
 
-    assert_eq!(stale_report.results.len(), 1);
-    assert_eq!(stale_report.results[0].source, "fontsource:abel");
+    assert_eq!(stale_report.len(), 1);
+    assert_eq!(stale_report[0].source, "fontsource:abel");
     assert_eq!(
-        stale_report.results[0]
-            .version
-            .as_ref()
-            .expect("version")
-            .as_str(),
+        stale_report[0].version.as_ref().expect("version").as_str(),
         "v18"
     );
     assert_eq!(
@@ -620,12 +601,9 @@ async fn fontsource_install_downloads_desktop_font_and_records_provider_manifest
     );
     assert_eq!(record.update_source, None);
     let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .package_info(&package_id("source-code-pro"))
         .expect("read Fontsource package info");
-    assert_eq!(info.package.source, "fontsource:source-code-pro");
+    assert_eq!(info.source, "fontsource:source-code-pro");
     assert!(record.font_files.iter().all(|font_file| font_file
         .path
         .starts_with(paths.managed_store_dir().join("packages"))));
@@ -785,14 +763,11 @@ async fn fontsource_install_records_provider_variant_weight_for_downloaded_font(
     .expect("apply Fontsource install");
 
     let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .package_info(&package_id("source-code-pro"))
         .expect("read Fontsource package info");
 
-    assert_eq!(info.package.font_files.len(), 1);
-    assert_eq!(info.package.font_files[0].weight, 200);
+    assert_eq!(info.font_files.len(), 1);
+    assert_eq!(info.font_files[0].weight, 200);
 }
 
 #[tokio::test]
@@ -867,16 +842,10 @@ async fn fontsource_install_records_provider_family_when_font_metadata_is_style_
     assert_eq!(record.families, vec![FamilyName::new("Source Code Pro")]);
 
     let info = app
-        .package_info(InfoRequest {
-            package_id: package_id("source-code-pro"),
-        })
-        .await
+        .package_info(&package_id("source-code-pro"))
         .expect("read Fontsource package info");
 
-    assert_eq!(
-        info.package.families,
-        vec![FamilyName::new("Source Code Pro")]
-    );
+    assert_eq!(info.families, vec![FamilyName::new("Source Code Pro")]);
 }
 
 #[tokio::test]
@@ -915,12 +884,11 @@ async fn fontsource_info_recovers_provider_variant_weight_from_legacy_manifest_p
     let app = fontbrew_with_paths(paths);
 
     let info = app
-        .package_info(InfoRequest { package_id })
-        .await
+        .package_info(&package_id)
         .expect("read Fontsource package info");
 
-    assert_eq!(info.package.font_files.len(), 1);
-    assert_eq!(info.package.font_files[0].weight, 200);
+    assert_eq!(info.font_files.len(), 1);
+    assert_eq!(info.font_files[0].weight, 200);
 }
 
 #[tokio::test]
@@ -970,14 +938,10 @@ async fn fontsource_info_uses_cached_provider_family_for_legacy_manifest() {
     let app = fontbrew_with_paths(paths);
 
     let info = app
-        .package_info(InfoRequest { package_id })
-        .await
+        .package_info(&package_id)
         .expect("read Fontsource package info");
 
-    assert_eq!(
-        info.package.families,
-        vec![FamilyName::new("Source Code Pro")]
-    );
+    assert_eq!(info.families, vec![FamilyName::new("Source Code Pro")]);
 }
 
 #[tokio::test]

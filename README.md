@@ -23,6 +23,8 @@ Search for a font:
 fontbrew search inter
 ```
 
+Use `--limit <n>` to cap results; the limit must be greater than `0`.
+
 Install and activate it:
 
 ```bash
@@ -115,11 +117,12 @@ fontbrew config set network.update_concurrency 2
 Supported config keys are:
 
 - `install.format_preference`
-- `install.activation_strategy`
 - `network.metadata_ttl_hours`
 - `network.update_concurrency`
 
-`install.activation_strategy` supports `copy` and `symlink`. `copy` is the default and writes real font files into Fontbrew's activation directory.
+Fontbrew activates fonts by copying real font files into `~/Library/Fonts/Fontbrew`.
+Symlink activation is not supported because macOS does not reliably discover those fonts.
+Existing Fontbrew-managed symlinks can still be removed safely during migration.
 
 ## Output
 
@@ -142,7 +145,7 @@ fontbrew self-update --yes
 
 ## Safety
 
-Fontbrew does not modify system fonts. Updates and removals only apply to fonts installed through Fontbrew.
+Fontbrew does not modify system fonts. Updates and removals only apply to fonts installed through Fontbrew. Activation artifacts are tracked copies under `~/Library/Fonts/Fontbrew`.
 
 ## Credits
 

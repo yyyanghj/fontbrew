@@ -142,6 +142,8 @@ fn core_error_kind(error: &FontbrewError) -> &'static str {
         FontbrewError::Config { .. } => "config",
         FontbrewError::PathResolution { .. } => "path_resolution",
         FontbrewError::Manifest { .. } => "manifest",
+        FontbrewError::CommittedCleanup { .. } => "committed_cleanup",
+        FontbrewError::CommitUncertain { .. } => "commit_uncertain",
         FontbrewError::ManifestSchema { .. } => "manifest_schema",
         FontbrewError::Lock { .. } => "lock",
         FontbrewError::Io(_) => "io",
@@ -182,7 +184,7 @@ fn ambiguous_assets_message(source: &str, assets: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fontbrew_core::FontbrewError;
+    use fontbrew_core::{FontbrewError, PackageId};
 
     use super::CliError;
 
@@ -203,5 +205,29 @@ mod tests {
         assert!(message.contains("--asset \"monaspace-static-v1.400.zip\""));
         assert!(message.contains("monaspace-variable-v1.400.zip"));
         assert!(!message.contains("PackageId"));
+    }
+
+    #[test]
+    fn committed_cleanup_error_has_stable_json_kind() {
+        let error = CliError::from(FontbrewError::CommittedCleanup {
+            operation: "update",
+            package_ids: vec![PackageId::parse("inter").expect("valid package id")],
+            message: "could not remove old package store".to_string(),
+        });
+
+        assert_eq!(error.kind(), "committed_cleanup");
+        assert!(error.message().contains("update committed"));
+    }
+
+    #[test]
+    fn commit_uncertain_error_has_stable_json_kind() {
+        let error = CliError::from(FontbrewError::CommitUncertain {
+            operation: "update",
+            package_ids: vec![PackageId::parse("inter").expect("valid package id")],
+            message: "manifest durability could not be confirmed".to_string(),
+        });
+
+        assert_eq!(error.kind(), "commit_uncertain");
+        assert!(error.message().contains("commit state is uncertain"));
     }
 }

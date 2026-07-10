@@ -15,17 +15,18 @@ pub(crate) use apply::{
     activation_artifacts_from_record, copy_prepared_files, manifest_record_from_prepared,
 };
 use apply::{
-    apply_prepared_install, cleanup_install_plan_staging, conflict_error_from_risk,
-    current_install_risks, current_install_risks_with_unmanaged_overlap_risks,
-    dry_run_install_report, first_blocking_conflict_description, install_report_from_record,
+    apply_prepared_install, backup_package_store, cleanup_committed_backups,
+    cleanup_install_plan_staging, conflict_error_from_risk, current_install_risks,
+    current_install_risks_with_unmanaged_overlap_risks, dry_run_install_report,
+    first_blocking_conflict_description, install_report_from_record,
     managed_activation_artifacts_from_record, managed_font_files_from_record,
     manifest_source_from_prepared, manifest_update_source_from_prepared, require_policy_for_risks,
-    source_conflict_risk, source_label, unmanaged_same_family_overlap_risks,
+    rollback_package_state, source_conflict_risk, source_label,
+    unmanaged_same_family_overlap_risks, with_recovery_error,
 };
-use plan::install_plan_candidate_from_parsed_archive;
 pub(crate) use plan::{
-    family_install_plans_from_parsed_archive, install_candidate_from_prepared,
-    install_candidates_from_parsed_archive, install_plans_from_parsed_archive_targets,
+    install_candidate_from_prepared, install_candidates_from_parsed_archive,
+    install_plans_from_parsed_archive_targets,
 };
 use prepare::{
     extract_and_parse_archive, extract_archive_to_parsed_archive, prepare_github_release_archive,
@@ -42,25 +43,25 @@ use staging::{
 
 use crate::{
     activation::{
-        deactivate, ActivationArtifact, ActivationPlan, ActivationPlanner, ActivationRequest,
+        deactivate, deactivate_transactionally, ActivationArtifact, ActivationPlan,
+        ActivationPlanner, ActivationRequest, DeactivationTransaction,
     },
     archives::{ArchiveExtractionOptions, ExtractedFontFile, ZipArchiveExtractor},
     config::{dedupe_formats, font_format_label, FontbrewConfig, LoadedFontbrewConfig},
     error::{FontbrewError, Result},
     fetch::NetworkClient,
     fonts::{FontFaceMetadata, FontFileFormat, FontMetadataReader, TtfParserMetadataReader},
-    fs::{ensure_existing_path_does_not_cross_symlink, GlobalFileLock},
+    fs::{ensure_existing_path_does_not_cross_symlink, AtomicWriteCommitStatus, GlobalFileLock},
     manifest::{
         ManifestActivationArtifactRecord, ManifestFontFileFormat, ManifestFontFileRecord,
         ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1,
     },
     model::{
-        ensure_not_cancelled, CancellationToken, ExecutionPolicy, FontFormat, InfoReport,
-        InfoRequest, InstallPlan, InstallReport, InstallRequest, InstallSource, ListPackage,
-        ListReport, ManagedActivationArtifact, ManagedFontFile, NoProgress, PackageInfo,
-        PlannedChange, PreparedFontFace, PreparedFontFile, PreparedInstallPackage,
-        PreparedInstallSource, ProgressEvent, ProgressSink, ProgressSubject, RemovePlan,
-        RemoveReport, RemoveRequest,
+        ensure_not_cancelled, CancellationToken, ExecutionPolicy, FontFormat, InstallPlan,
+        InstallReport, InstallRequest, InstallSource, ListPackage, ManagedActivationArtifact,
+        ManagedFontFile, NoProgress, PackageInfo, PlannedChange, PreparedFontFace,
+        PreparedFontFile, PreparedInstallPackage, PreparedInstallSource, ProgressEvent,
+        ProgressSink, ProgressSubject, RemovePlan, RemoveReport,
     },
     platform::FontbrewPaths,
     providers::{self, github, FontsourceProvider, ProviderFontAsset, ResolvedProviderPackage},
@@ -115,78 +116,6 @@ pub fn install_plan_with_progress(
     }
 }
 
-pub fn install_plans_with_progress(
-    paths: &FontbrewPaths,
-    request: InstallRequest,
-    progress: &mut dyn ProgressSink,
-    cancellation: &dyn CancellationToken,
-) -> Result<Vec<InstallPlan>> {
-    ensure_not_cancelled(cancellation)?;
-    ensure_package_id_override_allowed_for_source(&request)?;
-    cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation)?;
-
-    let InstallRequest {
-        source,
-        package_id_override,
-        format_preference,
-        selected_families,
-        reinstall,
-        ..
-    } = request;
-
-    match source {
-        InstallSource::LocalPath(path) => {
-            progress.emit(ProgressEvent::ResolvingSource {
-                source: path.display().to_string(),
-            });
-            local_archive_install_plans(
-                paths,
-                path,
-                package_id_override,
-                reinstall,
-                format_preference,
-                selected_families,
-                progress,
-                cancellation,
-            )
-        }
-        _ => Err(FontbrewError::NotImplemented {
-            operation: "install_source",
-        }),
-    }
-}
-
-pub(crate) enum InstallPlanCandidate {
-    Plan(InstallPlan),
-    AssetSelection(PendingGitHubAssetSelection),
-    FamilySelection {
-        parsed_archive: ParsedFontArchive,
-        package_id_override: Option<PackageId>,
-    },
-}
-
-pub(crate) struct PendingGitHubAssetSelection {
-    source_label: String,
-    assets: Vec<String>,
-    release: github::ResolvedGitHubRelease,
-    source: PreparedInstallSource,
-    options: RemoteInstallOptions,
-    package_id_hint: Option<PackageId>,
-    package_id_override: Option<PackageId>,
-    family_boundary: Option<InstallFamilyBoundary>,
-}
-
-impl PendingGitHubAssetSelection {
-    pub(crate) fn source_label(&self) -> &str {
-        &self.source_label
-    }
-
-    pub(crate) fn assets(&self) -> &[String] {
-        &self.assets
-    }
-}
-
 pub(crate) fn ensure_package_id_override_allowed_for_source(
     request: &InstallRequest,
 ) -> Result<()> {
@@ -236,57 +165,6 @@ pub(crate) fn prepare_local_archive_install_source(
         None,
         false,
         format_preference,
-        progress,
-        cancellation,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn local_archive_install_plan_candidate(
-    paths: &FontbrewPaths,
-    archive_path: PathBuf,
-    package_id_override: Option<PackageId>,
-    reinstall: bool,
-    format_preference: Vec<FontFormat>,
-    selected_families: Vec<FamilyName>,
-    progress: &mut dyn ProgressSink,
-    cancellation: &dyn CancellationToken,
-) -> Result<InstallPlanCandidate> {
-    let archive_path = resolve_local_archive_path(&archive_path)?;
-    progress.emit(ProgressEvent::ResolvingSource {
-        source: archive_path.display().to_string(),
-    });
-    ensure_not_cancelled(cancellation)?;
-    let family_boundary = InstallFamilyBoundary::from_selected_families(selected_families);
-    if family_boundary.is_none() {
-        if let Some(package_id) = &package_id_override {
-            let requested_source = ManifestSource::LocalArchive {
-                path: archive_path.clone(),
-            };
-            if let Some(plan) =
-                already_installed_plan(paths, package_id, reinstall, &requested_source, None)?
-            {
-                return Ok(InstallPlanCandidate::Plan(plan));
-            }
-        }
-    }
-    let parsed_archive = prepare_local_archive_as_parsed_archive(
-        paths,
-        archive_path,
-        package_id_override.clone(),
-        reinstall,
-        format_preference,
-        progress,
-        cancellation,
-    )?;
-
-    install_plan_candidate_from_parsed_archive(
-        paths,
-        parsed_archive,
-        package_id_override.clone(),
-        package_id_override,
-        family_boundary.as_ref(),
-        None,
         progress,
         cancellation,
     )
@@ -388,182 +266,6 @@ pub(crate) async fn prepare_github_repo_install_source(
     .await?;
 
     Ok(parsed_archive)
-}
-
-pub async fn github_repo_install_plan_candidate(
-    paths: &FontbrewPaths,
-    repo: GitHubRepo,
-    request: InstallRequest,
-    progress: &mut dyn ProgressSink,
-    network_client: &NetworkClient,
-    cancellation: Arc<dyn CancellationToken>,
-) -> Result<InstallPlanCandidate> {
-    ensure_not_cancelled(cancellation.as_ref())?;
-    cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation.as_ref())?;
-
-    let options = RemoteInstallOptions::from_request(request)?;
-    let package_id_override = options.package_id.clone();
-    let known_package_id = known_github_package_id(&options);
-    let requested_source = ManifestSource::GitHub {
-        owner: repo.owner.clone(),
-        repo: repo.repo.clone(),
-    };
-    let requested_update_source = Some(requested_source.clone());
-    if let Some(package_id) = &known_package_id {
-        if let Some(plan) = already_installed_plan(
-            paths,
-            package_id,
-            options.reinstall,
-            &requested_source,
-            requested_update_source.as_ref(),
-        )? {
-            return Ok(InstallPlanCandidate::Plan(plan));
-        }
-    }
-
-    let source_label = repo.label();
-    progress.emit(ProgressEvent::ResolvingSource {
-        source: source_label.clone(),
-    });
-    let options = options.with_progress_subject(ProgressSubject::source(source_label.clone()));
-    let family_boundary = options.family_boundary.clone();
-    let package_id_hint = options.package_id.clone();
-    let source = PreparedInstallSource::GitHub {
-        owner: repo.owner.clone(),
-        repo: repo.repo.clone(),
-    };
-    let release = github::resolve_latest_stable_release(network_client, &repo).await?;
-    let asset = match github::select_resolved_release_asset(
-        &release,
-        options.asset_selector.as_deref(),
-        &source_label,
-    ) {
-        Ok(asset) => asset,
-        Err(FontbrewError::AmbiguousAssets { assets, .. }) if options.asset_selector.is_none() => {
-            return Ok(InstallPlanCandidate::AssetSelection(
-                PendingGitHubAssetSelection {
-                    source_label,
-                    assets,
-                    release,
-                    source,
-                    options,
-                    package_id_hint,
-                    package_id_override,
-                    family_boundary,
-                },
-            ));
-        }
-        Err(error) => return Err(error),
-    };
-    let parsed_archive = prepare_resolved_github_release_parsed_archive(
-        paths,
-        asset,
-        source,
-        options,
-        progress,
-        network_client,
-        cancellation.clone(),
-    )
-    .await?;
-
-    install_plan_candidate_from_parsed_archive(
-        paths,
-        parsed_archive,
-        package_id_hint,
-        package_id_override,
-        family_boundary.as_ref(),
-        None,
-        progress,
-        cancellation.as_ref(),
-    )
-}
-
-pub(crate) async fn prepare_selected_github_asset(
-    paths: &FontbrewPaths,
-    pending: PendingGitHubAssetSelection,
-    asset_selector: String,
-    progress: &mut dyn ProgressSink,
-    network_client: &NetworkClient,
-    cancellation: Arc<dyn CancellationToken>,
-) -> Result<InstallPlanCandidate> {
-    ensure_not_cancelled(cancellation.as_ref())?;
-    let PendingGitHubAssetSelection {
-        source_label,
-        release,
-        source,
-        options,
-        package_id_hint,
-        package_id_override,
-        family_boundary,
-        ..
-    } = pending;
-    let asset =
-        github::select_resolved_release_asset(&release, Some(&asset_selector), &source_label)?;
-    let parsed_archive = prepare_resolved_github_release_parsed_archive(
-        paths,
-        asset,
-        source,
-        options,
-        progress,
-        network_client,
-        cancellation.clone(),
-    )
-    .await?;
-
-    install_plan_candidate_from_parsed_archive(
-        paths,
-        parsed_archive,
-        package_id_hint,
-        package_id_override,
-        family_boundary.as_ref(),
-        None,
-        progress,
-        cancellation.as_ref(),
-    )
-}
-
-pub async fn github_repo_install_plans(
-    paths: &FontbrewPaths,
-    repo: GitHubRepo,
-    request: InstallRequest,
-    progress: &mut dyn ProgressSink,
-    network_client: &NetworkClient,
-    cancellation: Arc<dyn CancellationToken>,
-) -> Result<Vec<InstallPlan>> {
-    ensure_not_cancelled(cancellation.as_ref())?;
-    cleanup_stale_install_staging(paths)?;
-    ensure_not_cancelled(cancellation.as_ref())?;
-
-    let selected_families = request.selected_families.clone();
-    let options = RemoteInstallOptions::from_request(request)?;
-    let source_label = repo.label();
-    progress.emit(ProgressEvent::ResolvingSource {
-        source: source_label.clone(),
-    });
-    let options = options.with_progress_subject(ProgressSubject::source(source_label.clone()));
-    let parsed_archive = prepare_github_release_parsed_archive(
-        paths,
-        &repo,
-        source_label,
-        PreparedInstallSource::GitHub {
-            owner: repo.owner.clone(),
-            repo: repo.repo.clone(),
-        },
-        options,
-        progress,
-        network_client,
-        cancellation.clone(),
-    )
-    .await?;
-
-    family_install_plans_from_parsed_archive(
-        paths,
-        parsed_archive,
-        selected_families,
-        progress,
-        cancellation.as_ref(),
-    )
 }
 
 pub async fn fontsource_install_plan(
@@ -822,7 +524,7 @@ pub fn discard_install_plan(plan: InstallPlan) {
     cleanup_install_plan_staging(&plan);
 }
 
-pub fn list_packages(paths: &FontbrewPaths) -> Result<ListReport> {
+pub fn list_packages(paths: &FontbrewPaths) -> Result<Vec<ListPackage>> {
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let packages = manifest
         .packages
@@ -835,28 +537,26 @@ pub fn list_packages(paths: &FontbrewPaths) -> Result<ListReport> {
         })
         .collect();
 
-    Ok(ListReport { packages })
+    Ok(packages)
 }
 
-pub fn package_info(paths: &FontbrewPaths, request: InfoRequest) -> Result<InfoReport> {
+pub fn package_info(paths: &FontbrewPaths, package_id: &PackageId) -> Result<PackageInfo> {
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     let record = manifest
-        .get_package(&request.package_id)
-        .ok_or_else(|| package_not_installed_error(&request.package_id))?;
+        .get_package(package_id)
+        .ok_or_else(|| package_not_installed_error(package_id))?;
 
-    Ok(InfoReport {
-        package: PackageInfo {
-            package_id: record.package_id.clone(),
-            version: record.version.clone(),
-            families: package_families_for_report(paths, record),
-            source: source_label(&record.source),
-            activated: record.active_version.is_some(),
-            update_source: record.update_source.as_ref().map(source_label),
-            managed: true,
-            update_available: None,
-            font_files: managed_font_files_from_record(record),
-            activation_artifacts: managed_activation_artifacts_from_record(record),
-        },
+    Ok(PackageInfo {
+        package_id: record.package_id.clone(),
+        version: record.version.clone(),
+        families: package_families_for_report(paths, record),
+        source: source_label(&record.source),
+        activated: record.active_version.is_some(),
+        update_source: record.update_source.as_ref().map(source_label),
+        managed: true,
+        update_available: None,
+        font_files: managed_font_files_from_record(record),
+        activation_artifacts: managed_activation_artifacts_from_record(record),
     })
 }
 
@@ -877,36 +577,36 @@ fn package_families_for_report(
     record.families.clone()
 }
 
-pub fn remove_plan(paths: &FontbrewPaths, request: RemoveRequest) -> Result<RemovePlan> {
-    remove_plan_with_cancellation(paths, request, &crate::model::NoCancellation)
+pub fn remove_plan(paths: &FontbrewPaths, package_id: PackageId) -> Result<RemovePlan> {
+    remove_plan_with_cancellation(paths, package_id, &crate::model::NoCancellation)
 }
 
 pub fn remove_plan_with_cancellation(
     paths: &FontbrewPaths,
-    request: RemoveRequest,
+    package_id: PackageId,
     cancellation: &dyn CancellationToken,
 ) -> Result<RemovePlan> {
     ensure_not_cancelled(cancellation)?;
     let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
     ensure_not_cancelled(cancellation)?;
     let (changes, font_files, activation_artifacts) = manifest
-        .get_package(&request.package_id)
+        .get_package(&package_id)
         .map(|record| {
             (
                 vec![
                     PlannedChange {
-                        package_id: request.package_id.clone(),
+                        package_id: package_id.clone(),
                         description: "deactivate managed font artifacts".to_string(),
                     },
                     PlannedChange {
-                        package_id: request.package_id.clone(),
+                        package_id: package_id.clone(),
                         description: format!(
                             "remove managed package files for version {}",
                             record.version.as_str()
                         ),
                     },
                     PlannedChange {
-                        package_id: request.package_id.clone(),
+                        package_id: package_id.clone(),
                         description: "remove package from manifest".to_string(),
                     },
                 ],
@@ -917,7 +617,7 @@ pub fn remove_plan_with_cancellation(
         .unwrap_or_default();
 
     Ok(RemovePlan {
-        package_id: request.package_id,
+        package_id,
         changes,
         risks: Vec::new(),
         font_files,
@@ -962,17 +662,71 @@ pub fn apply_remove(
     let report_activation_artifacts = managed_activation_artifacts_from_record(&record);
 
     let activation_artifacts = activation_artifacts_from_record(&record);
-    ensure_not_cancelled(cancellation)?;
-    deactivate(&paths.activation_dir(), &activation_artifacts)?;
-
     let package_store_dir = paths.package_store_dir(&record.package_id, &record.version);
     ensure_existing_path_does_not_cross_symlink(&paths.managed_store_dir(), &package_store_dir)?;
-    if package_store_dir.exists() {
-        fs::remove_dir_all(package_store_dir)?;
-    }
+    ensure_not_cancelled(cancellation)?;
+    let deactivation_transaction = deactivate_transactionally(
+        &paths.activation_dir(),
+        &record.package_id,
+        &activation_artifacts,
+    )?;
+
+    let backup_dir = if package_store_dir.exists() {
+        match backup_package_store(
+            paths,
+            &record.package_id,
+            &record.version,
+            &package_store_dir,
+        ) {
+            Ok(backup_dir) => Some(backup_dir),
+            Err(error) => {
+                return Err(with_recovery_error(
+                    "package store backup failed after deactivating the package",
+                    error,
+                    deactivation_transaction.rollback(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
 
     manifest.remove_package(&record.package_id);
-    ManifestStore::write(&paths.manifest_path(), &manifest)?;
+    if let Err(error) = ManifestStore::write_with_commit_status(&paths.manifest_path(), &manifest) {
+        match error.commit_status {
+            AtomicWriteCommitStatus::NotCommitted => {
+                let recovery = rollback_package_state(
+                    paths,
+                    &[],
+                    &package_store_dir,
+                    backup_dir.as_deref(),
+                    deactivation_transaction,
+                );
+                return Err(with_recovery_error(
+                    "remove manifest write was not committed",
+                    error.error,
+                    recovery,
+                ));
+            }
+            AtomicWriteCommitStatus::Uncertain => {
+                return Err(FontbrewError::CommitUncertain {
+                    operation: "removal",
+                    package_ids: vec![record.package_id.clone()],
+                    message: format!(
+                        "manifest write failed after removing package activation; kept the package store backup: {}",
+                        error.error
+                    ),
+                });
+            }
+        }
+    }
+
+    cleanup_committed_backups(
+        "removal",
+        &record.package_id,
+        backup_dir.into_iter().collect(),
+        deactivation_transaction,
+    )?;
     progress.emit(ProgressEvent::FinishedPackage {
         package_id: record.package_id.clone(),
     });
@@ -1023,38 +777,6 @@ fn local_archive_install_plan(
     )?;
     ensure_not_cancelled_after_prepare(cancellation, &prepared)?;
     install_plan_from_prepared(paths, prepared, progress)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn local_archive_install_plans(
-    paths: &FontbrewPaths,
-    archive_path: PathBuf,
-    package_id_override: Option<PackageId>,
-    reinstall: bool,
-    format_preference: Vec<FontFormat>,
-    selected_families: Vec<FamilyName>,
-    progress: &mut dyn ProgressSink,
-    cancellation: &dyn CancellationToken,
-) -> Result<Vec<InstallPlan>> {
-    let archive_path = resolve_local_archive_path(&archive_path)?;
-    ensure_not_cancelled(cancellation)?;
-    let parsed_archive = prepare_local_archive_as_parsed_archive(
-        paths,
-        archive_path,
-        package_id_override,
-        reinstall,
-        format_preference,
-        progress,
-        cancellation,
-    )?;
-
-    family_install_plans_from_parsed_archive(
-        paths,
-        parsed_archive,
-        selected_families,
-        progress,
-        cancellation,
-    )
 }
 
 pub(crate) fn install_plan_from_prepared(
@@ -1366,10 +1088,6 @@ impl InstallFamilyBoundary {
     fn family_label(&self) -> &'static str {
         self.family_label
     }
-
-    fn selected_family_count(&self) -> usize {
-        self.expected_families.len()
-    }
 }
 
 fn package_id_override_unsupported_source_error() -> FontbrewError {
@@ -1656,6 +1374,13 @@ fn package_not_installed_error(package_id: &PackageId) -> FontbrewError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install::apply::{
+        cleanup_committed_backups, rollback_package_state, with_recovery_error,
+    };
+
+    fn package_id(id: &str) -> PackageId {
+        PackageId::parse(id).expect("valid package id")
+    }
 
     fn selected_family_boundary() -> InstallFamilyBoundary {
         InstallFamilyBoundary::from_selected_families(vec![FamilyName::new("Source Code Pro")])
@@ -1725,5 +1450,81 @@ mod tests {
             .faces
             .iter()
             .all(|face| face.family_name.as_str() == "Source Code Pro"));
+    }
+
+    #[test]
+    fn rollback_package_state_reports_package_store_cleanup_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = FontbrewPaths::for_tests(
+            temp.path().join("data"),
+            temp.path().join("config"),
+            temp.path().join("home"),
+        );
+        let package_store_path = temp.path().join("package-store-file");
+        fs::write(&package_store_path, b"not a directory").expect("write package store file");
+
+        let deactivation_transaction =
+            deactivate_transactionally(&paths.activation_dir(), &package_id("inter"), &[])
+                .expect("empty deactivation transaction");
+        let error = rollback_package_state(
+            &paths,
+            &[],
+            &package_store_path,
+            None,
+            deactivation_transaction,
+        )
+        .expect_err("package store cleanup failure should be reported");
+
+        assert!(error.to_string().contains("restore package store failed"));
+        assert!(package_store_path.exists());
+    }
+
+    #[test]
+    fn committed_backup_cleanup_failure_reports_committed_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backup_path = temp.path().join("backup-file");
+        fs::write(&backup_path, b"not a directory").expect("write backup file");
+
+        let paths = FontbrewPaths::for_tests(
+            temp.path().join("data"),
+            temp.path().join("config"),
+            temp.path().join("home"),
+        );
+        let deactivation_transaction =
+            deactivate_transactionally(&paths.activation_dir(), &package_id("inter"), &[])
+                .expect("empty deactivation transaction");
+        let error = cleanup_committed_backups(
+            "removal",
+            &package_id("inter"),
+            vec![backup_path.clone()],
+            deactivation_transaction,
+        )
+        .expect_err("backup cleanup failure should be reported");
+
+        assert!(matches!(
+            &error,
+            FontbrewError::CommittedCleanup { package_ids, .. }
+                if package_ids == &[package_id("inter")]
+        ));
+        let message = error.to_string();
+        assert!(message.contains("removal committed"));
+        assert!(message.contains(&backup_path.display().to_string()));
+    }
+
+    #[test]
+    fn recovery_failure_preserves_primary_and_recovery_details() {
+        let error = with_recovery_error(
+            "remove failed",
+            FontbrewError::Config {
+                message: "primary failure".to_string(),
+            },
+            Err(FontbrewError::Manifest {
+                message: "restore failure".to_string(),
+            }),
+        );
+
+        let message = error.to_string();
+        assert!(message.contains("primary failure"));
+        assert!(message.contains("restore failure"));
     }
 }
