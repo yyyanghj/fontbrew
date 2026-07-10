@@ -2,7 +2,7 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
-## Unreleased
+## 0.0.14 - 2026-07-11
 
 - 移除 macOS 无法可靠生效的软链接激活策略和对应配置项；安装、重装和更新统一复制
   真实字体文件，同时兼容读取并忽略 schema v1 的旧配置字段，并保留旧 manifest 软链接
