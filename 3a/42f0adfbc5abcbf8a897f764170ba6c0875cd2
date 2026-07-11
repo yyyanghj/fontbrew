@@ -1,0 +1,33 @@
+crates/fontbrew-cli/src/cli.rs
+  s_1f0d210b7b7b61::t_d4cadc0e85c600 2,17,716-738,743-750
+crates/fontbrew-cli/src/exit.rs
+  s_1f0d210b7b7b61::t_37da17fc943d22 18,38-40,73-75,191-203,229-246
+crates/fontbrew-core/src/fontbrew.rs
+  s_1f0d210b7b7b61::t_c3e0ba28671f50 2,124-142,203-222,795-814,818-839,841
+crates/fontbrew-core/src/lib.rs
+  s_1f0d210b7b7b61::t_2a3e4628fae2d8 26-27
+crates/fontbrew-core/src/update.rs
+  s_1f0d210b7b7b61::t_738edb3b076ae7 24,26,32,37-90,183,188,195,197-275,277,281,283-293,295,365-366,370-411,421,424-426,431,438,444-445
+crates/fontbrew-core/tests/update.rs
+  s_1f0d210b7b7b61::t_ad8faa45cb0670 5-9,17-18,20,43-52,172-183,608-806,899,912,915,917,924
+docs/product_spec.md
+  s_1f0d210b7b7b61::t_c024299867387e 88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3a42f0adfbc5abcbf8a897f764170ba6c0875cd2",
+  "prompts": {},
+  "sessions": {
+    "s_1f0d210b7b7b61": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5077-7bb6-7311-aa2e-214ced8c587a",
+        "model": "unknown"
+      },
+      "human_author": "yyyanghj <yyyanghj@gmail.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
