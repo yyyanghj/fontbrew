@@ -85,7 +85,7 @@ Format preference is applied in this order: per-command `--format` values, confi
 
 ## Update Behavior
 
-Fontbrew updates a managed package by resolving its recorded update source, downloading the candidate version into staging, parsing the candidate font files, validating package identity, and only then replacing the active package. Failed updates leave the current package active.
+Fontbrew updates a managed package by resolving its recorded update source, comparing the latest version, downloading the candidate version into staging, parsing the candidate font files, validating package identity, and only then replacing the active package. Failed updates leave the current package active. GitHub Release metadata is fetched once per repository during one update plan and reused by every managed package from that release. Asset selection happens only when a newer release exists; if multiple assets match, interactive human mode asks for each package's asset before preparing downloads.
 
 Fontsource packages update through Fontsource detail metadata. GitHub packages update through GitHub Releases. Local archive packages are reported as not updatable unless a future source kind gives them an update source.
 

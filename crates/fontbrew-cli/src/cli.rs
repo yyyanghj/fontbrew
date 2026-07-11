@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
@@ -14,7 +14,7 @@ use fontbrew_core::{
     ApplyOptions, CancellationToken, FamilyName, FetchInstallMetadataRequest, FontFormat, Fontbrew,
     FontbrewError, FontbrewOptions, InstallCandidate, InstallMetadata, InstallReport,
     InstallReportSet, InstallSource, InstallTarget, OutdatedRequest, PackageId, PlanInstallRequest,
-    PrepareInstallAssetRequest, SearchRequest, UpdateRequest,
+    PlanUpdateRequest, PrepareInstallAssetRequest, SearchRequest, UpdateRequest,
 };
 
 use crate::{
@@ -713,11 +713,41 @@ async fn update(
         package_ids,
         jobs: args.jobs,
     };
+    let metadata = {
+        reporter.start_activity("Checking update metadata")?;
+        let metadata = fontbrew
+            .fetch_update_metadata(request, cancellation.clone())
+            .await;
+        reporter.finish_activity()?;
+        metadata?
+    };
+    let mut asset_selectors = BTreeMap::new();
+    for selection in metadata.asset_selections() {
+        let source = format!(
+            "{} ({})",
+            selection.source_label(),
+            selection.package_id().as_str()
+        );
+        let asset = match confirmer.select_asset(&source, selection.assets()) {
+            Err(exit::CliError::AssetSelectionRequired { source, assets }) => {
+                return Err(exit::CliError::UpdateAssetSelectionRequired { source, assets });
+            }
+            result => result?,
+        };
+        asset_selectors.insert(selection.package_id().clone(), asset);
+    }
     let plan = {
         reporter.start_activity("Preparing updates")?;
         let mut progress = ProgressAdapter::new(reporter);
         let plan = fontbrew
-            .update_plan(request, &mut progress, cancellation.clone())
+            .plan_update(
+                PlanUpdateRequest {
+                    metadata,
+                    asset_selectors,
+                },
+                &mut progress,
+                cancellation.clone(),
+            )
             .await?;
         progress.finish()?;
         plan

@@ -21,17 +21,72 @@ use crate::{
     version::{compare_versions, VersionComparison},
     FamilyName, PackageId, PackageVersion, PlanRisk, ProviderKind,
 };
-use futures::{stream, StreamExt};
+use futures::{stream, StreamExt, TryStreamExt};
 use std::{
+    collections::BTreeMap,
     fs,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 static UPDATE_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+pub(crate) struct UpdateMetadata {
+    records: Vec<UpdateRecordMetadata>,
+    jobs: usize,
+}
+
+#[derive(Debug)]
+struct UpdateRecordMetadata {
+    record: ManifestPackageRecord,
+    source: UpdateSourceMetadata,
+}
+
+#[derive(Debug)]
+enum UpdateSourceMetadata {
+    Fontsource,
+    GitHub {
+        source_label: String,
+        release: std::result::Result<Arc<github::ResolvedGitHubRelease>, String>,
+    },
+    Unavailable(String),
+}
+
+impl UpdateMetadata {
+    pub(crate) fn asset_selections(&self) -> Vec<crate::fontbrew::UpdateAssetSelection> {
+        let mut selections = Vec::new();
+
+        for metadata in &self.records {
+            let UpdateSourceMetadata::GitHub {
+                source_label,
+                release: Ok(release),
+            } = &metadata.source
+            else {
+                continue;
+            };
+            if compare_versions(&metadata.record.version, &release.version)
+                != VersionComparison::CandidateIsNewer
+            {
+                continue;
+            }
+
+            let assets = release.installable_asset_names();
+            if assets.len() > 1 {
+                selections.push(crate::fontbrew::UpdateAssetSelection {
+                    package_id: metadata.record.package_id.clone(),
+                    source_label: source_label.clone(),
+                    assets,
+                });
+            }
+        }
+
+        selections
+    }
+}
 
 pub async fn outdated(
     paths: &FontbrewPaths,
@@ -125,9 +180,90 @@ fn selected_records(
     Ok(records)
 }
 
-pub async fn update_plan(
+pub async fn fetch_update_metadata(
     paths: &FontbrewPaths,
     request: UpdateRequest,
+    network_client: &NetworkClient,
+    cancellation: Arc<dyn CancellationToken>,
+) -> Result<UpdateMetadata> {
+    ensure_not_cancelled(cancellation.as_ref())?;
+    let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
+    let records = selected_records(&manifest, &request.package_ids)?;
+    let config_jobs = FontbrewConfig::load(&paths.config_path())?.update_concurrency;
+    let jobs = request.jobs.unwrap_or(config_jobs).max(1);
+
+    let mut repositories = BTreeMap::new();
+    for record in &records {
+        if fontsource_provider_id(record).is_some() {
+            continue;
+        }
+        if let Ok(Some(repo)) = github_update_repo(record) {
+            repositories.insert((repo.owner.clone(), repo.repo.clone()), repo);
+        }
+    }
+
+    let release_results = stream::iter(repositories.into_iter().map(|(key, repo)| {
+        let cancellation = cancellation.clone();
+        async move {
+            ensure_not_cancelled(cancellation.as_ref())?;
+            let request = github::resolve_latest_stable_release(network_client, &repo);
+            tokio::pin!(request);
+            let mut cancellation_poll = tokio::time::interval(Duration::from_millis(25));
+            let result = loop {
+                tokio::select! {
+                    result = &mut request => break result,
+                    _ = cancellation_poll.tick() => {
+                        ensure_not_cancelled(cancellation.as_ref())?;
+                    }
+                }
+            };
+            Ok::<_, FontbrewError>((
+                key,
+                result
+                    .map(Arc::new)
+                    .map_err(|error| prepare_failure_reason(&error)),
+            ))
+        }
+    }))
+    .buffered(jobs)
+    .try_collect::<BTreeMap<_, _>>()
+    .await?;
+    ensure_not_cancelled(cancellation.as_ref())?;
+
+    let records = records
+        .into_iter()
+        .map(|record| {
+            let source = if fontsource_provider_id(&record).is_some() {
+                UpdateSourceMetadata::Fontsource
+            } else {
+                match github_update_repo(&record) {
+                    Ok(Some(repo)) => {
+                        let source_label = repo.label();
+                        let release = release_results
+                            .get(&(repo.owner, repo.repo))
+                            .expect("release result should exist for collected repository")
+                            .clone();
+                        UpdateSourceMetadata::GitHub {
+                            source_label,
+                            release,
+                        }
+                    }
+                    Ok(None) => UpdateSourceMetadata::Unavailable("no update source".to_string()),
+                    Err(error) => UpdateSourceMetadata::Unavailable(prepare_failure_reason(&error)),
+                }
+            };
+
+            UpdateRecordMetadata { record, source }
+        })
+        .collect();
+
+    Ok(UpdateMetadata { records, jobs })
+}
+
+pub async fn update_plan(
+    paths: &FontbrewPaths,
+    metadata: UpdateMetadata,
+    asset_selectors: BTreeMap<PackageId, String>,
     network_client: &NetworkClient,
     progress: &mut dyn ProgressSink,
     cancellation: Arc<dyn CancellationToken>,
@@ -136,23 +272,27 @@ pub async fn update_plan(
     install::cleanup_stale_install_staging(paths)?;
     ensure_not_cancelled(cancellation.as_ref())?;
 
-    let manifest = ManifestStore::read_or_empty(&paths.manifest_path())?;
-    let records = selected_records(&manifest, &request.package_ids)?;
-    let config_jobs = FontbrewConfig::load(&paths.config_path())?.update_concurrency;
-    let jobs = request.jobs.unwrap_or(config_jobs).max(1);
-    ensure_not_cancelled(cancellation.as_ref())?;
-
-    for record in &records {
+    for metadata in &metadata.records {
         progress.emit(ProgressEvent::PreparingUpdate {
-            package_id: record.package_id.clone(),
+            package_id: metadata.record.package_id.clone(),
         });
     }
 
-    let outcomes = stream::iter(records.into_iter().map(|record| {
+    let outcomes = stream::iter(metadata.records.into_iter().map(|metadata| {
         let cancellation = cancellation.clone();
-        async move { prepare_update_package(paths, record, network_client, cancellation).await }
+        let asset_selector = asset_selectors.get(&metadata.record.package_id).cloned();
+        async move {
+            prepare_update_package(
+                paths,
+                metadata,
+                asset_selector.as_deref(),
+                network_client,
+                cancellation,
+            )
+            .await
+        }
     }))
-    .buffered(jobs)
+    .buffered(metadata.jobs)
     .collect::<Vec<_>>()
     .await;
 
@@ -222,11 +362,53 @@ enum PrepareOutcome {
 
 async fn prepare_update_package(
     paths: &FontbrewPaths,
-    record: ManifestPackageRecord,
+    metadata: UpdateRecordMetadata,
+    asset_selector: Option<&str>,
     network_client: &NetworkClient,
     cancellation: Arc<dyn CancellationToken>,
 ) -> PrepareOutcome {
-    match prepare_update_package_inner(paths, &record, network_client, cancellation).await {
+    let record = metadata.record;
+    let result = match metadata.source {
+        UpdateSourceMetadata::Fontsource => {
+            let provider_id = fontsource_provider_id(&record)
+                .expect("Fontsource update metadata should have a provider id");
+            prepare_fontsource_update_package_inner(
+                paths,
+                &record,
+                provider_id,
+                network_client,
+                cancellation,
+            )
+            .await
+        }
+        UpdateSourceMetadata::GitHub {
+            source_label,
+            release: Ok(release),
+        } => {
+            prepare_github_update_package_inner(
+                paths,
+                &record,
+                release.as_ref(),
+                &source_label,
+                asset_selector,
+                network_client,
+                cancellation,
+            )
+            .await
+        }
+        UpdateSourceMetadata::GitHub {
+            release: Err(reason),
+            ..
+        }
+        | UpdateSourceMetadata::Unavailable(reason) => {
+            return PrepareOutcome::Failed(UpdatePlanFailure {
+                package_id: record.package_id,
+                reason,
+            });
+        }
+    };
+
+    match result {
         Ok(Some(prepared)) => PrepareOutcome::Prepared(Box::new(prepared)),
         Ok(None) => PrepareOutcome::UpToDate,
         Err(error) => PrepareOutcome::Failed(UpdatePlanFailure {
@@ -236,46 +418,31 @@ async fn prepare_update_package(
     }
 }
 
-async fn prepare_update_package_inner(
+async fn prepare_github_update_package_inner(
     paths: &FontbrewPaths,
     record: &ManifestPackageRecord,
+    release: &github::ResolvedGitHubRelease,
+    source_label: &str,
+    asset_selector: Option<&str>,
     network_client: &NetworkClient,
     cancellation: Arc<dyn CancellationToken>,
 ) -> Result<Option<PreparedUpdatePackage>> {
     ensure_not_cancelled(cancellation.as_ref())?;
-    if let Some(provider_id) = fontsource_provider_id(record) {
-        return prepare_fontsource_update_package_inner(
-            paths,
-            record,
-            provider_id,
-            network_client,
-            cancellation,
-        )
-        .await;
-    }
-
-    let Some(repo) = github_update_repo(record)? else {
-        return Err(FontbrewError::NoUpdateSource {
-            package_id: record.package_id.clone(),
-        });
-    };
-
-    ensure_not_cancelled(cancellation.as_ref())?;
-    let asset = github::resolve_release_asset(network_client, &repo, None, &repo.label()).await?;
-    ensure_not_cancelled(cancellation.as_ref())?;
-    match compare_versions(&record.version, &asset.version) {
+    match compare_versions(&record.version, &release.version) {
         VersionComparison::Equal | VersionComparison::CurrentIsNewer => return Ok(None),
         VersionComparison::Unknown => {
             return Err(FontbrewError::Manifest {
                 message: format!(
                     "could not compare current version {} with latest version {}",
                     record.version.as_str(),
-                    asset.version.as_str()
+                    release.version.as_str()
                 ),
             });
         }
         VersionComparison::CandidateIsNewer => {}
     }
+    let asset = github::select_resolved_release_asset(release, asset_selector, source_label)?;
+    ensure_not_cancelled(cancellation.as_ref())?;
 
     let source = prepared_source_for_update(record)?;
     let mut options = install::RemoteInstallOptions::for_update(record.package_id.clone());

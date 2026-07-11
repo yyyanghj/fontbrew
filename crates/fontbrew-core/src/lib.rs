@@ -23,7 +23,8 @@ pub use fontbrew::{
     ExtractArchiveRequest, ExtractedArchive, FetchInstallMetadataRequest, FontFileInput, Fontbrew,
     FontbrewOptions, InstallMetadata, InstallPlanSet, InstallSourcePreparation, InstallTarget,
     ParseFontsRequest, ParsedFontFaceInfo, ParsedFontFileInfo, ParsedFonts, PlanInstallRequest,
-    PrepareInstallAssetRequest, PrepareInstallSourceRequest,
+    PlanUpdateRequest, PrepareInstallAssetRequest, PrepareInstallSourceRequest,
+    UpdateAssetSelection, UpdateMetadata,
 };
 pub use model::*;
 pub use version::*;

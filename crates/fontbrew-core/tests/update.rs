@@ -2,7 +2,11 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use fontbrew_core::{
@@ -10,9 +14,10 @@ use fontbrew_core::{
     manifest::{ManifestPackageRecord, ManifestSource, ManifestStore, ManifestV1},
     platform::FontbrewPaths,
     CancellationToken, ExecutionPolicy, FamilyName, Fontbrew, FontbrewError, FontbrewOptions,
-    InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, ProgressEvent,
-    ProgressSink, UpdatePlan, UpdateRequest,
+    InstallRequest, InstallSource, PackageId, PackageVersion, PlanRisk, PlanUpdateRequest,
+    ProgressEvent, ProgressSink, UpdatePlan, UpdateRequest,
 };
+use std::collections::BTreeMap;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 mod support;
@@ -32,6 +37,16 @@ struct NeverCancelled;
 impl CancellationToken for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
+    }
+}
+
+struct FlagCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken for FlagCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -152,6 +167,18 @@ fn github_release_json(version: &str, asset_name: &str, download_url: &str) -> S
   ]
 }}]"#
     )
+}
+
+fn github_release_with_assets_json(version: &str, assets: &[(&str, &str)]) -> String {
+    let assets = assets
+        .iter()
+        .map(|(name, download_url)| {
+            format!(r#"{{"name":"{name}","browser_download_url":"{download_url}"}}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(r#"[{{"tag_name":"{version}","draft":false,"prerelease":false,"assets":[{assets}]}}]"#)
 }
 
 fn update_request(package_ids: Vec<PackageId>, jobs: Option<usize>) -> UpdateRequest {
@@ -579,6 +606,205 @@ async fn direct_github_update_reuses_manifest_family_boundary() {
 }
 
 #[tokio::test]
+async fn update_up_to_date_packages_from_same_github_release_fetch_metadata_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    let source = ManifestSource::GitHub {
+        owner: "example".to_string(),
+        repo: "shared-fonts".to_string(),
+    };
+    write_manifest(
+        &paths,
+        vec![
+            manifest_record(
+                "shared-sans",
+                "v1.0.0",
+                "Shared Sans",
+                source.clone(),
+                Some(source.clone()),
+            ),
+            manifest_record(
+                "shared-mono",
+                "v1.0.0",
+                "Shared Mono",
+                source.clone(),
+                Some(source),
+            ),
+        ],
+    );
+    let server = LocalHttpServer::start();
+    let release_path = github_releases_path("example", "shared-fonts");
+    server.respond_text(
+        &release_path,
+        github_release_with_assets_json(
+            "v1.0.0",
+            &[
+                ("shared-sans.zip", &server.url("/downloads/shared-sans.zip")),
+                ("shared-mono.zip", &server.url("/downloads/shared-mono.zip")),
+            ],
+        ),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let plan = app
+        .update_plan(
+            update_request(Vec::new(), Some(2)),
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("up-to-date packages should not require asset selection");
+
+    assert!(plan.prepared.is_empty());
+    assert!(plan.failed.is_empty());
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path == release_path)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn staged_update_uses_selected_asset_without_refetching_release_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_manifest(
+        &paths,
+        vec![manifest_record(
+            "source-code-pro",
+            "v1.0.0",
+            "Source Code Pro",
+            ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+            None,
+        )],
+    );
+    let server = LocalHttpServer::start();
+    let release_path = github_releases_path("adobe", "source-code-pro");
+    let selected_download_path = download_path("source-code-pro.zip");
+    server.respond_text(
+        &release_path,
+        github_release_with_assets_json(
+            "v2.0.0",
+            &[
+                ("source-code-pro.zip", &server.url(&selected_download_path)),
+                ("source-code-pro-web.zip", &server.url("/downloads/web.zip")),
+            ],
+        ),
+    );
+    server.respond_bytes(
+        &selected_download_path,
+        zip_with_fixture_font("SourceCodePro-Regular.ttf", "SourceCodePro-Regular.ttf"),
+    );
+    let app = fontbrew_with_server(paths, &server);
+
+    let metadata = app
+        .fetch_update_metadata(
+            update_request(Vec::new(), Some(1)),
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("fetch update metadata");
+    assert_eq!(metadata.asset_selections().len(), 1);
+    let mut asset_selectors = BTreeMap::new();
+    asset_selectors.insert(
+        package_id("source-code-pro"),
+        "source-code-pro.zip".to_string(),
+    );
+    let plan = app
+        .plan_update(
+            PlanUpdateRequest {
+                metadata,
+                asset_selectors,
+            },
+            &mut NoProgress,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("plan selected update");
+
+    assert_eq!(plan.prepared.len(), 1);
+    assert!(plan.failed.is_empty());
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path == release_path)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn update_metadata_cancels_in_flight_github_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = test_paths(&temp);
+    write_manifest(
+        &paths,
+        vec![manifest_record(
+            "source-code-pro",
+            "v1.0.0",
+            "Source Code Pro",
+            ManifestSource::GitHub {
+                owner: "adobe".to_string(),
+                repo: "source-code-pro".to_string(),
+            },
+            None,
+        )],
+    );
+    let server = LocalHttpServer::start();
+    let release_path = github_releases_path("adobe", "source-code-pro");
+    let response_gate = Arc::new(ResponseGate::blocked());
+    server.respond_text_with_gate(
+        &release_path,
+        github_release_json(
+            "v2.0.0",
+            "source-code-pro.zip",
+            &server.url("/downloads/source-code-pro.zip"),
+        ),
+        response_gate.clone(),
+    );
+    let app = fontbrew_with_server(paths, &server);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancellation = Arc::new(FlagCancellation {
+        cancelled: cancelled.clone(),
+    });
+    let update = tokio::spawn(async move {
+        app.fetch_update_metadata(update_request(Vec::new(), Some(1)), cancellation)
+            .await
+    });
+
+    tokio::task::spawn_blocking({
+        let response_gate = response_gate.clone();
+        move || response_gate.wait_for_arrival()
+    })
+    .await
+    .expect("wait for metadata request");
+    cancelled.store(true, Ordering::SeqCst);
+    let error = tokio::time::timeout(Duration::from_secs(1), update)
+        .await
+        .expect("metadata cancellation should not wait for the response")
+        .expect("metadata task should complete")
+        .expect_err("metadata request should be cancelled");
+    response_gate.release();
+
+    assert!(matches!(error, FontbrewError::Cancelled));
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.path == release_path)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn update_prepare_uses_bounded_parallelism_for_github_checks() {
     let temp = tempfile::tempdir().expect("tempdir");
     let paths = test_paths(&temp);
@@ -670,7 +896,7 @@ async fn update_plan_preserves_input_order_when_second_package_finishes_first() 
 
     let server = LocalHttpServer::start();
     let source_code_pro_release_gate = Arc::new(ResponseGate::blocked());
-    let inter_download_gate = Arc::new(ResponseGate::open());
+    let inter_release_gate = Arc::new(ResponseGate::open());
     let source_code_pro_download = server.url(&download_path("source-code-pro.zip"));
     server.respond_text_with_gate(
         &github_releases_path("adobe", "source-code-pro"),
@@ -683,19 +909,19 @@ async fn update_plan_preserves_input_order_when_second_package_finishes_first() 
     );
 
     let inter_download = server.url(&download_path("inter.zip"));
-    server.respond_text(
+    server.respond_text_with_gate(
         &github_releases_path("rsms", "inter"),
         github_release_json("v2.0.0", "inter.zip", &inter_download),
+        inter_release_gate.clone(),
     );
-    server.respond_bytes_with_gate(
+    server.respond_bytes(
         &download_path("inter.zip"),
         zip_with_fixture_font("Inter-Variable.ttf", "Inter-Variable.ttf"),
-        inter_download_gate.clone(),
     );
     let app = fontbrew_with_server(paths, &server);
     let release_gate = tokio::task::spawn_blocking(move || {
         source_code_pro_release_gate.wait_for_arrival();
-        inter_download_gate.wait_for_completion();
+        inter_release_gate.wait_for_completion();
         source_code_pro_release_gate.release();
     });
 

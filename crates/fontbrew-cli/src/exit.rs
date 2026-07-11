@@ -15,6 +15,7 @@ pub enum CliError {
     ApprovalRequired { risks: Vec<PlanRisk> },
     PromptUnavailable { risks: Vec<PlanRisk> },
     AssetSelectionRequired { source: String, assets: Vec<String> },
+    UpdateAssetSelectionRequired { source: String, assets: Vec<String> },
     FamilySelectionRequired { families: Vec<FamilyName> },
     SelfUpdateApprovalRequired { message: String },
     SelfUpdatePromptUnavailable { message: String },
@@ -34,7 +35,9 @@ impl CliError {
             Self::Json(_) => "json",
             Self::ApprovalRequired { .. } => "approval_required",
             Self::PromptUnavailable { .. } => "prompt_unavailable",
-            Self::AssetSelectionRequired { .. } => "ambiguous_assets",
+            Self::AssetSelectionRequired { .. } | Self::UpdateAssetSelectionRequired { .. } => {
+                "ambiguous_assets"
+            }
             Self::FamilySelectionRequired { .. } => "family_selection_required",
             Self::SelfUpdateApprovalRequired { .. } => "approval_required",
             Self::SelfUpdatePromptUnavailable { .. } => "prompt_unavailable",
@@ -66,6 +69,9 @@ impl CliError {
             ),
             Self::AssetSelectionRequired { source, assets } => {
                 ambiguous_assets_message(source, assets)
+            }
+            Self::UpdateAssetSelectionRequired { source, assets } => {
+                update_ambiguous_assets_message(source, assets)
             }
             Self::FamilySelectionRequired { families } => family_selection_message(families),
             Self::SelfUpdateApprovalRequired { message }
@@ -182,6 +188,19 @@ fn ambiguous_assets_message(source: &str, assets: &[String]) -> String {
     message
 }
 
+fn update_ambiguous_assets_message(source: &str, assets: &[String]) -> String {
+    let mut message = format!(
+        "multiple release assets matched for {source}; run fontbrew update in an interactive terminal to choose one"
+    );
+
+    if !assets.is_empty() {
+        message.push_str(". Matching assets: ");
+        message.push_str(&assets.join(", "));
+    }
+
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use fontbrew_core::{FontbrewError, PackageId};
@@ -205,6 +224,24 @@ mod tests {
         assert!(message.contains("--asset \"monaspace-static-v1.400.zip\""));
         assert!(message.contains("monaspace-variable-v1.400.zip"));
         assert!(!message.contains("PackageId"));
+    }
+
+    #[test]
+    fn update_ambiguous_assets_error_requires_interactive_terminal() {
+        let error = CliError::UpdateAssetSelectionRequired {
+            source: "githubnext/monaspace (monaspace-argon)".to_string(),
+            assets: vec![
+                "monaspace-static-v1.400.zip".to_string(),
+                "monaspace-variable-v1.400.zip".to_string(),
+            ],
+        };
+
+        let message = error.message();
+
+        assert_eq!(error.kind(), "ambiguous_assets");
+        assert!(message.contains("interactive terminal"));
+        assert!(message.contains("monaspace-static-v1.400.zip"));
+        assert!(!message.contains("--asset"));
     }
 
     #[test]

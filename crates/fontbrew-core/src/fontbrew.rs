@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     path::{Path, PathBuf},
     sync::Arc,
@@ -121,6 +122,25 @@ pub struct InstallPlanSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAssetSelection {
+    pub(crate) package_id: PackageId,
+    pub(crate) source_label: String,
+    pub(crate) assets: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct UpdateMetadata {
+    asset_selections: Vec<UpdateAssetSelection>,
+    inner: update::UpdateMetadata,
+}
+
+#[derive(Debug)]
+pub struct PlanUpdateRequest {
+    pub metadata: UpdateMetadata,
+    pub asset_selectors: BTreeMap<PackageId, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractArchiveRequest {
     pub archive_path: PathBuf,
     pub destination_dir: PathBuf,
@@ -177,6 +197,26 @@ impl InstallMetadata {
 
     pub fn asset_selection_label(&self) -> &str {
         &self.asset_selection_label
+    }
+}
+
+impl UpdateAssetSelection {
+    pub fn package_id(&self) -> &PackageId {
+        &self.package_id
+    }
+
+    pub fn source_label(&self) -> &str {
+        &self.source_label
+    }
+
+    pub fn assets(&self) -> &[String] {
+        &self.assets
+    }
+}
+
+impl UpdateMetadata {
+    pub fn asset_selections(&self) -> &[UpdateAssetSelection] {
+        &self.asset_selections
     }
 }
 
@@ -752,12 +792,53 @@ impl Fontbrew {
         progress: &mut dyn ProgressSink,
         cancellation: Arc<dyn CancellationToken>,
     ) -> Result<UpdatePlan> {
-        update::update_plan(
+        let metadata = self
+            .fetch_update_metadata(request, cancellation.clone())
+            .await?;
+        self.plan_update(
+            PlanUpdateRequest {
+                metadata,
+                asset_selectors: BTreeMap::new(),
+            },
+            progress,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn fetch_update_metadata(
+        &self,
+        request: UpdateRequest,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<UpdateMetadata> {
+        let inner = update::fetch_update_metadata(
             &self.paths,
             request,
             self.network_client.as_ref(),
+            cancellation,
+        )
+        .await?;
+        let asset_selections = inner.asset_selections();
+
+        Ok(UpdateMetadata {
+            asset_selections,
+            inner,
+        })
+    }
+
+    pub async fn plan_update(
+        &self,
+        request: PlanUpdateRequest,
+        progress: &mut dyn ProgressSink,
+        cancellation: Arc<dyn CancellationToken>,
+    ) -> Result<UpdatePlan> {
+        update::update_plan(
+            &self.paths,
+            request.metadata.inner,
+            request.asset_selectors,
+            self.network_client.as_ref(),
             progress,
-            cancellation.clone(),
+            cancellation,
         )
         .await
     }
