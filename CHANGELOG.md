@@ -2,6 +2,15 @@
 
 All notable changes to Fontbrew will be documented in this file.
 
+## 0.0.15 - 2026-07-11
+
+- 修复 GitHub 字体更新在包已是最新版时仍提前选择 release asset、因多资产歧义而
+  错误失败的问题；仅在确认存在新版本后才进入资产选择。
+- 同一次更新按 GitHub 仓库去重获取并复用 Release 元数据，从同一 Release 安装的
+  多个字体包不再重复请求；human 模式可按包交互选择新版本资产。
+- 保持更新元数据请求可取消，并为 JSON 与非交互模式提供正确的多资产错误提示，
+  不再建议 update 不支持的 `--asset` 参数。
+
 ## 0.0.14 - 2026-07-11
 
 - 移除 macOS 无法可靠生效的软链接激活策略和对应配置项；安装、重装和更新统一复制
